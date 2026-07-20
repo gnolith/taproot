@@ -1,0 +1,47 @@
+{
+  "name": "@gnolith/taproot",
+  "version": "0.0.0",
+  "description": "Wikibase-style knowledge layer for Gnolith.",
+  "type": "module",
+  "private": true,
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gnolith/taproot.git"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint src test",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "npm@11.9.0",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "eslint": "^10.7.0",
+    "prettier": "^3.9.5",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.64.0",
+    "vitest": "^3.2.4"
+  },
+  "license": "MIT"
+}
