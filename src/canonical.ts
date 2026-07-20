@@ -187,7 +187,11 @@ function canonicalizeDataValue(
   if (typeof value === 'string') return value;
   switch (datatype) {
     case 'wikibase-item':
-    case 'wikibase-property': {
+    case 'wikibase-property':
+    case 'wikibase-lexeme':
+    case 'wikibase-form':
+    case 'wikibase-sense':
+    case 'entity-schema': {
       const entityValue = value as EntityIdValue;
       return {
         'entity-type': entityValue['entity-type'],
@@ -377,14 +381,27 @@ export function validateSnak(value: unknown): asserts value is Snak {
 }
 
 function dataValueType(datatype: EntityDatatype): string {
-  if (datatype === 'wikibase-item' || datatype === 'wikibase-property') {
+  if (
+    [
+      'wikibase-item',
+      'wikibase-property',
+      'wikibase-lexeme',
+      'wikibase-form',
+      'wikibase-sense',
+      'entity-schema',
+    ].includes(datatype)
+  ) {
     return 'wikibase-entityid';
   }
   if (
     datatype === 'string' ||
     datatype === 'external-id' ||
     datatype === 'url' ||
-    datatype === 'commonsMedia'
+    datatype === 'commonsMedia' ||
+    datatype === 'math' ||
+    datatype === 'musical-notation' ||
+    datatype === 'geo-shape' ||
+    datatype === 'tabular-data'
   ) {
     return 'string';
   }
@@ -392,37 +409,77 @@ function dataValueType(datatype: EntityDatatype): string {
 }
 
 function validateDataValue(datatype: EntityDatatype, value: unknown): void {
-  if (['string', 'external-id', 'url', 'commonsMedia'].includes(datatype)) {
-    if (typeof value !== 'string') invalidDataValue(datatype);
+  if (
+    [
+      'string',
+      'external-id',
+      'url',
+      'commonsMedia',
+      'math',
+      'musical-notation',
+      'geo-shape',
+      'tabular-data',
+    ].includes(datatype)
+  ) {
+    if (
+      typeof value !== 'string' ||
+      (datatype === 'url' && !isAbsoluteUrl(value))
+    )
+      invalidDataValue(datatype);
     return;
   }
   if (!isRecord(value)) invalidDataValue(datatype);
   switch (datatype) {
     case 'wikibase-item':
-    case 'wikibase-property': {
-      const prefix = datatype === 'wikibase-item' ? 'Q' : 'P';
+    case 'wikibase-property':
+    case 'wikibase-lexeme':
+    case 'wikibase-form':
+    case 'wikibase-sense':
+    case 'entity-schema': {
+      const shape = {
+        'wikibase-item': { pattern: /^Q[1-9]\d*$/u, type: 'item' },
+        'wikibase-property': { pattern: /^P[1-9]\d*$/u, type: 'property' },
+        'wikibase-lexeme': { pattern: /^L[1-9]\d*$/u, type: 'lexeme' },
+        'wikibase-form': { pattern: /^L[1-9]\d*-F[1-9]\d*$/u, type: 'form' },
+        'wikibase-sense': { pattern: /^L[1-9]\d*-S[1-9]\d*$/u, type: 'sense' },
+        'entity-schema': { pattern: /^E[1-9]\d*$/u, type: 'entity-schema' },
+      }[datatype];
       if (
         typeof value.id !== 'string' ||
-        !value.id.startsWith(prefix) ||
-        !idPattern.test(value.id) ||
-        value['entity-type'] !==
-          (datatype === 'wikibase-item' ? 'item' : 'property')
+        !shape.pattern.test(value.id) ||
+        (value['numeric-id'] !== undefined &&
+          (!Number.isSafeInteger(value['numeric-id']) ||
+            value['numeric-id'] !==
+              Number(value.id.match(/^\D*(\d+)/u)?.[1]))) ||
+        value['entity-type'] !== shape.type
       )
         invalidDataValue(datatype);
       break;
     }
     case 'monolingualtext':
-      if (typeof value.text !== 'string' || typeof value.language !== 'string')
+      if (
+        typeof value.text !== 'string' ||
+        typeof value.language !== 'string' ||
+        !value.language
+      )
         invalidDataValue(datatype);
       break;
     case 'time':
       if (
         typeof value.time !== 'string' ||
+        !/^[+-]\d{4,}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u.test(value.time) ||
         !Number.isInteger(value.timezone) ||
+        Number(value.timezone) < -840 ||
+        Number(value.timezone) > 840 ||
         !Number.isInteger(value.before) ||
         !Number.isInteger(value.after) ||
         !Number.isInteger(value.precision) ||
-        typeof value.calendarmodel !== 'string'
+        Number(value.precision) < 0 ||
+        Number(value.precision) > 14 ||
+        Number(value.before) < 0 ||
+        Number(value.after) < 0 ||
+        typeof value.calendarmodel !== 'string' ||
+        !isAbsoluteUrl(value.calendarmodel)
       )
         invalidDataValue(datatype);
       break;
@@ -430,19 +487,36 @@ function validateDataValue(datatype: EntityDatatype, value: unknown): void {
       if (
         typeof value.amount !== 'string' ||
         typeof value.unit !== 'string' ||
+        (value.unit !== '1' && !isAbsoluteUrl(value.unit)) ||
+        !isDecimal(value.amount) ||
         (value.lowerBound !== undefined &&
-          typeof value.lowerBound !== 'string') ||
-        (value.upperBound !== undefined && typeof value.upperBound !== 'string')
+          (typeof value.lowerBound !== 'string' ||
+            !isDecimal(value.lowerBound))) ||
+        (value.upperBound !== undefined &&
+          (typeof value.upperBound !== 'string' ||
+            !isDecimal(value.upperBound)))
       )
         invalidDataValue(datatype);
       break;
     case 'globe-coordinate':
       if (
         typeof value.latitude !== 'number' ||
+        !Number.isFinite(value.latitude) ||
+        value.latitude < -90 ||
+        value.latitude > 90 ||
         typeof value.longitude !== 'number' ||
-        (value.altitude !== null && typeof value.altitude !== 'number') ||
-        (value.precision !== null && typeof value.precision !== 'number') ||
-        typeof value.globe !== 'string'
+        !Number.isFinite(value.longitude) ||
+        value.longitude < -180 ||
+        value.longitude > 180 ||
+        (value.altitude !== null &&
+          (typeof value.altitude !== 'number' ||
+            !Number.isFinite(value.altitude))) ||
+        (value.precision !== null &&
+          (typeof value.precision !== 'number' ||
+            !Number.isFinite(value.precision) ||
+            value.precision < 0)) ||
+        typeof value.globe !== 'string' ||
+        !isAbsoluteUrl(value.globe)
       )
         invalidDataValue(datatype);
       break;
@@ -505,12 +579,26 @@ function validateSitelinks(value: unknown): void {
       typeof sitelink.title !== 'string' ||
       !Array.isArray(sitelink.badges) ||
       sitelink.badges.some(
-        (badge) => typeof badge !== 'string' || !idPattern.test(badge),
+        (badge) => typeof badge !== 'string' || !/^Q[1-9]\d*$/u.test(badge),
       ) ||
-      (sitelink.url !== undefined && typeof sitelink.url !== 'string')
+      (sitelink.url !== undefined &&
+        (typeof sitelink.url !== 'string' || !isAbsoluteUrl(sitelink.url)))
     )
       throw new InvalidEntityError(`Invalid sitelink ${site}`);
   }
+}
+
+function isAbsoluteUrl(value: string): boolean {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isDecimal(value: string): boolean {
+  return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/u.test(value);
 }
 
 function sortLanguageMap(value: LanguageMap): LanguageMap {
@@ -550,4 +638,35 @@ export function cloneEntity(entity: WikibaseEntity): WikibaseEntity {
 
 export function cloneDataValue(value: DataValueValue): DataValueValue {
   return structuredClone(value);
+}
+
+export function createStatement(
+  entityId: EntityId,
+  mainsnak: Snak,
+  options: { id?: string; rank?: Statement['rank'] } = {},
+): Statement {
+  validateSnak(mainsnak);
+  return {
+    id: options.id ?? `${entityId}$${crypto.randomUUID()}`,
+    type: 'statement',
+    rank: options.rank ?? 'normal',
+    mainsnak: structuredClone(mainsnak),
+    qualifiers: {},
+    'qualifiers-order': [],
+    references: [],
+  };
+}
+
+export function createReference(
+  snaks: Record<PropertyId, Snak[]>,
+  hash = crypto.randomUUID().replace(/-/gu, ''),
+): Reference {
+  const order = Object.keys(snaks).sort() as PropertyId[];
+  const reference = {
+    hash,
+    snaks: structuredClone(snaks),
+    'snaks-order': order,
+  };
+  validateReference(reference);
+  return reference;
 }

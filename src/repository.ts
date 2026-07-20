@@ -1,5 +1,7 @@
 import {
   QuadPatchConflictError,
+  encodeTerm,
+  decodeTerm,
   prepareQuadPatch,
   type D1DatabaseLike,
   type D1PreparedStatementLike,
@@ -20,6 +22,8 @@ import {
   EntityNotFoundError,
   InvalidEntityError,
   InvalidStatementError,
+  InvalidCursorError,
+  BulkLimitError,
   PropertyDatatypeMismatchError,
   PropertyNotFoundError,
   QuadPatchTooLargeError,
@@ -30,16 +34,26 @@ import { buildEntityQuads } from './rdf.js';
 import { TAPROOT_RDF_VERSION } from './schema.js';
 import type {
   AliasMap,
+  AuditEvent,
+  AuditEventType,
+  Attribution,
+  BulkImportResult,
   EditMetadata,
   EntityDatatype,
+  EntityCommand,
   EntityId,
+  EntityIntegrityReport,
+  EntityListEntry,
+  EntityType,
   ExpectedRevision,
   Item,
   LanguageMap,
   Property,
   PropertyId,
   Reference,
+  ResolvedEntity,
   RevisionEntry,
+  Page,
   SearchResult,
   Sitelink,
   Snak,
@@ -54,6 +68,7 @@ interface EntityRow {
   entity_json: string;
   deleted_at: string | null;
   redirect_to: string | null;
+  content_hash?: string | null;
 }
 
 interface RevisionRow {
@@ -61,13 +76,47 @@ interface RevisionRow {
   revision: number;
   entity_json: string;
   actor: string | null;
+  attribution_json: string | null;
   edit_summary: string | null;
+  tags_json: string;
+  event_id: string;
+  content_hash: string;
+  parent_hash: string | null;
+  deleted_at: string | null;
+  redirect_to: EntityId | null;
+  created_at: string;
+}
+
+interface AuditRow {
+  event_sequence: number;
+  event_id: string;
+  entity_id: EntityId;
+  revision: number;
+  event_type: AuditEventType;
+  attribution_json: string | null;
+  edit_summary: string | null;
+  tags_json: string;
+  request_id: string | null;
+  content_hash: string;
+  parent_hash: string | null;
+  details_json: string;
   created_at: string;
 }
 
 interface Lifecycle {
   deletedAt: string | null;
   redirectTo: EntityId | null;
+}
+
+interface WriteContext {
+  eventId: string;
+  contentHash: string;
+  parentHash: string | null;
+  eventType: AuditEventType;
+  attribution: Attribution | null;
+  tags: string[];
+  createdAt: string;
+  lifecycle: Lifecycle;
 }
 
 export interface CreateItemInput extends EditMetadata {
@@ -92,14 +141,48 @@ export interface SearchOptions {
   language?: string;
   limit?: number;
   includeDeleted?: boolean;
+  cursor?: string;
+}
+
+export interface ListEntitiesOptions {
+  type?: EntityType;
+  includeDeleted?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface ListAuditOptions {
+  entityId?: EntityId;
+  requestId?: string;
+  type?: AuditEventType;
+  attributionId?: string;
+  tag?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface BulkImportOptions {
+  metadata?: EditMetadata;
+  continueOnError?: boolean;
+  mode?: 'create' | 'upsert';
 }
 
 export class TaprootRepository {
   readonly #db: D1DatabaseLike;
   readonly #options: Required<
-    Pick<TaprootOptions, 'baseIri' | 'mappingVersion' | 'maxEntityBytes'>
+    Pick<
+      TaprootOptions,
+      | 'baseIri'
+      | 'mappingVersion'
+      | 'maxEntityBytes'
+      | 'maxBulkEntities'
+      | 'clock'
+      | 'createId'
+      | 'validators'
+      | 'requireAttribution'
+    >
   > &
-    Pick<TaprootOptions, 'factory'>;
+    Pick<TaprootOptions, 'factory' | 'observe'>;
 
   constructor(db: D1DatabaseLike, options: TaprootOptions) {
     if (
@@ -111,17 +194,25 @@ export class TaprootRepository {
       );
     }
     try {
-      new URL(options.baseIri);
+      const base = new URL(options.baseIri);
+      if (base.protocol !== 'http:' && base.protocol !== 'https:')
+        throw new TypeError();
     } catch (cause) {
-      throw new InvalidEntityError('baseIri must be an absolute IRI', {
+      throw new InvalidEntityError('baseIri must be an absolute HTTP(S) IRI', {
         cause,
       });
     }
     this.#db = db;
     this.#options = {
       baseIri: options.baseIri,
-      mappingVersion: options.mappingVersion ?? '1',
+      mappingVersion: options.mappingVersion ?? TAPROOT_RDF_VERSION,
       maxEntityBytes: options.maxEntityBytes ?? MAX_ENTITY_BYTES,
+      maxBulkEntities: options.maxBulkEntities ?? 100,
+      clock: options.clock ?? (() => new Date()),
+      createId: options.createId ?? (() => crypto.randomUUID()),
+      validators: options.validators ?? [],
+      requireAttribution: options.requireAttribution ?? false,
+      ...(options.observe ? { observe: options.observe } : {}),
       ...(options.factory ? { factory: options.factory } : {}),
     };
   }
@@ -132,13 +223,34 @@ export class TaprootRepository {
     return storedFromRow(row);
   }
 
+  async resolveEntity(id: EntityId, maxDepth = 100): Promise<ResolvedEntity> {
+    if (!Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 1000)
+      throw new RangeError('maxDepth must be an integer from 0 through 1000');
+    const redirects: EntityId[] = [];
+    const seen = new Set<EntityId>();
+    let current = id;
+    for (;;) {
+      if (seen.has(current))
+        throw new InvalidEntityError(`Redirect cycle includes ${current}`);
+      seen.add(current);
+      const stored = await this.getEntity(current);
+      if (!stored.redirectTo)
+        return { ...stored, requestedId: id, resolvedId: current, redirects };
+      if (redirects.length >= maxDepth)
+        throw new InvalidEntityError(`Redirect depth exceeds ${maxDepth}`);
+      redirects.push(stored.redirectTo);
+      current = stored.redirectTo;
+    }
+  }
+
   async getEntityRevision(
     id: EntityId,
     revision: number,
   ): Promise<RevisionEntry> {
     const result = await this.#db
       .prepare(
-        `SELECT entity_id, revision, entity_json, actor, edit_summary, created_at
+        `SELECT entity_id, revision, entity_json, actor, attribution_json, edit_summary,
+           tags_json, event_id, content_hash, parent_hash, deleted_at, redirect_to, created_at
          FROM taproot_entity_revisions WHERE entity_id = ? AND revision = ?`,
       )
       .bind(id, revision)
@@ -156,13 +268,131 @@ export class TaprootRepository {
     assertLimit(limit);
     const result = await this.#db
       .prepare(
-        `SELECT entity_id, revision, entity_json, actor, edit_summary, created_at
+        `SELECT entity_id, revision, entity_json, actor, attribution_json, edit_summary,
+           tags_json, event_id, content_hash, parent_hash, deleted_at, redirect_to, created_at
          FROM taproot_entity_revisions WHERE entity_id = ?
          ORDER BY revision DESC LIMIT ?`,
       )
       .bind(id, limit)
       .all<RevisionRow>();
     return result.results.map(revisionFromRow);
+  }
+
+  async listEntityRevisionsPage(
+    id: EntityId,
+    options: { limit?: number; cursor?: string } = {},
+  ): Promise<Page<RevisionEntry>> {
+    const limit = options.limit ?? 50;
+    assertLimit(limit);
+    const before = options.cursor
+      ? decodeCursor<{ revision: number }>(options.cursor).revision
+      : Number.MAX_SAFE_INTEGER;
+    const result = await this.#db
+      .prepare(
+        `SELECT entity_id, revision, entity_json, actor, attribution_json, edit_summary,
+           tags_json, event_id, content_hash, parent_hash, deleted_at, redirect_to, created_at
+         FROM taproot_entity_revisions WHERE entity_id = ? AND revision < ?
+         ORDER BY revision DESC LIMIT ?`,
+      )
+      .bind(id, before, limit + 1)
+      .all<RevisionRow>();
+    return page(result.results.map(revisionFromRow), limit, (entry) => ({
+      revision: entry.revision,
+    }));
+  }
+
+  async listEntities(
+    options: ListEntitiesOptions = {},
+  ): Promise<Page<EntityListEntry>> {
+    const limit = options.limit ?? 50;
+    assertLimit(limit);
+    const after = options.cursor
+      ? decodeCursor<{ entityType: EntityType; numericId: number }>(
+          options.cursor,
+        )
+      : null;
+    const result = await this.#db
+      .prepare(
+        `SELECT entity_id, entity_json, deleted_at, redirect_to FROM taproot_entities
+         WHERE (? IS NULL OR entity_type > ? OR
+           (entity_type = ? AND CAST(substr(entity_id, 2) AS INTEGER) > ?))
+           AND (? IS NULL OR entity_type = ?)
+           AND (? = 1 OR deleted_at IS NULL)
+         ORDER BY entity_type, CAST(substr(entity_id, 2) AS INTEGER) LIMIT ?`,
+      )
+      .bind(
+        after?.entityType ?? null,
+        after?.entityType ?? null,
+        after?.entityType ?? null,
+        after?.numericId ?? 0,
+        options.type ?? null,
+        options.type ?? null,
+        options.includeDeleted ? 1 : 0,
+        limit + 1,
+      )
+      .all<EntityRow & { entity_id: EntityId }>();
+    return page(
+      result.results.map((row) => ({
+        entityId: row.entity_id,
+        ...storedFromRow(row),
+      })),
+      limit,
+      (entry) => ({
+        entityType: entry.entity.type,
+        numericId: entityNumericId(entry.entityId),
+      }),
+    );
+  }
+
+  async getAuditEvent(eventId: string): Promise<AuditEvent> {
+    const result = await this.#db
+      .prepare(
+        `SELECT rowid AS event_sequence, * FROM taproot_audit_events WHERE event_id = ?`,
+      )
+      .bind(eventId)
+      .all<AuditRow>();
+    const row = result.results[0];
+    if (!row)
+      throw new EntityNotFoundError(`Audit event ${eventId} was not found`);
+    return auditFromRow(row);
+  }
+
+  async listAuditEvents(
+    options: ListAuditOptions = {},
+  ): Promise<Page<AuditEvent>> {
+    const limit = options.limit ?? 50;
+    assertLimit(limit);
+    const before = options.cursor
+      ? decodeCursor<{ sequence: number }>(options.cursor).sequence
+      : Number.MAX_SAFE_INTEGER;
+    const result = await this.#db
+      .prepare(
+        `SELECT rowid AS event_sequence, * FROM taproot_audit_events
+         WHERE (? IS NULL OR entity_id = ?) AND (? IS NULL OR request_id = ?)
+           AND (? IS NULL OR event_type = ?)
+           AND (? IS NULL OR json_extract(attribution_json, '$.id') = ?)
+           AND (? IS NULL OR EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value = ?))
+           AND rowid < ?
+         ORDER BY rowid DESC LIMIT ?`,
+      )
+      .bind(
+        options.entityId ?? null,
+        options.entityId ?? null,
+        options.requestId ?? null,
+        options.requestId ?? null,
+        options.type ?? null,
+        options.type ?? null,
+        options.attributionId ?? null,
+        options.attributionId ?? null,
+        options.tag ?? null,
+        options.tag ?? null,
+        before,
+        limit + 1,
+      )
+      .all<AuditRow>();
+    return page(result.results.map(auditFromRow), limit, (event) => ({
+      sequence: event.sequence,
+    }));
   }
 
   async searchEntities(
@@ -207,6 +437,60 @@ export class TaprootRepository {
     }));
   }
 
+  async searchEntitiesPage(
+    query: string,
+    options: SearchOptions = {},
+  ): Promise<Page<SearchResult>> {
+    const limit = options.limit ?? 20;
+    assertLimit(limit);
+    const offset = options.cursor
+      ? decodeCursor<{ offset: number }>(options.cursor).offset
+      : 0;
+    if (!Number.isSafeInteger(offset) || offset < 0)
+      throw new InvalidCursorError('Search cursor offset is invalid');
+    const escaped = query.replace(/[\\%_]/gu, '\\$&');
+    const result = await this.#db
+      .prepare(
+        `SELECT t.entity_id, e.entity_type, t.language, t.term_type, t.value
+       FROM taproot_terms t JOIN taproot_entities e ON e.entity_id = t.entity_id
+       WHERE t.value LIKE ? ESCAPE '\\' COLLATE NOCASE
+         AND (? IS NULL OR t.language = ?) AND (? = 1 OR e.deleted_at IS NULL)
+       ORDER BY CASE WHEN t.value = ? COLLATE NOCASE THEN 0 ELSE 1 END,
+         t.value COLLATE NOCASE, t.entity_id, t.language, t.term_type, t.ordinal
+       LIMIT ? OFFSET ?`,
+      )
+      .bind(
+        `%${escaped}%`,
+        options.language ?? null,
+        options.language ?? null,
+        options.includeDeleted ? 1 : 0,
+        query,
+        limit + 1,
+        offset,
+      )
+      .all<{
+        entity_id: EntityId;
+        entity_type: EntityType;
+        language: string;
+        term_type: SearchResult['termType'];
+        value: string;
+      }>();
+    const items = result.results.slice(0, limit).map((row) => ({
+      entityId: row.entity_id,
+      entityType: row.entity_type,
+      language: row.language,
+      termType: row.term_type,
+      value: row.value,
+    }));
+    return {
+      items,
+      cursor:
+        result.results.length > limit
+          ? encodeCursor({ offset: offset + limit })
+          : null,
+    };
+  }
+
   async createItem(input: CreateItemInput = {}): Promise<WriteResult> {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const id = input.id ?? ((await this.#nextId('item')) as `Q${number}`);
@@ -219,10 +503,15 @@ export class TaprootRepository {
         claims: structuredClone(input.claims ?? {}),
         sitelinks: structuredClone(input.sitelinks ?? {}),
         lastrevid: 1,
-        modified: new Date().toISOString(),
+        modified: this.#options.clock().toISOString(),
       };
       try {
-        return await this.#create(entity, input, input.id === undefined);
+        return await this.#create(
+          entity,
+          input,
+          input.id === undefined,
+          'create',
+        );
       } catch (cause) {
         if (
           input.id !== undefined ||
@@ -252,10 +541,15 @@ export class TaprootRepository {
         aliases: structuredClone(input.aliases ?? {}),
         claims: structuredClone(input.claims ?? {}),
         lastrevid: 1,
-        modified: new Date().toISOString(),
+        modified: this.#options.clock().toISOString(),
       };
       try {
-        return await this.#create(entity, input, input.id === undefined);
+        return await this.#create(
+          entity,
+          input,
+          input.id === undefined,
+          'create',
+        );
       } catch (cause) {
         if (
           input.id !== undefined ||
@@ -279,7 +573,7 @@ export class TaprootRepository {
   ): Promise<WriteResult> {
     const imported = cloneEntity(entity);
     imported.lastrevid = Math.max(1, imported.lastrevid);
-    return this.#create(imported, metadata, false);
+    return this.#create(imported, metadata, false, 'import');
   }
 
   async replaceEntity(
@@ -289,27 +583,60 @@ export class TaprootRepository {
   ): Promise<WriteResult> {
     if (replacement.id !== id)
       throw new InvalidEntityError('Replacement entity id cannot change');
-    return this.#mutate(id, edit, () => cloneEntity(replacement));
+    return this.#mutate(
+      id,
+      edit,
+      () => cloneEntity(replacement),
+      undefined,
+      'update',
+    );
+  }
+
+  async revertEntity(
+    id: EntityId,
+    targetRevision: number,
+    edit: ExpectedRevision,
+  ): Promise<WriteResult> {
+    const target = await this.getEntityRevision(id, targetRevision);
+    return this.#mutate(
+      id,
+      edit,
+      () => cloneEntity(target.entity),
+      { deletedAt: target.deletedAt, redirectTo: target.redirectTo },
+      'revert',
+    );
   }
 
   async softDeleteEntity(
     id: EntityId,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
-    return this.#mutate(id, edit, (entity) => entity, {
-      deletedAt: new Date().toISOString(),
-      redirectTo: null,
-    });
+    return this.#mutate(
+      id,
+      edit,
+      (entity) => entity,
+      {
+        deletedAt: this.#options.clock().toISOString(),
+        redirectTo: null,
+      },
+      'delete',
+    );
   }
 
   async restoreEntity(
     id: EntityId,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
-    return this.#mutate(id, edit, (entity) => entity, {
-      deletedAt: null,
-      redirectTo: null,
-    });
+    return this.#mutate(
+      id,
+      edit,
+      (entity) => entity,
+      {
+        deletedAt: null,
+        redirectTo: null,
+      },
+      'restore',
+    );
   }
 
   async redirectEntity(
@@ -319,11 +646,36 @@ export class TaprootRepository {
   ): Promise<WriteResult> {
     if (id === target)
       throw new InvalidEntityError('An entity cannot redirect to itself');
-    await this.getEntity(target);
-    return this.#mutate(id, edit, (entity) => entity, {
-      deletedAt: null,
-      redirectTo: target,
-    });
+    const source = await this.getEntity(id);
+    const targetEntity = await this.getEntity(target);
+    if (source.entity.type !== targetEntity.entity.type)
+      throw new InvalidEntityError(
+        'Redirect source and target must have the same entity type',
+      );
+    if (targetEntity.deletedAt)
+      throw new InvalidEntityError(
+        'An entity cannot redirect to a deleted target',
+      );
+    const seen = new Set<EntityId>([id]);
+    let cursor: EntityId | null = target;
+    for (let depth = 0; cursor && depth < 100; depth += 1) {
+      if (seen.has(cursor))
+        throw new InvalidEntityError('Redirect would create a cycle');
+      seen.add(cursor);
+      cursor = (await this.getEntity(cursor)).redirectTo;
+    }
+    if (cursor)
+      throw new InvalidEntityError('Redirect chain exceeds 100 entities');
+    return this.#mutate(
+      id,
+      edit,
+      (entity) => entity,
+      {
+        deletedAt: null,
+        redirectTo: target,
+      },
+      'redirect',
+    );
   }
 
   async setLabel(
@@ -578,17 +930,399 @@ export class TaprootRepository {
     });
   }
 
+  async importEntities(
+    entities: Iterable<WikibaseEntity>,
+    options: BulkImportOptions = {},
+  ): Promise<BulkImportResult> {
+    const values = [...entities];
+    if (values.length > this.#options.maxBulkEntities) {
+      throw new BulkLimitError(
+        `Bulk import contains ${values.length} entities; maximum is ${this.#options.maxBulkEntities}`,
+      );
+    }
+    const succeeded = new Map<number, WriteResult>();
+    const failed: BulkImportResult['failed'] = [];
+    let pending = values
+      .map((entity, index) => ({ entity, index }))
+      .sort(
+        (a, b) =>
+          Number(a.entity.type !== 'property') -
+          Number(b.entity.type !== 'property'),
+      );
+    while (pending.length) {
+      const deferred: typeof pending = [];
+      let progress = false;
+      for (const entry of pending) {
+        try {
+          succeeded.set(
+            entry.index,
+            await this.#importOne(entry.entity, options),
+          );
+          progress = true;
+        } catch (error) {
+          if (error instanceof PropertyNotFoundError) {
+            deferred.push(entry);
+            continue;
+          }
+          failed.push({
+            index: entry.index,
+            entityId: entry.entity.id,
+            error: toError(error),
+          });
+          if (!options.continueOnError)
+            return {
+              succeeded: [...succeeded.entries()]
+                .sort(([a], [b]) => a - b)
+                .map(([, item]) => item),
+              failed,
+            };
+        }
+      }
+      if (!deferred.length) break;
+      if (!progress) {
+        for (const entry of options.continueOnError
+          ? deferred
+          : deferred.slice(0, 1)) {
+          failed.push({
+            index: entry.index,
+            entityId: entry.entity.id,
+            error: new PropertyNotFoundError(
+              `Entity ${entry.entity.id} has unresolved Property dependencies`,
+            ),
+          });
+        }
+        break;
+      }
+      pending = deferred;
+    }
+    return {
+      succeeded: [...succeeded.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([, item]) => item),
+      failed: failed.sort((a, b) => a.index - b.index),
+    };
+  }
+
+  async #importOne(
+    entity: WikibaseEntity,
+    options: BulkImportOptions,
+  ): Promise<WriteResult> {
+    if (options.mode === 'upsert') {
+      try {
+        const current = await this.getEntity(entity.id);
+        return await this.replaceEntity(entity.id, entity, {
+          expectedRevision: current.entity.lastrevid,
+          ...options.metadata,
+        });
+      } catch (error) {
+        if (!(error instanceof EntityNotFoundError)) throw error;
+      }
+    }
+    return this.importEntity(entity, options.metadata);
+  }
+
+  async applyCommands(
+    id: EntityId,
+    commands: readonly EntityCommand[],
+    edit: ExpectedRevision,
+  ): Promise<WriteResult> {
+    if (!commands.length)
+      throw new InvalidEntityError('At least one command is required');
+    if (commands.length > 100)
+      throw new BulkLimitError('An edit may contain at most 100 commands');
+    return this.#mutate(id, edit, (entity) => {
+      for (const command of commands) applyEntityCommand(entity, command);
+      return entity;
+    });
+  }
+
+  async exportEntities(options: ListEntitiesOptions = {}): Promise<string> {
+    const lines: string[] = [];
+    let cursor = options.cursor;
+    do {
+      const current = await this.listEntities({
+        ...options,
+        ...(cursor ? { cursor } : {}),
+        limit: options.limit ?? 100,
+      });
+      lines.push(
+        ...current.items.map(({ entity }) =>
+          exportEntityJson(entity, this.#options.maxEntityBytes),
+        ),
+      );
+      cursor = current.cursor ?? undefined;
+    } while (cursor);
+    return lines.length ? `${lines.join('\n')}\n` : '';
+  }
+
+  async inspectEntityIntegrity(id: EntityId): Promise<EntityIntegrityReport> {
+    const stored = await this.getEntity(id);
+    const entity = stored.entity;
+    const issues: EntityIntegrityReport['issues'] = [];
+    const revisionResult = await this.#db
+      .prepare(
+        `SELECT entity_id, revision, entity_json, actor, attribution_json, edit_summary,
+          tags_json, event_id, content_hash, parent_hash, deleted_at, redirect_to, created_at
+         FROM taproot_entity_revisions WHERE entity_id = ? AND revision = ?`,
+      )
+      .bind(id, entity.lastrevid)
+      .all<RevisionRow>();
+    const revision = revisionResult.results[0];
+    if (!revision) {
+      issues.push({
+        code: 'current-revision-mismatch',
+        message: `Current revision ${entity.lastrevid} is missing`,
+      });
+    } else {
+      const currentJson = exportEntityJson(
+        entity,
+        this.#options.maxEntityBytes,
+      );
+      if (revision.entity_json !== currentJson)
+        issues.push({
+          code: 'revision-json-mismatch',
+          message: 'Current entity JSON differs from its immutable revision',
+        });
+      if (
+        revision.content_hash !==
+        (await revisionContentHash(revision.entity_json, {
+          deletedAt: revision.deleted_at,
+          redirectTo: revision.redirect_to,
+        }))
+      )
+        issues.push({
+          code: 'content-hash-mismatch',
+          message: 'Revision content hash is invalid',
+        });
+      const audit = await this.#db
+        .prepare(
+          `SELECT 1 AS found FROM taproot_audit_events WHERE event_id = ?`,
+        )
+        .bind(revision.event_id)
+        .all<{ found: number }>();
+      if (!audit.results.length)
+        issues.push({
+          code: 'audit-event-missing',
+          message: `Audit event ${revision.event_id} is missing`,
+        });
+    }
+    const actualTerms = await this.#db
+      .prepare(
+        `SELECT language, term_type, value, ordinal FROM taproot_terms WHERE entity_id = ? ORDER BY language, term_type, ordinal`,
+      )
+      .bind(id)
+      .all<Record<string, unknown>>();
+    const expectedTerms = terms(entity)
+      .map(({ language, termType, value, ordinal }) => ({
+        language,
+        term_type: termType,
+        value,
+        ordinal,
+      }))
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const normalizedActual = [...actualTerms.results].sort((a, b) =>
+      JSON.stringify(a).localeCompare(JSON.stringify(b)),
+    );
+    if (JSON.stringify(normalizedActual) !== JSON.stringify(expectedTerms))
+      issues.push({
+        code: 'term-projection-mismatch',
+        message: 'Search term projection differs from canonical JSON',
+      });
+    const expectedQuads = this.#lifecycleQuads(entity, {
+      deletedAt: stored.deletedAt,
+      redirectTo: stored.redirectTo,
+    });
+    const actualQuads = await this.#ownedQuads(id);
+    if (!sameQuads(actualQuads, expectedQuads))
+      issues.push({
+        code: 'rdf-projection-mismatch',
+        message: 'RDF projection differs from canonical JSON',
+      });
+    return {
+      entityId: id,
+      revision: entity.lastrevid,
+      valid: issues.length === 0,
+      issues,
+    };
+  }
+
+  async inspectTaprootIntegrity(
+    options: ListEntitiesOptions = {},
+  ): Promise<Page<EntityIntegrityReport>> {
+    const entities = await this.listEntities({
+      ...options,
+      includeDeleted: true,
+    });
+    const reports: EntityIntegrityReport[] = [];
+    for (const { entityId } of entities.items)
+      reports.push(await this.inspectEntityIntegrity(entityId));
+    return { items: reports, cursor: entities.cursor };
+  }
+
+  async verifyAuditChain(id: EntityId): Promise<EntityIntegrityReport> {
+    const stored = await this.getEntity(id);
+    const rows = await this.#db
+      .prepare(
+        `SELECT entity_id, revision, entity_json, actor, attribution_json, edit_summary,
+        tags_json, event_id, content_hash, parent_hash, deleted_at, redirect_to, created_at
+       FROM taproot_entity_revisions WHERE entity_id = ? ORDER BY revision`,
+      )
+      .bind(id)
+      .all<RevisionRow>();
+    const issues: EntityIntegrityReport['issues'] = [];
+    let parentHash: string | null = null;
+    let expectedRevision = rows.results[0]?.revision ?? 1;
+    for (const row of rows.results) {
+      if (row.revision !== expectedRevision)
+        issues.push({
+          code: 'current-revision-mismatch',
+          message: `Revision sequence skips from ${expectedRevision - 1} to ${row.revision}`,
+        });
+      const actualHash = await revisionContentHash(row.entity_json, {
+        deletedAt: row.deleted_at,
+        redirectTo: row.redirect_to,
+      });
+      if (actualHash !== row.content_hash)
+        issues.push({
+          code: 'content-hash-mismatch',
+          message: `Revision ${row.revision} content hash is invalid`,
+        });
+      if (row.parent_hash !== parentHash)
+        issues.push({
+          code: 'content-hash-mismatch',
+          message: `Revision ${row.revision} does not link to its parent`,
+        });
+      const audit = await this.#db
+        .prepare(
+          `SELECT content_hash, parent_hash FROM taproot_audit_events WHERE event_id = ?`,
+        )
+        .bind(row.event_id)
+        .all<{ content_hash: string; parent_hash: string | null }>();
+      if (
+        !audit.results[0] ||
+        audit.results[0].content_hash !== row.content_hash ||
+        audit.results[0].parent_hash !== row.parent_hash
+      )
+        issues.push({
+          code: 'audit-event-missing',
+          message: `Revision ${row.revision} has no matching audit event`,
+        });
+      parentHash = row.content_hash;
+      expectedRevision = row.revision + 1;
+    }
+    if (rows.results.at(-1)?.revision !== stored.entity.lastrevid)
+      issues.push({
+        code: 'current-revision-mismatch',
+        message: 'Current entity revision is not the chain head',
+      });
+    return {
+      entityId: id,
+      revision: stored.entity.lastrevid,
+      valid: issues.length === 0,
+      issues,
+    };
+  }
+
+  async repairEntityProjection(
+    id: EntityId,
+    metadata: EditMetadata = {},
+  ): Promise<EntityIntegrityReport> {
+    const started = performance.now();
+    const stored = await this.getEntity(id);
+    const before = await this.inspectEntityIntegrity(id);
+    const expected = this.#lifecycleQuads(stored.entity, {
+      deletedAt: stored.deletedAt,
+      redirectTo: stored.redirectTo,
+    });
+    const actual = await this.#ownedQuads(id);
+    const patch = this.#preparePatch({ insert: expected });
+    const json = exportEntityJson(stored.entity, this.#options.maxEntityBytes);
+    const parentHash = await revisionContentHash(json, {
+      deletedAt: stored.deletedAt,
+      redirectTo: stored.redirectTo,
+    });
+    const context = await this.#writeContext(
+      stored.entity,
+      json,
+      metadata,
+      parentHash,
+      'repair',
+      {
+        deletedAt: stored.deletedAt,
+        redirectTo: stored.redirectTo,
+      },
+    );
+    const statements: D1PreparedStatementLike[] = [
+      this.#db
+        .prepare(`DELETE FROM taproot_terms WHERE entity_id = ?`)
+        .bind(id),
+      this.#termsInsert(stored.entity),
+      this.#auditInsert(stored.entity, metadata, context),
+      ...patch.statements,
+      ...this.#ownershipPatch(id, actual, expected).statements,
+    ];
+    try {
+      await this.#db.batch(statements);
+    } catch (error) {
+      const cause = toError(error);
+      this.#emitObservation(
+        'repair',
+        started,
+        'error',
+        id,
+        stored.entity.lastrevid,
+        cause,
+      );
+      if (isEventIdUniqueError(cause))
+        throw new RevisionConflictError(
+          'Generated audit event id already exists',
+          { cause },
+        );
+      throw cause;
+    }
+    const after = await this.inspectEntityIntegrity(id);
+    this.#emitObservation(
+      'repair',
+      started,
+      'success',
+      id,
+      stored.entity.lastrevid,
+    );
+    if (
+      !after.valid &&
+      before.issues.some(
+        (issue) =>
+          issue.code !== 'term-projection-mismatch' &&
+          issue.code !== 'rdf-projection-mismatch',
+      )
+    ) {
+      return after;
+    }
+    return after;
+  }
+
   async #create(
     entity: WikibaseEntity,
     metadata: EditMetadata,
     allocated: boolean,
+    eventType: AuditEventType,
   ): Promise<WriteResult> {
+    const started = performance.now();
     validateEntity(entity);
     if (await this.#loadRow(entity.id))
       throw new EntityAlreadyExistsError(`Entity ${entity.id} already exists`);
     await this.#validatePropertyDatatypes(entity);
+    await this.#runValidators(entity, null, metadata);
     const json = exportEntityJson(entity, this.#options.maxEntityBytes);
     const lifecycle = { deletedAt: null, redirectTo: null };
+    const context = await this.#writeContext(
+      entity,
+      json,
+      metadata,
+      null,
+      eventType,
+      lifecycle,
+    );
     const newQuads = this.#lifecycleQuads(entity, lifecycle);
     const marker = revisionQuad(entity, this.#options);
     const patch = this.#preparePatch({ forbid: [marker], insert: newQuads });
@@ -630,21 +1364,46 @@ export class TaprootRepository {
           json,
           entity.modified,
         ),
-      this.#revisionInsert(entity, json, metadata),
+      this.#revisionInsert(entity, json, metadata, context),
+      this.#auditInsert(entity, metadata, context),
       this.#termsInsert(entity),
     );
     const patchOffset = statements.length;
     statements.push(...patch.statements);
+    const ownership = this.#ownershipPatch(entity.id, [], newQuads);
+    const ownershipOffset = statements.length;
+    statements.push(...ownership.statements);
     try {
       const results = await this.#db.batch(statements);
-      return {
+      const result = {
         entityId: entity.id,
         previousRevision: null,
         newRevision: entity.lastrevid,
         entity,
-        quadPatch: patch.readResult(results, patchOffset),
+        quadPatch: {
+          ...patch.readResult(results, patchOffset),
+          deleted: ownership.deleted(results, ownershipOffset),
+        },
+        eventId: context.eventId,
+        contentHash: context.contentHash,
       };
+      this.#emitObservation(
+        eventType,
+        started,
+        'success',
+        entity.id,
+        entity.lastrevid,
+      );
+      return result;
     } catch (cause) {
+      this.#emitObservation(
+        eventType,
+        started,
+        'error',
+        entity.id,
+        entity.lastrevid,
+        cause,
+      );
       const mapped = patch.mapError(cause);
       if (isAssertionError(mapped) && (await this.#namespaceMismatch())) {
         throw new SchemaMismatchError(
@@ -661,6 +1420,11 @@ export class TaprootRepository {
           { cause: mapped },
         );
       }
+      if (isEventIdUniqueError(mapped))
+        throw new RevisionConflictError(
+          'Generated audit event id already exists',
+          { cause: mapped },
+        );
       if (allocated && isAssertionError(mapped))
         throw new RevisionConflictError(
           `ID allocation for ${entity.id} was stale`,
@@ -675,7 +1439,9 @@ export class TaprootRepository {
     edit: ExpectedRevision,
     transform: (entity: WikibaseEntity) => WikibaseEntity,
     lifecycleOverride?: Lifecycle,
+    eventType: AuditEventType = 'update',
   ): Promise<WriteResult> {
+    const started = performance.now();
     const row = await this.#loadRow(id);
     if (!row) throw new EntityNotFoundError(`Entity ${id} was not found`);
     const stored = storedFromRow(row);
@@ -687,7 +1453,7 @@ export class TaprootRepository {
     const previous = stored.entity.lastrevid;
     const next = transform(cloneEntity(stored.entity));
     next.lastrevid = previous + 1;
-    next.modified = new Date().toISOString();
+    next.modified = this.#options.clock().toISOString();
     if (next.id !== id || next.type !== stored.entity.type)
       throw new InvalidEntityError('Entity identity and type are immutable');
     if (
@@ -700,17 +1466,28 @@ export class TaprootRepository {
     }
     validateEntity(next);
     await this.#validatePropertyDatatypes(next);
-    const json = exportEntityJson(next, this.#options.maxEntityBytes);
+    await this.#runValidators(next, stored.entity, edit);
     const oldLifecycle = {
       deletedAt: stored.deletedAt,
       redirectTo: stored.redirectTo,
     };
+    const json = exportEntityJson(next, this.#options.maxEntityBytes);
+    const parentHash =
+      row.content_hash ??
+      (await revisionContentHash(row.entity_json, oldLifecycle));
     const newLifecycle = lifecycleOverride ?? oldLifecycle;
+    const context = await this.#writeContext(
+      next,
+      json,
+      edit,
+      parentHash,
+      eventType,
+      newLifecycle,
+    );
     const oldQuads = this.#lifecycleQuads(stored.entity, oldLifecycle);
     const newQuads = this.#lifecycleQuads(next, newLifecycle);
     const patch = this.#preparePatch({
       require: [revisionQuad(stored.entity, this.#options)],
-      delete: oldQuads,
       insert: newQuads,
     });
     const statements: D1PreparedStatementLike[] = [
@@ -734,7 +1511,8 @@ export class TaprootRepository {
         id,
         next.lastrevid,
       ),
-      this.#revisionInsert(next, json, edit),
+      this.#revisionInsert(next, json, edit, context),
+      this.#auditInsert(next, edit, context),
       this.#db
         .prepare('DELETE FROM taproot_terms WHERE entity_id = ?')
         .bind(id),
@@ -742,16 +1520,34 @@ export class TaprootRepository {
     ];
     const patchOffset = statements.length;
     statements.push(...patch.statements);
+    const ownership = this.#ownershipPatch(id, oldQuads, newQuads);
+    const ownershipOffset = statements.length;
+    statements.push(...ownership.statements);
     try {
       const results = await this.#db.batch(statements);
-      return {
+      const result = {
         entityId: id,
         previousRevision: previous,
         newRevision: next.lastrevid,
         entity: next,
-        quadPatch: patch.readResult(results, patchOffset),
+        quadPatch: {
+          ...patch.readResult(results, patchOffset),
+          deleted: ownership.deleted(results, ownershipOffset),
+        },
+        eventId: context.eventId,
+        contentHash: context.contentHash,
       };
+      this.#emitObservation(eventType, started, 'success', id, next.lastrevid);
+      return result;
     } catch (cause) {
+      this.#emitObservation(
+        eventType,
+        started,
+        'error',
+        id,
+        next.lastrevid,
+        cause,
+      );
       const mapped = patch.mapError(cause);
       if (isAssertionError(mapped) && (await this.#namespaceMismatch())) {
         throw new SchemaMismatchError(
@@ -769,6 +1565,11 @@ export class TaprootRepository {
           { cause: mapped },
         );
       }
+      if (isEventIdUniqueError(mapped))
+        throw new RevisionConflictError(
+          'Generated audit event id already exists',
+          { cause: mapped },
+        );
       throw mapped;
     }
   }
@@ -781,6 +1582,94 @@ export class TaprootRepository {
         throw new QuadPatchTooLargeError(cause.message, { cause });
       throw cause;
     }
+  }
+
+  #ownershipPatch(
+    entityId: EntityId,
+    oldQuads: RDF.Quad[],
+    newQuads: RDF.Quad[],
+  ) {
+    const oldRows = oldQuads.map(ownershipRow);
+    const newRows = newQuads.map(ownershipRow);
+    const statements: D1PreparedStatementLike[] = [
+      this.#db
+        .prepare(`DELETE FROM taproot_rdf_ownership WHERE entity_id = ?`)
+        .bind(entityId),
+    ];
+    if (newRows.length) {
+      statements.push(
+        this.#db
+          .prepare(
+            `INSERT INTO taproot_rdf_ownership(entity_id, subject_key, predicate_key, object_key, graph_key)
+         SELECT ?, json_extract(value, '$.subjectKey'), json_extract(value, '$.predicateKey'),
+           json_extract(value, '$.objectKey'), json_extract(value, '$.graphKey') FROM json_each(?)`,
+          )
+          .bind(entityId, JSON.stringify(newRows)),
+      );
+    }
+    let deleteIndex = -1;
+    if (oldRows.length) {
+      deleteIndex = statements.length;
+      statements.push(
+        this.#db
+          .prepare(
+            `DELETE FROM rdf_quads AS q WHERE EXISTS (
+          SELECT 1 FROM json_each(?) old
+          WHERE q.subject_key = json_extract(old.value, '$.subjectKey')
+            AND q.predicate_key = json_extract(old.value, '$.predicateKey')
+            AND q.object_key = json_extract(old.value, '$.objectKey')
+            AND q.graph_key = json_extract(old.value, '$.graphKey')
+        ) AND NOT EXISTS (
+          SELECT 1 FROM taproot_rdf_ownership own
+          WHERE own.subject_key = q.subject_key AND own.predicate_key = q.predicate_key
+            AND own.object_key = q.object_key AND own.graph_key = q.graph_key
+        )`,
+          )
+          .bind(JSON.stringify(oldRows)),
+      );
+    }
+    return {
+      statements,
+      deleted: (
+        results: Awaited<ReturnType<D1DatabaseLike['batch']>>,
+        offset: number,
+      ) =>
+        deleteIndex < 0
+          ? 0
+          : Number(results[offset + deleteIndex]?.meta?.changes ?? 0),
+    };
+  }
+
+  async #ownedQuads(entityId: EntityId): Promise<RDF.Quad[]> {
+    const result = await this.#db
+      .prepare(
+        `SELECT q.subject_key, q.subject_json, q.predicate_key, q.predicate_json,
+        q.object_key, q.object_json, q.graph_key, q.graph_json
+       FROM taproot_rdf_ownership own JOIN rdf_quads q
+        ON q.subject_key = own.subject_key AND q.predicate_key = own.predicate_key
+        AND q.object_key = own.object_key AND q.graph_key = own.graph_key
+       WHERE own.entity_id = ?`,
+      )
+      .bind(entityId)
+      .all<{
+        subject_key: string;
+        subject_json: string;
+        predicate_key: string;
+        predicate_json: string;
+        object_key: string;
+        object_json: string;
+        graph_key: string;
+        graph_json: string;
+      }>();
+    const factory = this.#options.factory ?? new DataFactory();
+    return result.results.map((row) =>
+      factory.quad(
+        decodeTerm(row.subject_json) as RDF.Quad_Subject,
+        decodeTerm(row.predicate_json) as RDF.Quad_Predicate,
+        decodeTerm(row.object_json) as RDF.Quad_Object,
+        decodeTerm(row.graph_json) as RDF.Quad_Graph,
+      ),
+    );
   }
 
   async #validatePropertyDatatypes(entity: WikibaseEntity): Promise<void> {
@@ -844,7 +1733,10 @@ export class TaprootRepository {
   async #loadRow(id: EntityId): Promise<EntityRow | undefined> {
     const result = await this.#db
       .prepare(
-        'SELECT entity_json, deleted_at, redirect_to FROM taproot_entities WHERE entity_id = ?',
+        `SELECT e.entity_json, e.deleted_at, e.redirect_to, r.content_hash
+         FROM taproot_entities e LEFT JOIN taproot_entity_revisions r
+           ON r.entity_id = e.entity_id AND r.revision = e.revision
+         WHERE e.entity_id = ?`,
       )
       .bind(id)
       .all<EntityRow>();
@@ -855,18 +1747,140 @@ export class TaprootRepository {
     entity: WikibaseEntity,
     json: string,
     metadata: EditMetadata,
+    context: WriteContext,
   ): D1PreparedStatementLike {
     return this.#db
       .prepare(
-        `INSERT INTO taproot_entity_revisions(entity_id, revision, entity_json, actor, edit_summary) VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO taproot_entity_revisions(
+          entity_id, revision, entity_json, actor, attribution_json, edit_summary,
+          tags_json, event_id, content_hash, parent_hash, deleted_at, redirect_to, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         entity.id,
         entity.lastrevid,
         json,
-        metadata.actor ?? null,
+        metadata.actor ?? context.attribution?.id ?? null,
+        context.attribution ? JSON.stringify(context.attribution) : null,
         metadata.editSummary ?? null,
+        JSON.stringify(context.tags),
+        context.eventId,
+        context.contentHash,
+        context.parentHash,
+        context.lifecycle.deletedAt,
+        context.lifecycle.redirectTo,
+        context.createdAt,
       );
+  }
+
+  #auditInsert(
+    entity: WikibaseEntity,
+    metadata: EditMetadata,
+    context: WriteContext,
+  ): D1PreparedStatementLike {
+    return this.#db
+      .prepare(
+        `INSERT INTO taproot_audit_events(
+          event_id, entity_id, revision, event_type, attribution_json, edit_summary,
+          tags_json, request_id, content_hash, parent_hash, details_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        context.eventId,
+        entity.id,
+        entity.lastrevid,
+        context.eventType,
+        context.attribution ? JSON.stringify(context.attribution) : null,
+        metadata.editSummary ?? null,
+        JSON.stringify(context.tags),
+        metadata.requestId ?? null,
+        context.contentHash,
+        context.parentHash,
+        JSON.stringify(context.lifecycle),
+        context.createdAt,
+      );
+  }
+
+  async #writeContext(
+    entity: WikibaseEntity,
+    json: string,
+    metadata: EditMetadata,
+    parentHash: string | null,
+    eventType: AuditEventType,
+    lifecycle: Lifecycle,
+  ): Promise<WriteContext> {
+    const attribution = normalizeAttribution(metadata);
+    if (this.#options.requireAttribution && !attribution)
+      throw new InvalidEntityError(
+        'Attribution is required for knowledge writes',
+      );
+    const tags = normalizeTags(metadata.tags);
+    if (
+      metadata.editSummary !== undefined &&
+      (typeof metadata.editSummary !== 'string' ||
+        metadata.editSummary.length > 1_000)
+    )
+      throw new InvalidEntityError(
+        'Edit summary must be a string of at most 1,000 characters',
+      );
+    if (
+      metadata.requestId !== undefined &&
+      (typeof metadata.requestId !== 'string' ||
+        !metadata.requestId.trim() ||
+        metadata.requestId.length > 256)
+    )
+      throw new InvalidEntityError(
+        'Request id must contain 1 through 256 characters',
+      );
+    const eventId = this.#options.createId();
+    if (typeof eventId !== 'string' || !eventId.trim() || eventId.length > 128)
+      throw new InvalidEntityError(
+        'Generated event id must contain 1 through 128 characters',
+      );
+    return {
+      eventId,
+      contentHash: await revisionContentHash(json, lifecycle),
+      parentHash,
+      eventType,
+      attribution,
+      tags,
+      createdAt: this.#options.clock().toISOString(),
+      lifecycle,
+    };
+  }
+
+  async #runValidators(
+    entity: WikibaseEntity,
+    previous: WikibaseEntity | null,
+    metadata: EditMetadata,
+  ): Promise<void> {
+    for (const validator of this.#options.validators) {
+      await validator(entity, { previous, metadata });
+    }
+  }
+
+  #emitObservation(
+    operation: string,
+    started: number,
+    outcome: 'success' | 'error',
+    entityId?: EntityId,
+    revision?: number,
+    error?: unknown,
+  ): void {
+    if (!this.#options.observe) return;
+    try {
+      const result = this.#options.observe({
+        operation,
+        outcome,
+        durationMs: performance.now() - started,
+        ...(entityId ? { entityId } : {}),
+        ...(revision === undefined ? {} : { revision }),
+        ...(error === undefined ? {} : { error }),
+      });
+      if (result instanceof Promise) void result.catch(() => undefined);
+    } catch {
+      // Observers are deliberately isolated from committed knowledge writes.
+    }
   }
 
   #termsInsert(entity: WikibaseEntity): D1PreparedStatementLike {
@@ -964,7 +1978,36 @@ function revisionFromRow(row: RevisionRow): RevisionEntry {
     revision: row.revision,
     entity: parseEntityJson(row.entity_json),
     actor: row.actor,
+    attribution: row.attribution_json
+      ? (JSON.parse(row.attribution_json) as Attribution)
+      : null,
     editSummary: row.edit_summary,
+    tags: JSON.parse(row.tags_json) as string[],
+    eventId: row.event_id,
+    contentHash: row.content_hash,
+    parentHash: row.parent_hash,
+    deletedAt: row.deleted_at,
+    redirectTo: row.redirect_to,
+    createdAt: row.created_at,
+  };
+}
+
+function auditFromRow(row: AuditRow): AuditEvent {
+  return {
+    sequence: row.event_sequence,
+    eventId: row.event_id,
+    entityId: row.entity_id,
+    revision: row.revision,
+    type: row.event_type,
+    attribution: row.attribution_json
+      ? (JSON.parse(row.attribution_json) as Attribution)
+      : null,
+    editSummary: row.edit_summary,
+    tags: JSON.parse(row.tags_json) as string[],
+    requestId: row.request_id,
+    contentHash: row.content_hash,
+    parentHash: row.parent_hash,
+    lifecycle: JSON.parse(row.details_json) as AuditEvent['lifecycle'],
     createdAt: row.created_at,
   };
 }
@@ -1039,6 +2082,131 @@ function collectSnak(snak: Snak, used: Map<PropertyId, EntityDatatype>): void {
   used.set(snak.property, snak.datatype);
 }
 
+function applyEntityCommand(
+  entity: WikibaseEntity,
+  command: EntityCommand,
+): void {
+  switch (command.type) {
+    case 'set-label':
+      entity.labels[command.language] = {
+        language: command.language,
+        value: command.value,
+      };
+      break;
+    case 'remove-label':
+      delete entity.labels[command.language];
+      break;
+    case 'set-description':
+      entity.descriptions[command.language] = {
+        language: command.language,
+        value: command.value,
+      };
+      break;
+    case 'remove-description':
+      delete entity.descriptions[command.language];
+      break;
+    case 'add-alias':
+      (entity.aliases[command.language] ??= []).push({
+        language: command.language,
+        value: command.value,
+      });
+      break;
+    case 'remove-alias': {
+      const aliases = entity.aliases[command.language];
+      if (!aliases?.[command.ordinal])
+        throw new InvalidEntityError('Alias does not exist');
+      aliases.splice(command.ordinal, 1);
+      if (!aliases.length) delete entity.aliases[command.language];
+      break;
+    }
+    case 'set-sitelink':
+      if (entity.type !== 'item')
+        throw new InvalidEntityError('Properties cannot have sitelinks');
+      entity.sitelinks[command.site] = structuredClone(command.value);
+      break;
+    case 'remove-sitelink':
+      if (entity.type !== 'item')
+        throw new InvalidEntityError('Properties cannot have sitelinks');
+      delete entity.sitelinks[command.site];
+      break;
+    case 'add-statement': {
+      const property = command.statement.mainsnak.property;
+      (entity.claims[property] ??= []).push(structuredClone(command.statement));
+      break;
+    }
+    case 'replace-statement': {
+      const located = locateStatement(entity, command.statementId);
+      located.statements.splice(located.index, 1);
+      const property = command.statement.mainsnak.property;
+      (entity.claims[property] ??= []).push(structuredClone(command.statement));
+      if (!located.statements.length) delete entity.claims[located.property];
+      break;
+    }
+    case 'remove-statement': {
+      const located = locateStatement(entity, command.statementId);
+      located.statements.splice(located.index, 1);
+      if (!located.statements.length) delete entity.claims[located.property];
+      break;
+    }
+    case 'set-statement-rank':
+      locateStatement(entity, command.statementId).statement.rank =
+        command.rank;
+      break;
+    case 'add-qualifier': {
+      validateSnak(command.snak);
+      const statement = locateStatement(entity, command.statementId).statement;
+      const property = command.snak.property;
+      if (!statement.qualifiers[property]) {
+        statement.qualifiers[property] = [];
+        statement['qualifiers-order'].push(property);
+      }
+      statement.qualifiers[property].push(structuredClone(command.snak));
+      break;
+    }
+    case 'remove-qualifier': {
+      const statement = locateStatement(entity, command.statementId).statement;
+      const snaks = statement.qualifiers[command.property];
+      if (!snaks?.[command.ordinal])
+        throw new InvalidStatementError('Qualifier does not exist');
+      snaks.splice(command.ordinal, 1);
+      if (!snaks.length) {
+        delete statement.qualifiers[command.property];
+        statement['qualifiers-order'] = statement['qualifiers-order'].filter(
+          (id) => id !== command.property,
+        );
+      }
+      break;
+    }
+    case 'add-reference':
+      locateStatement(entity, command.statementId).statement.references.push(
+        structuredClone(command.reference),
+      );
+      break;
+    case 'replace-reference': {
+      const references = locateStatement(entity, command.statementId).statement
+        .references;
+      const index = references.findIndex(({ hash }) => hash === command.hash);
+      if (index < 0)
+        throw new InvalidStatementError(
+          `Reference ${command.hash} does not exist`,
+        );
+      references[index] = structuredClone(command.reference);
+      break;
+    }
+    case 'remove-reference': {
+      const references = locateStatement(entity, command.statementId).statement
+        .references;
+      const index = references.findIndex(({ hash }) => hash === command.hash);
+      if (index < 0)
+        throw new InvalidStatementError(
+          `Reference ${command.hash} does not exist`,
+        );
+      references.splice(index, 1);
+      break;
+    }
+  }
+}
+
 function revisionQuad(
   entity: WikibaseEntity,
   options: TaprootOptions,
@@ -1076,4 +2244,153 @@ function isRevisionUniqueError(cause: Error): boolean {
   return /UNIQUE constraint failed: taproot_entity_revisions\.entity_id, taproot_entity_revisions\.revision/iu.test(
     cause.message,
   );
+}
+
+function isEventIdUniqueError(cause: Error): boolean {
+  return /UNIQUE constraint failed: taproot_audit_events\.event_id/iu.test(
+    cause.message,
+  );
+}
+
+function normalizeAttribution(metadata: EditMetadata): Attribution | null {
+  if (metadata.actor !== undefined && typeof metadata.actor !== 'string')
+    throw new InvalidEntityError('Legacy actor must be a string');
+  const attribution =
+    metadata.attribution ??
+    (metadata.actor ? { id: metadata.actor, kind: 'human' as const } : null);
+  if (!attribution) return null;
+  if (typeof attribution.id !== 'string' || !attribution.id.trim())
+    throw new InvalidEntityError('Attribution id cannot be empty');
+  if (!['human', 'agent', 'import', 'system'].includes(attribution.kind))
+    throw new InvalidEntityError('Attribution kind is invalid');
+  for (const field of ['name', 'organization', 'tool'] as const) {
+    const value = attribution[field];
+    if (value !== undefined && (typeof value !== 'string' || !value.trim()))
+      throw new InvalidEntityError(
+        `Attribution ${field} must be a non-empty string`,
+      );
+  }
+  if (new TextEncoder().encode(JSON.stringify(attribution)).byteLength > 16_384)
+    throw new InvalidEntityError('Attribution cannot exceed 16 KiB');
+  for (const field of ['url'] as const) {
+    const value = attribution[field];
+    if (value !== undefined) {
+      if (typeof value !== 'string')
+        throw new InvalidEntityError(`Attribution ${field} must be a string`);
+      try {
+        new URL(value);
+      } catch (cause) {
+        throw new InvalidEntityError(
+          `Attribution ${field} must be an absolute URL`,
+          { cause },
+        );
+      }
+    }
+  }
+  return structuredClone(attribution);
+}
+
+function normalizeTags(tags: string[] | undefined): string[] {
+  if (!tags) return [];
+  if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== 'string'))
+    throw new InvalidEntityError('Tags must be an array of strings');
+  if (tags.length > 50)
+    throw new InvalidEntityError('An edit may have at most 50 tags');
+  const normalized = [...new Set(tags.map((tag) => tag.trim()))].sort();
+  if (normalized.some((tag) => !tag || tag.length > 64))
+    throw new InvalidEntityError('Tags must contain 1 through 64 characters');
+  return normalized;
+}
+
+async function sha256(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function revisionContentHash(
+  json: string,
+  lifecycle: Lifecycle,
+): Promise<string> {
+  return sha256(`${json}\n${JSON.stringify(lifecycle)}`);
+}
+
+function encodeCursor(value: unknown): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replace(/\+/gu, '-')
+    .replace(/\//gu, '_')
+    .replace(/=+$/gu, '');
+}
+
+function decodeCursor<T>(cursor: string): T {
+  try {
+    const padded =
+      cursor.replace(/-/gu, '+').replace(/_/gu, '/') +
+      '='.repeat((4 - (cursor.length % 4)) % 4);
+    const binary = atob(padded);
+    return JSON.parse(
+      new TextDecoder().decode(
+        Uint8Array.from(binary, (character) => character.charCodeAt(0)),
+      ),
+    ) as T;
+  } catch (cause) {
+    throw new InvalidCursorError('Cursor is invalid', { cause });
+  }
+}
+
+function page<T>(
+  items: T[],
+  limit: number,
+  cursorValue: (item: T) => unknown,
+): Page<T> {
+  const hasMore = items.length > limit;
+  const visible = items.slice(0, limit);
+  return {
+    items: visible,
+    cursor:
+      hasMore && visible.length
+        ? encodeCursor(cursorValue(visible[visible.length - 1] as T))
+        : null,
+  };
+}
+
+function termKey(term: RDF.Term): string {
+  return JSON.stringify({
+    type: term.termType,
+    value: term.value,
+    language: term.termType === 'Literal' ? term.language : undefined,
+    datatype: term.termType === 'Literal' ? term.datatype.value : undefined,
+  });
+}
+
+function quadKeyValue(quad: RDF.Quad): string {
+  return [quad.subject, quad.predicate, quad.object, quad.graph]
+    .map(termKey)
+    .join('|');
+}
+
+function ownershipRow(quad: RDF.Quad) {
+  return {
+    subjectKey: encodeTerm(quad.subject).key,
+    predicateKey: encodeTerm(quad.predicate).key,
+    objectKey: encodeTerm(quad.object).key,
+    graphKey: encodeTerm(quad.graph).key,
+  };
+}
+
+function sameQuads(left: RDF.Quad[], right: RDF.Quad[]): boolean {
+  const a = [...new Set(left.map(quadKeyValue))].sort();
+  const b = [...new Set(right.map(quadKeyValue))].sort();
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }

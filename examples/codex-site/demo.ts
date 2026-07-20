@@ -32,6 +32,12 @@ export async function runTaprootDemo(db: D1DatabaseLike) {
     descriptions: {
       en: { language: 'en', value: 'English mathematician' },
     },
+    attribution: {
+      id: 'agent:demo-curator',
+      kind: 'agent',
+      tool: 'gnolith-mcp',
+    },
+    requestId: 'demo-request',
   });
   const occupation: Statement = {
     id: `${created.entityId}$occupation`,
@@ -134,9 +140,13 @@ export async function runTaprootDemo(db: D1DatabaseLike) {
   }
 
   const sparqlResults: unknown = await response.json();
+  const audit = await taproot.listAuditEvents({ entityId: created.entityId });
+  const integrity = await taproot.inspectEntityIntegrity(created.entityId);
   return {
     entityJson: exportEntityJson(special.entity),
     sparqlResults,
     staleRevisionRejected,
+    audit: audit.items,
+    integrity,
   };
 }

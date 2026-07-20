@@ -1,5 +1,3 @@
-// Taproot has no public API while its compatibility contract is being defined.
-export {};
 import type { D1DatabaseLike } from '@gnolith/diamond';
 export type { D1DatabaseLike } from '@gnolith/diamond';
 import {
@@ -7,10 +5,14 @@ import {
   type CreateItemInput,
   type CreatePropertyInput,
   type SearchOptions,
+  type ListEntitiesOptions,
+  type ListAuditOptions,
+  type BulkImportOptions,
 } from './repository.js';
 import type {
   EditMetadata,
   EntityId,
+  EntityCommand,
   ExpectedRevision,
   PropertyId,
   Reference,
@@ -48,6 +50,13 @@ export const getEntityRevision = (
   revision: number,
 ) => createTaproot(db, options).getEntityRevision(id, revision);
 
+export const resolveEntity = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  id: EntityId,
+  maxDepth?: number,
+) => createTaproot(db, options).resolveEntity(id, maxDepth);
+
 export const listEntityRevisions = (
   db: D1DatabaseLike,
   options: TaprootOptions,
@@ -55,12 +64,44 @@ export const listEntityRevisions = (
   limit?: number,
 ) => createTaproot(db, options).listEntityRevisions(id, limit);
 
+export const listEntityRevisionsPage = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  id: EntityId,
+  page?: { limit?: number; cursor?: string },
+) => createTaproot(db, options).listEntityRevisionsPage(id, page);
+
 export const searchEntities = (
   db: D1DatabaseLike,
   options: TaprootOptions,
   query: string,
   search?: SearchOptions,
 ) => createTaproot(db, options).searchEntities(query, search);
+
+export const searchEntitiesPage = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  query: string,
+  search?: SearchOptions,
+) => createTaproot(db, options).searchEntitiesPage(query, search);
+
+export const listEntities = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  list?: ListEntitiesOptions,
+) => createTaproot(db, options).listEntities(list);
+
+export const getAuditEvent = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  eventId: string,
+) => createTaproot(db, options).getAuditEvent(eventId);
+
+export const listAuditEvents = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  list?: ListAuditOptions,
+) => createTaproot(db, options).listAuditEvents(list);
 
 export const createItem = (
   db: D1DatabaseLike,
@@ -81,6 +122,52 @@ export const importEntity = (
   metadata?: EditMetadata,
 ) => createTaproot(db, options).importEntity(entity, metadata);
 
+export const importEntities = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  entities: Iterable<WikibaseEntity>,
+  bulk?: BulkImportOptions,
+) => createTaproot(db, options).importEntities(entities, bulk);
+
+export const exportEntities = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  list?: ListEntitiesOptions,
+) => createTaproot(db, options).exportEntities(list);
+
+export const applyCommands = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  id: EntityId,
+  commands: readonly EntityCommand[],
+  edit: ExpectedRevision,
+) => createTaproot(db, options).applyCommands(id, commands, edit);
+
+export const inspectEntityIntegrity = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  id: EntityId,
+) => createTaproot(db, options).inspectEntityIntegrity(id);
+
+export const inspectTaprootIntegrity = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  list?: ListEntitiesOptions,
+) => createTaproot(db, options).inspectTaprootIntegrity(list);
+
+export const verifyAuditChain = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  id: EntityId,
+) => createTaproot(db, options).verifyAuditChain(id);
+
+export const repairEntityProjection = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  id: EntityId,
+  metadata?: EditMetadata,
+) => createTaproot(db, options).repairEntityProjection(id, metadata);
+
 export const replaceEntity = (
   db: D1DatabaseLike,
   options: TaprootOptions,
@@ -88,6 +175,14 @@ export const replaceEntity = (
   entity: WikibaseEntity,
   edit: ExpectedRevision,
 ) => createTaproot(db, options).replaceEntity(id, entity, edit);
+
+export const revertEntity = (
+  db: D1DatabaseLike,
+  options: TaprootOptions,
+  id: EntityId,
+  targetRevision: number,
+  edit: ExpectedRevision,
+) => createTaproot(db, options).revertEntity(id, targetRevision, edit);
 
 export const softDeleteEntity = (
   db: D1DatabaseLike,

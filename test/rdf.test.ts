@@ -28,14 +28,27 @@ function statement(
           property,
           datatype,
           datavalue: {
-            type:
-              datatype === 'wikibase-item' || datatype === 'wikibase-property'
-                ? 'wikibase-entityid'
-                : ['string', 'external-id', 'url', 'commonsMedia'].includes(
-                      datatype,
-                    )
-                  ? 'string'
-                  : datatype,
+            type: [
+              'wikibase-item',
+              'wikibase-property',
+              'wikibase-lexeme',
+              'wikibase-form',
+              'wikibase-sense',
+              'entity-schema',
+            ].includes(datatype)
+              ? 'wikibase-entityid'
+              : [
+                    'string',
+                    'external-id',
+                    'url',
+                    'commonsMedia',
+                    'math',
+                    'musical-notation',
+                    'geo-shape',
+                    'tabular-data',
+                  ].includes(datatype)
+                ? 'string'
+                : datatype,
             value: value as never,
           },
         };
@@ -94,10 +107,21 @@ describe('canonical JSON and RDF projection', () => {
         'wikibase-property',
         { 'entity-type': 'property', 'numeric-id': 2, id: 'P2' },
       ],
+      [
+        'wikibase-lexeme',
+        { 'entity-type': 'lexeme', 'numeric-id': 2, id: 'L2' },
+      ],
+      ['wikibase-form', { 'entity-type': 'form', id: 'L2-F1' }],
+      ['wikibase-sense', { 'entity-type': 'sense', id: 'L2-S1' }],
+      ['entity-schema', { 'entity-type': 'entity-schema', id: 'E2' }],
       ['string', 'hello'],
       ['external-id', 'ABC-123'],
       ['url', 'https://example.test/resource'],
       ['commonsMedia', 'Example.jpg'],
+      ['math', 'E = mc^2'],
+      ['musical-notation', "c'4 d'4"],
+      ['geo-shape', 'Data:Example.map'],
+      ['tabular-data', 'Data:Example.tab'],
       ['monolingualtext', { language: 'en', text: 'hello' }],
       [
         'time',

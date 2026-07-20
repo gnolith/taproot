@@ -3,6 +3,10 @@ import type * as RDF from '@rdfjs/types';
 export const ENTITY_DATATYPES = [
   'wikibase-item',
   'wikibase-property',
+  'wikibase-lexeme',
+  'wikibase-form',
+  'wikibase-sense',
+  'entity-schema',
   'string',
   'external-id',
   'url',
@@ -11,10 +15,20 @@ export const ENTITY_DATATYPES = [
   'time',
   'quantity',
   'globe-coordinate',
+  'math',
+  'musical-notation',
+  'geo-shape',
+  'tabular-data',
 ] as const;
 
 export type EntityDatatype = (typeof ENTITY_DATATYPES)[number];
 export type EntityId = `Q${number}` | `P${number}`;
+export type ReferencedEntityId =
+  | EntityId
+  | `L${number}`
+  | `L${number}-F${number}`
+  | `L${number}-S${number}`
+  | `E${number}`;
 export type PropertyId = `P${number}`;
 export type EntityType = 'item' | 'property';
 export type Rank = 'preferred' | 'normal' | 'deprecated';
@@ -29,9 +43,10 @@ export type LanguageMap = Record<string, LanguageValue>;
 export type AliasMap = Record<string, LanguageValue[]>;
 
 export interface EntityIdValue {
-  'entity-type': 'item' | 'property';
+  'entity-type':
+    'item' | 'property' | 'lexeme' | 'form' | 'sense' | 'entity-schema';
   'numeric-id'?: number;
-  id: EntityId;
+  id: ReferencedEntityId;
 }
 
 export interface MonolingualTextValue {
@@ -103,7 +118,7 @@ export interface Statement {
 export interface Sitelink {
   site: string;
   title: string;
-  badges: EntityId[];
+  badges: Array<`Q${number}`>;
   url?: string;
 }
 
@@ -137,9 +152,24 @@ export interface MappingOptions {
   factory?: RDF.DataFactory;
 }
 
+export type ActorKind = 'human' | 'agent' | 'import' | 'system';
+
+export interface Attribution {
+  id: string;
+  kind: ActorKind;
+  name?: string;
+  organization?: string;
+  tool?: string;
+  url?: string;
+}
+
 export interface EditMetadata {
+  /** @deprecated Use attribution. Kept for source compatibility. */
   actor?: string;
+  attribution?: Attribution;
   editSummary?: string;
+  tags?: string[];
+  requestId?: string;
 }
 
 export interface ExpectedRevision extends EditMetadata {
@@ -152,6 +182,8 @@ export interface WriteResult {
   newRevision: number;
   entity: WikibaseEntity;
   quadPatch: { deleted: number; inserted: number };
+  eventId: string;
+  contentHash: string;
 }
 
 export interface StoredEntity {
@@ -160,14 +192,128 @@ export interface StoredEntity {
   redirectTo: EntityId | null;
 }
 
+export interface ResolvedEntity extends StoredEntity {
+  requestedId: EntityId;
+  resolvedId: EntityId;
+  redirects: EntityId[];
+}
+
 export interface RevisionEntry {
   entityId: EntityId;
   revision: number;
   entity: WikibaseEntity;
   actor: string | null;
+  attribution: Attribution | null;
   editSummary: string | null;
+  tags: string[];
+  eventId: string;
+  contentHash: string;
+  parentHash: string | null;
+  deletedAt: string | null;
+  redirectTo: EntityId | null;
   createdAt: string;
 }
+
+export type AuditEventType =
+  | 'create'
+  | 'update'
+  | 'revert'
+  | 'delete'
+  | 'restore'
+  | 'redirect'
+  | 'import'
+  | 'repair';
+
+export interface AuditEvent {
+  sequence: number;
+  eventId: string;
+  entityId: EntityId;
+  revision: number;
+  type: AuditEventType;
+  attribution: Attribution | null;
+  editSummary: string | null;
+  tags: string[];
+  requestId: string | null;
+  contentHash: string;
+  parentHash: string | null;
+  lifecycle: { deletedAt: string | null; redirectTo: EntityId | null };
+  createdAt: string;
+}
+
+export interface Page<T> {
+  items: T[];
+  cursor: string | null;
+}
+
+export interface EntityListEntry extends StoredEntity {
+  entityId: EntityId;
+}
+
+export interface IntegrityIssue {
+  code:
+    | 'current-revision-mismatch'
+    | 'revision-json-mismatch'
+    | 'content-hash-mismatch'
+    | 'audit-event-missing'
+    | 'term-projection-mismatch'
+    | 'rdf-projection-mismatch';
+  message: string;
+}
+
+export interface EntityIntegrityReport {
+  entityId: EntityId;
+  revision: number;
+  valid: boolean;
+  issues: IntegrityIssue[];
+}
+
+export interface BulkImportResult {
+  succeeded: WriteResult[];
+  failed: Array<{ index: number; entityId?: EntityId; error: Error }>;
+}
+
+export interface TaprootObservation {
+  operation: string;
+  outcome: 'success' | 'error';
+  durationMs: number;
+  entityId?: EntityId;
+  revision?: number;
+  error?: unknown;
+}
+
+export type EntityCommand =
+  | { type: 'set-label'; language: string; value: string }
+  | { type: 'remove-label'; language: string }
+  | { type: 'set-description'; language: string; value: string }
+  | { type: 'remove-description'; language: string }
+  | { type: 'add-alias'; language: string; value: string }
+  | { type: 'remove-alias'; language: string; ordinal: number }
+  | { type: 'set-sitelink'; site: string; value: Sitelink }
+  | { type: 'remove-sitelink'; site: string }
+  | { type: 'add-statement'; statement: Statement }
+  | { type: 'replace-statement'; statementId: string; statement: Statement }
+  | { type: 'remove-statement'; statementId: string }
+  | { type: 'set-statement-rank'; statementId: string; rank: Rank }
+  | { type: 'add-qualifier'; statementId: string; snak: Snak }
+  | {
+      type: 'remove-qualifier';
+      statementId: string;
+      property: PropertyId;
+      ordinal: number;
+    }
+  | { type: 'add-reference'; statementId: string; reference: Reference }
+  | {
+      type: 'replace-reference';
+      statementId: string;
+      hash: string;
+      reference: Reference;
+    }
+  | { type: 'remove-reference'; statementId: string; hash: string };
+
+export type TaprootValidator = (
+  entity: WikibaseEntity,
+  context: { previous: WikibaseEntity | null; metadata: EditMetadata },
+) => void | Promise<void>;
 
 export interface SearchResult {
   entityId: EntityId;
@@ -179,4 +325,10 @@ export interface SearchResult {
 
 export interface TaprootOptions extends MappingOptions {
   maxEntityBytes?: number;
+  maxBulkEntities?: number;
+  clock?: () => Date;
+  createId?: () => string;
+  validators?: TaprootValidator[];
+  observe?: (observation: TaprootObservation) => void | Promise<void>;
+  requireAttribution?: boolean;
 }

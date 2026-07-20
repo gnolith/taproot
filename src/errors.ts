@@ -1,7 +1,13 @@
 export class TaprootError extends Error {
+  readonly code: string;
+
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = new.target.name;
+    this.code = new.target.name
+      .replace(/Error$/u, '')
+      .replace(/([a-z])([A-Z])/gu, '$1_$2')
+      .toUpperCase();
   }
 }
 
@@ -17,3 +23,6 @@ export class DuplicateStatementIdError extends InvalidStatementError {}
 export class EntityTooLargeError extends InvalidEntityError {}
 export class QuadPatchTooLargeError extends TaprootError {}
 export class SchemaMismatchError extends TaprootError {}
+export class InvalidCursorError extends TaprootError {}
+export class IntegrityError extends TaprootError {}
+export class BulkLimitError extends TaprootError {}

@@ -3,8 +3,8 @@
 **The D1-native, Wikibase-compatible knowledge layer for Gnolith.**
 
 Taproot gives a Codex Site one authoritative Wikibase-shaped Item/Property
-document, immutable revisions, typed editing commands, term search, and a
-deterministic RDF projection stored and queried by
+document, tamper-evident revision and attribution history, typed and batched
+editing commands, term search, repairable projections, and a deterministic RDF projection stored and queried by
 [`@gnolith/diamond`](https://github.com/gnolith/diamond).
 
 > One canonical entity document, one deterministic RDF projection, one atomic
@@ -12,21 +12,28 @@ deterministic RDF projection stored and queried by
 
 ## Status
 
-The core is implemented but the package remains private and version `0.0.0`
-until compatibility fixtures, release packaging, and the public dependency
-version are finalized. Do not publish the scaffold tag.
+The complete package API is implemented as `0.1.0-rc.0`. Publication remains
+intentionally disabled only because Taproot currently tests against an
+unreleased local Diamond patch dependency. That release-order guard is not an
+unfinished product surface.
 
 ## What it owns
 
 - Items and Properties with Wikibase-style canonical JSON.
 - Labels, descriptions, aliases, sitelinks, statements, qualifiers,
   references, ranks, and all three snak types.
-- The required entity, string, external ID, URL, Commons media,
-  monolingual-text, time, quantity, and coordinate datatypes.
+- Item, Property, Lexeme, Form, Sense, and EntitySchema links; string,
+  external ID, URL, Commons media, monolingual text, time,
+  quantity, coordinate, math, musical notation, geo-shape, and tabular-data
+  datatypes.
 - Atomic Q/P ID allocation, current documents, immutable revisions, lifecycle
-  state, and the term-search projection in D1.
+  history, structured human/agent/import/system attribution, tags, request
+  correlation, audit events, and the term-search projection in D1.
 - A complete deterministic Wikibase-shaped RDF closure with truthy/best-rank,
   special-value, and full-value behavior.
+- Cursor reads, bounded import/upsert and NDJSON export, multi-command edits,
+  redirect resolution, integrity verification, deterministic repair, schema/RDF
+  migrations, validation policies, and write observations.
 
 It does not own authentication, MCP, agents, tasks, UI, wiki articles, media
 bytes, or arbitrary SPARQL Update. Canonical entity JSON is authoritative;
@@ -55,8 +62,11 @@ const item = await knowledge.createItem({
 });
 ```
 
-For migration-driven deployments, apply Diamond's migrations and then
-[`migrations/0001_taproot.sql`](migrations/0001_taproot.sql).
+For migration-driven deployments, apply Diamond's migrations and the numbered
+Taproot SQL files, then call `initializeTaproot()`. The initializer performs
+the application-level SHA-256 backfill that SQLite SQL alone cannot perform,
+reprojects older RDF mapping versions, installs immutability triggers, and is
+safe to run on every startup/deploy.
 
 ## Editing
 
@@ -70,16 +80,26 @@ batch back.
 ```ts
 const edited = await knowledge.setLabel(item.entityId, 'fr', 'Ada Lovelace', {
   expectedRevision: item.newRevision,
-  actor: 'agent:cataloguer',
+  attribution: {
+    id: 'agent:cataloguer',
+    kind: 'agent',
+    tool: 'gnolith-mcp',
+  },
   editSummary: 'add French label',
+  tags: ['agent'],
+  requestId: 'mcp-request-123',
 });
 ```
 
 The public API includes reads/search; create/import/replace; soft delete,
 restore, and redirect; all term/sitelink commands; complete statement,
-qualifier, reference, and rank commands; and canonical JSON parse, validate,
-and export helpers. Top-level function forms are exported alongside
+qualifier, reference, and rank commands; audit/history and integrity reads;
+bulk workflows; and canonical JSON parse, validate, create, and export helpers. Top-level function forms are exported alongside
 `TaprootRepository`.
+
+Set `requireAttribution: true` to reject unattributed writes. `validators`
+provide host policy checks without coupling Taproot to authentication, and
+`observe` receives isolated success/error timing records for committed writes.
 
 ## SPARQL prefixes
 
@@ -95,9 +115,14 @@ Diamond enforces a 1.9 MB aggregate encoded quad-patch limit; Taproot reports
 that as `QuadPatchTooLargeError`. Store PDFs, images, audio, OCR, transcripts,
 and article bodies externally and represent them as knowledge Items.
 
-See the [Codex Site example](examples/codex-site/README.md) and
-[`COMPATIBILITY.md`](COMPATIBILITY.md). Run `npm run check` for the complete
-local gate.
+Bulk imports default to create-only, can opt into `upsert`, are capped at 100
+entities by default, and commit one entity atomically at a time. Multi-command
+edits apply up to 100 commands in one revision. All list limits are capped at 500.
+
+See the [Codex Site example](examples/codex-site/README.md),
+[`COMPATIBILITY.md`](COMPATIBILITY.md), and the architecture, API, operations,
+and release documents under `docs/`. Run `npm run check && npm run pack:check`
+for the complete local gate.
 
 ## License
 

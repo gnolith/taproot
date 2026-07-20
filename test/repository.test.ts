@@ -38,6 +38,84 @@ async function environment() {
 }
 
 describe('TaprootRepository on Workerd D1', () => {
+  it('upgrades a version-one database and backfills immutable audit history', async () => {
+    const miniflare = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok") } }',
+      compatibilityDate: '2026-07-19',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: { DB: crypto.randomUUID() },
+    });
+    try {
+      const db = (await miniflare.getD1Database(
+        'DB',
+      )) as unknown as D1DatabaseLike;
+      await db.batch([
+        db.prepare(
+          `CREATE TABLE taproot_entities (entity_id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, datatype TEXT, revision INTEGER NOT NULL, entity_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, modified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, deleted_at TEXT, redirect_to TEXT) STRICT`,
+        ),
+        db.prepare(
+          `CREATE TABLE taproot_entity_revisions (entity_id TEXT NOT NULL, revision INTEGER NOT NULL, entity_json TEXT NOT NULL, actor TEXT, edit_summary TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (entity_id, revision), FOREIGN KEY (entity_id) REFERENCES taproot_entities(entity_id)) STRICT`,
+        ),
+        db.prepare(
+          `CREATE TABLE taproot_id_counters (entity_type TEXT PRIMARY KEY, next_numeric_id INTEGER NOT NULL) STRICT`,
+        ),
+        db.prepare(
+          `CREATE TABLE taproot_terms (entity_id TEXT NOT NULL, language TEXT NOT NULL, term_type TEXT NOT NULL, value TEXT NOT NULL, ordinal INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (entity_id, language, term_type, ordinal)) STRICT`,
+        ),
+        db.prepare(
+          `CREATE TABLE taproot_metadata (metadata_key TEXT PRIMARY KEY, metadata_value TEXT NOT NULL) STRICT`,
+        ),
+        db.prepare(
+          `CREATE TABLE taproot_assertions (assertion_key TEXT PRIMARY KEY) STRICT`,
+        ),
+        db.prepare(
+          `INSERT INTO taproot_id_counters VALUES ('item', 2), ('property', 1)`,
+        ),
+        db.prepare(
+          `INSERT INTO taproot_metadata VALUES ('schema_version', '1'), ('canonical_json_version', '1'), ('rdf_mapping_version', '1')`,
+        ),
+      ]);
+      const entity = JSON.stringify({
+        id: 'Q1',
+        type: 'item',
+        labels: {},
+        descriptions: {},
+        aliases: {},
+        claims: {},
+        sitelinks: {},
+        lastrevid: 1,
+        modified: '2026-01-01T00:00:00.000Z',
+      });
+      await db
+        .prepare(
+          `INSERT INTO taproot_entities(entity_id, entity_type, revision, entity_json, modified_at) VALUES ('Q1', 'item', 1, ?, '2026-01-01T00:00:00.000Z')`,
+        )
+        .bind(entity)
+        .run();
+      await db
+        .prepare(
+          `INSERT INTO taproot_entity_revisions(entity_id, revision, entity_json, actor) VALUES ('Q1', 1, ?, 'legacy-user')`,
+        )
+        .bind(entity)
+        .run();
+      await initializeTaproot(db);
+      const repository = new TaprootRepository(db, options);
+      expect(await inspectTaprootSchema(db)).toMatchObject({ valid: true });
+      expect(await repository.verifyAuditChain('Q1')).toMatchObject({
+        valid: true,
+      });
+      expect(
+        (await repository.listAuditEvents({ entityId: 'Q1' })).items[0],
+      ).toMatchObject({
+        type: 'import',
+        attribution: { id: 'legacy-user', kind: 'human' },
+      });
+    } finally {
+      await miniflare.dispose();
+    }
+  }, 30_000);
+
   it('initializes its schema and allocates independent P/Q ids', async () => {
     const env = await environment();
     try {
@@ -473,6 +551,10 @@ describe('TaprootRepository on Workerd D1', () => {
         expectedRevision: first.newRevision,
       });
       expect((await env.repository.getEntity('Q1')).deletedAt).not.toBeNull();
+      expect(
+        (await env.repository.getEntityRevision('Q1', deleted.newRevision))
+          .deletedAt,
+      ).not.toBeNull();
       await expect(env.repository.searchEntities('first')).resolves.toEqual([]);
       const restored = await env.repository.restoreEntity('Q1', {
         expectedRevision: deleted.newRevision,
@@ -483,8 +565,217 @@ describe('TaprootRepository on Workerd D1', () => {
       });
       expect((await env.repository.getEntity('Q1')).redirectTo).toBe('Q2');
       expect(redirected.newRevision).toBe(4);
+      expect(await env.repository.resolveEntity('Q1')).toMatchObject({
+        resolvedId: 'Q2',
+        redirects: ['Q2'],
+      });
+      await expect(
+        env.repository.redirectEntity('Q2', 'Q1', { expectedRevision: 1 }),
+      ).rejects.toThrow(/cycle/iu);
+      const property = await env.repository.createProperty({
+        datatype: 'string',
+      });
+      await expect(
+        env.repository.redirectEntity(property.entityId, 'Q2', {
+          expectedRevision: property.newRevision,
+        }),
+      ).rejects.toThrow(/same entity type/iu);
     } finally {
       await env.dispose();
     }
-  });
+  }, 30_000);
+
+  it('provides attribution, immutable audit chains, cursors, batch commands, bulk I/O, and repair', async () => {
+    const env = await environment();
+    try {
+      const created = await env.repository.createItem({
+        labels: { en: { language: 'en', value: 'seed' } },
+        attribution: {
+          id: 'agent:curator',
+          kind: 'agent',
+          tool: 'gnolith-mcp',
+        },
+        editSummary: 'create seed',
+        tags: ['agent', 'import'],
+        requestId: 'request-1',
+      });
+      const edited = await env.repository.applyCommands(
+        'Q1',
+        [
+          { type: 'set-label', language: 'en', value: 'oak' },
+          { type: 'add-alias', language: 'en', value: 'tree' },
+          { type: 'set-description', language: 'en', value: 'a plant' },
+        ],
+        {
+          expectedRevision: created.newRevision,
+          attribution: { id: 'user:1', kind: 'human', name: 'Editor' },
+          tags: ['manual'],
+          requestId: 'request-2',
+        },
+      );
+      expect(edited.newRevision).toBe(2);
+      const revisions = await env.repository.listEntityRevisionsPage('Q1', {
+        limit: 1,
+      });
+      expect(revisions.items[0]).toMatchObject({
+        attribution: { id: 'user:1', kind: 'human' },
+        tags: ['manual'],
+        parentHash: created.contentHash,
+      });
+      expect(revisions.cursor).not.toBeNull();
+      expect(
+        (
+          await env.repository.listEntityRevisionsPage('Q1', {
+            limit: 1,
+            cursor: revisions.cursor!,
+          })
+        ).items[0]?.revision,
+      ).toBe(1);
+      const audit = await env.repository.listAuditEvents({
+        entityId: 'Q1',
+        limit: 10,
+      });
+      expect(audit.items).toHaveLength(2);
+      expect(await env.repository.verifyAuditChain('Q1')).toMatchObject({
+        valid: true,
+      });
+      await expect(
+        env.db
+          .prepare(
+            `UPDATE taproot_entity_revisions SET edit_summary = 'tampered' WHERE entity_id = 'Q1'`,
+          )
+          .run(),
+      ).rejects.toThrow(/immutable/);
+
+      const exported = await env.repository.exportEntities();
+      expect(exported.trim().split('\n')).toHaveLength(1);
+      const entity = JSON.parse(
+        exported,
+      ) as import('../src/index.js').WikibaseEntity;
+      entity.id = 'Q10';
+      if (entity.type !== 'item') throw new Error('expected item');
+      const bulk = await env.repository.importEntities([entity], {
+        metadata: { attribution: { id: 'job:1', kind: 'import' } },
+      });
+      expect(bulk.failed).toHaveLength(0);
+      expect(
+        (await env.repository.listEntities({ limit: 1 })).cursor,
+      ).not.toBeNull();
+
+      const bulkProperty: import('../src/index.js').WikibaseEntity = {
+        id: 'P5',
+        type: 'property',
+        datatype: 'string',
+        labels: {},
+        descriptions: {},
+        aliases: {},
+        claims: {},
+        lastrevid: 1,
+        modified: '2026-01-01T00:00:00.000Z',
+      };
+      const bulkItem: import('../src/index.js').WikibaseEntity = {
+        id: 'Q30',
+        type: 'item',
+        labels: {},
+        descriptions: {},
+        aliases: {},
+        sitelinks: {},
+        claims: {
+          P5: [
+            {
+              id: 'Q30$bulk',
+              type: 'statement',
+              rank: 'normal',
+              mainsnak: {
+                snaktype: 'value',
+                property: 'P5',
+                datatype: 'string',
+                datavalue: { type: 'string', value: 'planned dependency' },
+              },
+              qualifiers: {},
+              'qualifiers-order': [],
+              references: [],
+            },
+          ],
+        },
+        lastrevid: 1,
+        modified: '2026-01-01T00:00:00.000Z',
+      };
+      const planned = await env.repository.importEntities([
+        bulkItem,
+        bulkProperty,
+      ]);
+      expect(planned.failed).toHaveLength(0);
+      expect(planned.succeeded.map(({ entityId }) => entityId)).toEqual([
+        'Q30',
+        'P5',
+      ]);
+
+      await env.repository.createProperty({ id: 'P1', datatype: 'time' });
+      const sharedSnak: Snak = {
+        snaktype: 'value',
+        property: 'P1',
+        datatype: 'time',
+        datavalue: {
+          type: 'time',
+          value: {
+            time: '+2000-01-01T00:00:00Z',
+            timezone: 0,
+            before: 0,
+            after: 0,
+            precision: 11,
+            calendarmodel: 'http://www.wikidata.org/entity/Q1985727',
+          },
+        },
+      };
+      const sharedStatement = (id: `Q${number}`): Statement => ({
+        id: `${id}$shared`,
+        type: 'statement',
+        rank: 'normal',
+        mainsnak: structuredClone(sharedSnak),
+        qualifiers: {},
+        'qualifiers-order': [],
+        references: [],
+      });
+      const firstShared = await env.repository.createItem({
+        id: 'Q20',
+        claims: { P1: [sharedStatement('Q20')] },
+      });
+      await env.repository.createItem({
+        id: 'Q21',
+        claims: { P1: [sharedStatement('Q21')] },
+      });
+      await env.repository.removeStatement('Q20', 'Q20$shared', {
+        expectedRevision: firstShared.newRevision,
+      });
+      expect(await env.repository.inspectEntityIntegrity('Q21')).toMatchObject({
+        valid: true,
+      });
+
+      await env.db
+        .prepare(`DELETE FROM taproot_terms WHERE entity_id = 'Q1'`)
+        .run();
+      expect(await env.repository.inspectEntityIntegrity('Q1')).toMatchObject({
+        valid: false,
+      });
+      expect(
+        await env.repository.repairEntityProjection('Q1', {
+          attribution: { id: 'system:repair', kind: 'system' },
+        }),
+      ).toMatchObject({ valid: true });
+      expect(
+        (await env.repository.listAuditEvents({ entityId: 'Q1' })).items.some(
+          ({ type }) => type === 'repair',
+        ),
+      ).toBe(true);
+      const reverted = await env.repository.revertEntity('Q1', 1, {
+        expectedRevision: edited.newRevision,
+        editSummary: 'revert to seed',
+      });
+      expect(reverted.entity.labels.en?.value).toBe('seed');
+      expect(reverted.newRevision).toBe(3);
+    } finally {
+      await env.dispose();
+    }
+  }, 30_000);
 });

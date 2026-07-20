@@ -8,9 +8,18 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: taproot-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -22,7 +31,7 @@ jobs:
           path: diamond
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: taproot/package-lock.json
       - run: npm ci
@@ -32,4 +41,7 @@ jobs:
       - run: npm ci
         working-directory: taproot
       - run: npm run check
+        working-directory: taproot
+      - run: npm run pack:check
+        if: matrix.node == 24
         working-directory: taproot

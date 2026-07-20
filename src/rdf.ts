@@ -18,6 +18,7 @@ const SKOS = 'http://www.w3.org/2004/02/skos/core#';
 const SCHEMA = 'http://schema.org/';
 const WIKIBASE = 'http://wikiba.se/ontology#';
 const GEO = 'http://www.opengis.net/ont/geosparql#';
+const PROV = 'http://www.w3.org/ns/prov#';
 
 interface Namespaces {
   entity: string;
@@ -64,10 +65,16 @@ export function buildEntityQuads(
   quad(
     subject,
     `${ns.vocab}mappingVersion`,
-    factory.literal(options.mappingVersion ?? '1'),
+    factory.literal(options.mappingVersion ?? '2'),
   );
   for (const term of Object.values(entity.labels)) {
     quad(subject, `${RDFS}label`, factory.literal(term.value, term.language));
+    quad(subject, `${SCHEMA}name`, factory.literal(term.value, term.language));
+    quad(
+      subject,
+      `${SKOS}prefLabel`,
+      factory.literal(term.value, term.language),
+    );
   }
   for (const term of Object.values(entity.descriptions)) {
     quad(
@@ -166,9 +173,14 @@ function addStatement(
   quad: (s: RDF.Quad_Subject, p: string, o: RDF.Quad_Object) => void,
 ): void {
   const statementNode = factory.namedNode(
-    `${ns.statement}${encodeURIComponent(statement.id)}`,
+    `${ns.statement}${encodeURIComponent(statement.id.replace('$', '-'))}`,
   );
   quad(entity, `${ns.claim}${property}`, statementNode);
+  quad(
+    statementNode,
+    `${RDF_NS}type`,
+    factory.namedNode(`${WIKIBASE}Statement`),
+  );
   quad(
     statementNode,
     `${WIKIBASE}rank`,
@@ -222,6 +234,7 @@ function addStatement(
       `${ns.reference}${encodeURIComponent(reference.hash)}`,
     );
     quad(statementNode, `${SCHEMA}isBasedOn`, referenceNode);
+    quad(statementNode, `${PROV}wasDerivedFrom`, referenceNode);
     quad(
       referenceNode,
       `${RDF_NS}type`,
@@ -318,12 +331,21 @@ function simpleValue(
   switch (datatype) {
     case 'wikibase-item':
     case 'wikibase-property':
+    case 'wikibase-lexeme':
+    case 'wikibase-form':
+    case 'wikibase-sense':
+    case 'entity-schema':
       return factory.namedNode(`${ns.entity}${(value as { id: string }).id}`);
     case 'url':
       return factory.namedNode(value as string);
     case 'commonsMedia':
       return factory.namedNode(
         `http://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(value as string)}`,
+      );
+    case 'geo-shape':
+    case 'tabular-data':
+      return factory.namedNode(
+        `http://commons.wikimedia.org/data/${encodeURIComponent(value as string)}`,
       );
     case 'monolingualtext': {
       const text = value as { text: string; language: string };
@@ -541,6 +563,10 @@ function datatypeClass(datatype: EntityDatatype): string {
   return {
     'wikibase-item': 'WikibaseItem',
     'wikibase-property': 'WikibaseProperty',
+    'wikibase-lexeme': 'WikibaseLexeme',
+    'wikibase-form': 'WikibaseForm',
+    'wikibase-sense': 'WikibaseSense',
+    'entity-schema': 'EntitySchema',
     string: 'String',
     'external-id': 'ExternalId',
     url: 'Url',
@@ -549,6 +575,10 @@ function datatypeClass(datatype: EntityDatatype): string {
     time: 'Time',
     quantity: 'Quantity',
     'globe-coordinate': 'GlobeCoordinate',
+    math: 'Math',
+    'musical-notation': 'MusicalNotation',
+    'geo-shape': 'GeoShape',
+    'tabular-data': 'TabularData',
   }[datatype];
 }
 
