@@ -1,0 +1,490 @@
+import { createSparqlHandler, type D1DatabaseLike } from '@gnolith/diamond';
+import { Miniflare } from 'miniflare';
+import { describe, expect, it } from 'vitest';
+import {
+  EntityAlreadyExistsError,
+  EntityTooLargeError,
+  InvalidEntityError,
+  PropertyDatatypeMismatchError,
+  PropertyNotFoundError,
+  QuadPatchTooLargeError,
+  RevisionConflictError,
+  SchemaMismatchError,
+  TaprootRepository,
+  initializeTaproot,
+  inspectTaprootSchema,
+  type Reference,
+  type Snak,
+  type Statement,
+} from '../src/index.js';
+
+const options = { baseIri: 'https://knowledge.example' };
+
+async function environment() {
+  const miniflare = new Miniflare({
+    modules: true,
+    script: 'export default { fetch() { return new Response("ok") } }',
+    compatibilityDate: '2026-07-19',
+    compatibilityFlags: ['nodejs_compat'],
+    d1Databases: { DB: crypto.randomUUID() },
+  });
+  const db = (await miniflare.getD1Database('DB')) as unknown as D1DatabaseLike;
+  await initializeTaproot(db);
+  return {
+    db,
+    repository: new TaprootRepository(db, options),
+    dispose: () => miniflare.dispose(),
+  };
+}
+
+describe('TaprootRepository on Workerd D1', () => {
+  it('initializes its schema and allocates independent P/Q ids', async () => {
+    const env = await environment();
+    try {
+      await expect(inspectTaprootSchema(env.db)).resolves.toMatchObject({
+        valid: true,
+      });
+      const property = await env.repository.createProperty({
+        datatype: 'string',
+      });
+      const first = await env.repository.createItem();
+      const second = await env.repository.createItem();
+      expect([property.entityId, first.entityId, second.entityId]).toEqual([
+        'P1',
+        'Q1',
+        'Q2',
+      ]);
+      await expect(
+        env.repository.listEntityRevisions('Q1'),
+      ).resolves.toHaveLength(1);
+      const concurrent = await Promise.all(
+        Array.from({ length: 5 }, () => env.repository.createItem()),
+      );
+      expect(new Set(concurrent.map(({ entityId }) => entityId)).size).toBe(5);
+    } finally {
+      await env.dispose();
+    }
+  }, 30_000);
+
+  it('synchronizes terms, revisions, statements, qualifiers, references, and RDF', async () => {
+    const env = await environment();
+    try {
+      await env.repository.createProperty({
+        datatype: 'string',
+        labels: { en: { language: 'en', value: 'name' } },
+      });
+      await env.repository.createProperty({ datatype: 'time' });
+      const created = await env.repository.createItem({
+        labels: { en: { language: 'en', value: 'Ada Lovelace' } },
+      });
+      const mainsnak: Snak = {
+        snaktype: 'value',
+        property: 'P1',
+        datatype: 'string',
+        datavalue: { type: 'string', value: 'programmer' },
+      };
+      const qualifier: Snak = {
+        snaktype: 'value',
+        property: 'P2',
+        datatype: 'time',
+        datavalue: {
+          type: 'time',
+          value: {
+            time: '+1843-01-01T00:00:00Z',
+            timezone: 0,
+            before: 0,
+            after: 0,
+            precision: 9,
+            calendarmodel: 'http://www.wikidata.org/entity/Q1985727',
+          },
+        },
+      };
+      const reference: Reference = {
+        hash: 'source-1',
+        snaks: {
+          P1: [{ ...mainsnak, datavalue: { type: 'string', value: 'source' } }],
+        },
+        'snaks-order': ['P1'],
+      };
+      const statement: Statement = {
+        id: 'Q1$s1',
+        type: 'statement',
+        rank: 'normal',
+        mainsnak,
+        qualifiers: {},
+        'qualifiers-order': [],
+        references: [],
+      };
+      const withStatement = await env.repository.addStatement('Q1', statement, {
+        expectedRevision: created.newRevision,
+      });
+      const withQualifier = await env.repository.addQualifier(
+        'Q1',
+        statement.id,
+        qualifier,
+        { expectedRevision: withStatement.newRevision },
+      );
+      const withReference = await env.repository.addReference(
+        'Q1',
+        statement.id,
+        reference,
+        {
+          expectedRevision: withQualifier.newRevision,
+          actor: 'test',
+          editSummary: 'source it',
+        },
+      );
+      expect(withReference.entity.claims.P1?.[0]?.references[0]?.hash).toBe(
+        'source-1',
+      );
+      await expect(
+        env.repository.searchEntities('Ada', { language: 'en' }),
+      ).resolves.toMatchObject([{ entityId: 'Q1', termType: 'label' }]);
+      await expect(
+        env.repository.listEntityRevisions('Q1'),
+      ).resolves.toHaveLength(4);
+      const handler = createSparqlHandler({ db: env.db });
+      const query = `SELECT ?value WHERE { <https://knowledge.example/entity/Q1> <https://knowledge.example/prop/direct/P1> ?value }`;
+      const response = await handler(
+        new Request(
+          `https://site.test/sparql?query=${encodeURIComponent(query)}`,
+          { headers: { accept: 'application/sparql-results+json' } },
+        ),
+      );
+      expect(response.status).toBe(200);
+      const result = (await response.json()) as {
+        results: { bindings: Array<{ value: { value: string } }> };
+      };
+      expect(result.results.bindings[0]?.value.value).toBe('programmer');
+
+      const fullQuery = `SELECT ?statement ?timeValue ?source WHERE {
+        <https://knowledge.example/entity/Q1> <https://knowledge.example/prop/P1> ?statement .
+        ?statement <https://knowledge.example/prop/statement/P1> "programmer" ;
+          <https://knowledge.example/prop/qualifier/value/P2> ?timeValue ;
+          <http://schema.org/isBasedOn> ?reference .
+        ?timeValue <http://wikiba.se/ontology#timePrecision> 9 .
+        ?reference <https://knowledge.example/prop/reference/P1> ?source
+      }`;
+      const fullResponse = await handler(
+        new Request(
+          `https://site.test/sparql?query=${encodeURIComponent(fullQuery)}`,
+          { headers: { accept: 'application/sparql-results+json' } },
+        ),
+      );
+      const fullResult = (await fullResponse.json()) as {
+        results: { bindings: Array<{ source: { value: string } }> };
+      };
+      expect(fullResult.results.bindings[0]?.source.value).toBe('source');
+
+      const replacementReference: Reference = {
+        ...reference,
+        hash: 'source-2',
+      };
+      const replacedReference = await env.repository.replaceReference(
+        'Q1',
+        statement.id,
+        reference.hash,
+        replacementReference,
+        { expectedRevision: withReference.newRevision },
+      );
+      const removedReference = await env.repository.removeReference(
+        'Q1',
+        statement.id,
+        replacementReference.hash,
+        { expectedRevision: replacedReference.newRevision },
+      );
+      const removedQualifier = await env.repository.removeQualifier(
+        'Q1',
+        statement.id,
+        'P2',
+        0,
+        { expectedRevision: removedReference.newRevision },
+      );
+      const ranked = await env.repository.setStatementRank(
+        'Q1',
+        statement.id,
+        'preferred',
+        { expectedRevision: removedQualifier.newRevision },
+      );
+      const replacementStatement: Statement = {
+        ...statement,
+        rank: 'preferred',
+        mainsnak: {
+          ...mainsnak,
+          datavalue: { type: 'string', value: 'researcher' },
+        },
+      };
+      const replacedStatement = await env.repository.replaceStatement(
+        'Q1',
+        statement.id,
+        replacementStatement,
+        { expectedRevision: ranked.newRevision },
+      );
+      const removedStatement = await env.repository.removeStatement(
+        'Q1',
+        statement.id,
+        { expectedRevision: replacedStatement.newRevision },
+      );
+      expect(removedStatement.entity.claims).toEqual({});
+      await expect(
+        env.repository.listEntityRevisions('Q1'),
+      ).resolves.toHaveLength(10);
+    } finally {
+      await env.dispose();
+    }
+  }, 30_000);
+
+  it('edits and removes terms, aliases, and sitelinks', async () => {
+    const env = await environment();
+    try {
+      const created = await env.repository.createItem();
+      const labeled = await env.repository.setLabel('Q1', 'en', 'label', {
+        expectedRevision: created.newRevision,
+      });
+      const described = await env.repository.setDescription(
+        'Q1',
+        'en',
+        'description',
+        { expectedRevision: labeled.newRevision },
+      );
+      const aliased = await env.repository.addAlias('Q1', 'en', 'alias', {
+        expectedRevision: described.newRevision,
+      });
+      const linked = await env.repository.setSitelink(
+        'Q1',
+        'enwiki',
+        { site: 'ignored', title: 'Example', badges: [] },
+        { expectedRevision: aliased.newRevision },
+      );
+      const noLabel = await env.repository.removeLabel('Q1', 'en', {
+        expectedRevision: linked.newRevision,
+      });
+      const noDescription = await env.repository.removeDescription('Q1', 'en', {
+        expectedRevision: noLabel.newRevision,
+      });
+      const noAlias = await env.repository.removeAlias('Q1', 'en', 0, {
+        expectedRevision: noDescription.newRevision,
+      });
+      const noSitelink = await env.repository.removeSitelink('Q1', 'enwiki', {
+        expectedRevision: noAlias.newRevision,
+      });
+      expect(noSitelink.entity).toMatchObject({
+        labels: {},
+        descriptions: {},
+        aliases: {},
+        sitelinks: {},
+      });
+      await expect(env.repository.searchEntities('label')).resolves.toEqual([]);
+    } finally {
+      await env.dispose();
+    }
+  }, 20_000);
+
+  it('imports trusted ids, advances counters, and rejects collisions', async () => {
+    const env = await environment();
+    try {
+      const imported = await env.repository.importEntity({
+        id: 'Q42',
+        type: 'item',
+        labels: {},
+        descriptions: {},
+        aliases: {},
+        claims: {},
+        sitelinks: {},
+        lastrevid: 7,
+        modified: '2026-07-20T00:00:00.000Z',
+      });
+      expect(imported.newRevision).toBe(7);
+      await expect(
+        env.repository.importEntity(imported.entity),
+      ).rejects.toBeInstanceOf(EntityAlreadyExistsError);
+      await expect(env.repository.createItem()).resolves.toMatchObject({
+        entityId: 'Q43',
+      });
+    } finally {
+      await env.dispose();
+    }
+  }, 15_000);
+
+  it('enforces database namespace and entity/quad size limits atomically', async () => {
+    const env = await environment();
+    try {
+      const tiny = new TaprootRepository(env.db, {
+        ...options,
+        maxEntityBytes: 100,
+      });
+      await expect(
+        tiny.createItem({
+          labels: { en: { language: 'en', value: 'x'.repeat(200) } },
+        }),
+      ).rejects.toBeInstanceOf(EntityTooLargeError);
+      await expect(env.repository.createItem()).resolves.toMatchObject({
+        entityId: 'Q1',
+      });
+      const otherNamespace = new TaprootRepository(env.db, {
+        baseIri: 'https://other.example',
+      });
+      await expect(otherNamespace.createItem()).rejects.toBeInstanceOf(
+        SchemaMismatchError,
+      );
+
+      const huge = 'z'.repeat(1_400_000);
+      await expect(
+        env.repository.createItem({
+          labels: { en: { language: 'en', value: huge } },
+        }),
+      ).rejects.toBeInstanceOf(QuadPatchTooLargeError);
+      await expect(env.repository.getEntity('Q2')).rejects.toThrow();
+    } finally {
+      await env.dispose();
+    }
+  }, 30_000);
+
+  it('permits only one competing edit from a revision', async () => {
+    const env = await environment();
+    try {
+      const created = await env.repository.createItem();
+      const outcomes = await Promise.allSettled([
+        env.repository.setLabel('Q1', 'en', 'first', {
+          expectedRevision: created.newRevision,
+        }),
+        env.repository.setLabel('Q1', 'en', 'second', {
+          expectedRevision: created.newRevision,
+        }),
+      ]);
+      expect(
+        outcomes.filter(({ status }) => status === 'fulfilled'),
+      ).toHaveLength(1);
+      const rejection = outcomes.find(({ status }) => status === 'rejected');
+      expect(rejection?.status).toBe('rejected');
+      if (rejection?.status === 'rejected') {
+        expect(rejection.reason).toBeInstanceOf(RevisionConflictError);
+      }
+      await expect(
+        env.repository.listEntityRevisions('Q1'),
+      ).resolves.toHaveLength(2);
+    } finally {
+      await env.dispose();
+    }
+  });
+
+  it('enforces Property existence, datatype compatibility, and datatype immutability after use', async () => {
+    const env = await environment();
+    try {
+      const property = await env.repository.createProperty({
+        datatype: 'string',
+      });
+      const item = await env.repository.createItem();
+      const missing: Statement = {
+        id: 'Q1$missing',
+        type: 'statement',
+        rank: 'normal',
+        mainsnak: {
+          snaktype: 'somevalue',
+          property: 'P99',
+          datatype: 'string',
+        },
+        qualifiers: {},
+        'qualifiers-order': [],
+        references: [],
+      };
+      await expect(
+        env.repository.addStatement('Q1', missing, {
+          expectedRevision: item.newRevision,
+        }),
+      ).rejects.toBeInstanceOf(PropertyNotFoundError);
+      const mismatch: Statement = {
+        ...missing,
+        id: 'Q1$mismatch',
+        mainsnak: {
+          snaktype: 'somevalue',
+          property: 'P1',
+          datatype: 'time',
+        },
+      };
+      await expect(
+        env.repository.addStatement('Q1', mismatch, {
+          expectedRevision: item.newRevision,
+        }),
+      ).rejects.toBeInstanceOf(PropertyDatatypeMismatchError);
+      const valid: Statement = {
+        ...mismatch,
+        id: 'Q1$valid',
+        mainsnak: {
+          snaktype: 'somevalue',
+          property: 'P1',
+          datatype: 'string',
+        },
+      };
+      await env.repository.addStatement('Q1', valid, {
+        expectedRevision: item.newRevision,
+      });
+      const changedProperty = structuredClone(property.entity);
+      if (changedProperty.type !== 'property') throw new Error('test fixture');
+      changedProperty.datatype = 'time';
+      await expect(
+        env.repository.replaceEntity('P1', changedProperty, {
+          expectedRevision: property.newRevision,
+        }),
+      ).rejects.toBeInstanceOf(InvalidEntityError);
+    } finally {
+      await env.dispose();
+    }
+  }, 20_000);
+
+  it('rolls JSON, revision, terms, and RDF back when RDF insertion fails', async () => {
+    const env = await environment();
+    try {
+      const created = await env.repository.createItem({
+        labels: { en: { language: 'en', value: 'before' } },
+      });
+      await env.db
+        .prepare(
+          `CREATE TRIGGER reject_taproot_rdf BEFORE INSERT ON rdf_quads BEGIN SELECT RAISE(ABORT, 'injected RDF failure'); END`,
+        )
+        .run();
+      await expect(
+        env.repository.setLabel('Q1', 'en', 'after', {
+          expectedRevision: created.newRevision,
+        }),
+      ).rejects.toThrow(/injected RDF failure/);
+      const stored = await env.repository.getEntity('Q1');
+      expect(stored.entity.labels.en?.value).toBe('before');
+      expect(stored.entity.lastrevid).toBe(1);
+      await expect(
+        env.repository.listEntityRevisions('Q1'),
+      ).resolves.toHaveLength(1);
+      await expect(env.repository.searchEntities('after')).resolves.toEqual([]);
+    } finally {
+      await env.dispose();
+    }
+  });
+
+  it('soft deletes, restores, and redirects without losing canonical history', async () => {
+    const env = await environment();
+    try {
+      const first = await env.repository.createItem({
+        labels: { en: { language: 'en', value: 'first' } },
+      });
+      await env.repository.createItem({
+        labels: { en: { language: 'en', value: 'target' } },
+      });
+      const deleted = await env.repository.softDeleteEntity('Q1', {
+        expectedRevision: first.newRevision,
+      });
+      expect((await env.repository.getEntity('Q1')).deletedAt).not.toBeNull();
+      await expect(env.repository.searchEntities('first')).resolves.toEqual([]);
+      const restored = await env.repository.restoreEntity('Q1', {
+        expectedRevision: deleted.newRevision,
+      });
+      expect((await env.repository.getEntity('Q1')).deletedAt).toBeNull();
+      const redirected = await env.repository.redirectEntity('Q1', 'Q2', {
+        expectedRevision: restored.newRevision,
+      });
+      expect((await env.repository.getEntity('Q1')).redirectTo).toBe('Q2');
+      expect(redirected.newRevision).toBe(4);
+    } finally {
+      await env.dispose();
+    }
+  });
+});

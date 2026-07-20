@@ -13,9 +13,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          path: taproot
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: gnolith/diamond
+          ref: d264cff6152a19a2f13f404fe8b991605c36d9fa
+          path: diamond
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: taproot/package-lock.json
       - run: npm ci
+        working-directory: diamond
+      - run: npm run build
+        working-directory: diamond
+      - run: npm ci
+        working-directory: taproot
       - run: npm run check
+        working-directory: taproot

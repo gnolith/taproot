@@ -7,7 +7,16 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@gnolith/taproot": ["./src/index.ts"]
+    },
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "eslint.config.js"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "examples/**/*.ts",
+    "eslint.config.js"
+  ]
 }
