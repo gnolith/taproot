@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a scoped knowledge-layer enhancement
+title: '[Feature]: '
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and use case
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Proposed Taproot responsibility
+      description: Explain why this belongs in Taproot rather than Diamond, an MCP, or the host application.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration impact
+    validations:
+      required: true

@@ -1,0 +1,38 @@
+import { createSparqlHandler, type D1DatabaseLike } from '@gnolith/diamond';
+import { Miniflare } from 'miniflare';
+import { describe, expect, it } from 'vitest';
+import { runTaprootDemo } from '../examples/codex-site/demo.js';
+
+describe('published Codex Site example', () => {
+  it('coordinates Taproot writes and Diamond SPARQL on one Workerd D1 database', async () => {
+    const miniflare = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok") } }',
+      compatibilityDate: '2026-07-19',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: { DB: crypto.randomUUID() },
+    });
+    try {
+      const db = (await miniflare.getD1Database(
+        'DB',
+      )) as unknown as D1DatabaseLike;
+      const result = await runTaprootDemo(db);
+      expect(result.staleRevisionRejected).toBe(true);
+      expect(result.integrity).toMatchObject({ valid: true });
+      expect(result.audit).toHaveLength(4);
+      expect(result.entityJson).toContain('Ada Lovelace');
+      expect(result.sparqlResults).toBeTypeOf('object');
+      const bindings = (
+        result.sparqlResults as {
+          results: { bindings: unknown[] };
+        }
+      ).results.bindings;
+      expect(bindings.length).toBeGreaterThan(0);
+
+      // The public Diamond handler remains usable after the example completes.
+      expect(typeof createSparqlHandler({ db })).toBe('function');
+    } finally {
+      await miniflare.dispose();
+    }
+  }, 30_000);
+});

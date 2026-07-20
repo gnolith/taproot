@@ -1,43 +1,85 @@
 {
   "name": "@gnolith/taproot",
-  "version": "0.0.0",
-  "description": "Wikibase-style knowledge layer for Gnolith.",
+  "version": "0.1.0",
+  "description": "D1-native Wikibase-compatible knowledge graph and revision layer for Gnolith.",
+  "author": "Gnolith contributors",
+  "keywords": [
+    "cloudflare-d1",
+    "knowledge-graph",
+    "rdf",
+    "sparql",
+    "wikibase"
+  ],
   "type": "module",
-  "private": true,
+  "private": false,
   "sideEffects": false,
   "repository": {
     "type": "git",
     "url": "https://github.com/gnolith/taproot.git"
   },
+  "homepage": "https://github.com/gnolith/taproot#readme",
+  "bugs": {
+    "url": "https://github.com/gnolith/taproot/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./migrations/*": "./migrations/*",
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "docs",
+    "migrations",
+    "examples",
+    "COMPATIBILITY.md",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE",
-    "SECURITY.md"
+    "SECURITY.md",
+    "SUPPORT.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run example:check && npm run pack:check && npm run consumer:check && npm run licenses:check && npm run readiness:check",
+    "consumer:check": "node scripts/consumer-smoke.mjs",
+    "example:check": "vitest run test/example.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "lint": "eslint src test",
+    "licenses:check": "license-checker-rseidelsohn --production --summary --onlyAllow \"MIT;ISC;BSD-2-Clause;Apache-2.0;BSD-3-Clause;BlueOak-1.0.0;FreeBSD;(WTFPL OR MIT);UNLICENSED\"",
+    "lint": "eslint .",
+    "pack:check": "npm pack --dry-run",
+    "prepack": "npm run build",
+    "readiness:check": "node scripts/readiness-check.mjs",
+    "release:check": "node scripts/release-check.mjs",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run test/repository.test.ts test/example.test.ts",
+    "test:unit": "vitest run test/rdf.test.ts test/scaffold.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
     "node": ">=22"
   },
+  "dependencies": {
+    "@gnolith/diamond": "^0.3.2",
+    "@rdfjs/types": "^2.0.1",
+    "rdf-data-factory": "^2.0.2"
+  },
   "packageManager": "npm@11.9.0",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^3.2.7",
     "eslint": "^10.7.0",
+    "license-checker-rseidelsohn": "^4.4.2",
+    "miniflare": "^4.20260714.0",
     "prettier": "^3.9.5",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.64.0",

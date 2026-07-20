@@ -1,0 +1,19 @@
+{
+  "id": "Q42",
+  "type": "item",
+  "labels": {
+    "en": { "language": "en", "value": "Douglas Adams" }
+  },
+  "descriptions": {
+    "en": { "language": "en", "value": "English writer" }
+  },
+  "aliases": {
+    "en": [{ "language": "en", "value": "DNA" }]
+  },
+  "claims": {},
+  "sitelinks": {
+    "enwiki": { "site": "enwiki", "title": "Douglas Adams", "badges": [] }
+  },
+  "lastrevid": 1,
+  "modified": "2026-07-20T00:00:00.000Z"
+}
