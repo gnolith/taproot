@@ -31,6 +31,7 @@ import {
   SchemaMismatchError,
 } from './errors.js';
 import { buildEntityQuads } from './rdf.js';
+import { withoutTrailingSlashes } from './iri.js';
 import { TAPROOT_RDF_VERSION } from './schema.js';
 import type {
   AliasMap,
@@ -1909,11 +1910,11 @@ export class TaprootRepository {
           `INSERT INTO taproot_metadata(metadata_key, metadata_value)
            VALUES ('base_iri', ?) ON CONFLICT(metadata_key) DO NOTHING`,
         )
-        .bind(this.#options.baseIri.replace(/\/+$/u, '')),
+        .bind(withoutTrailingSlashes(this.#options.baseIri)),
       this.#assertion(
         `EXISTS (SELECT 1 FROM taproot_metadata
           WHERE metadata_key = 'base_iri' AND metadata_value = ?)`,
-        this.#options.baseIri.replace(/\/+$/u, ''),
+        withoutTrailingSlashes(this.#options.baseIri),
       ),
     ];
   }
@@ -1928,7 +1929,7 @@ export class TaprootRepository {
     const actual = result.results[0]?.metadata_value;
     return (
       actual !== undefined &&
-      actual !== this.#options.baseIri.replace(/\/+$/u, '')
+      actual !== withoutTrailingSlashes(this.#options.baseIri)
     );
   }
 
@@ -1936,7 +1937,7 @@ export class TaprootRepository {
     if (!lifecycle.deletedAt && !lifecycle.redirectTo)
       return buildEntityQuads(entity, this.#options);
     const factory = this.#options.factory ?? new DataFactory();
-    const base = this.#options.baseIri.replace(/\/+$/u, '');
+    const base = withoutTrailingSlashes(this.#options.baseIri);
     const subject = factory.namedNode(`${base}/entity/${entity.id}`);
     const quads = [revisionQuad(entity, { ...this.#options, factory })];
     if (lifecycle.deletedAt) {
@@ -2212,7 +2213,7 @@ function revisionQuad(
   options: TaprootOptions,
 ): RDF.Quad {
   const factory = options.factory ?? new DataFactory();
-  const base = options.baseIri.replace(/\/+$/u, '');
+  const base = withoutTrailingSlashes(options.baseIri);
   return factory.quad(
     factory.namedNode(`${base}/entity/${entity.id}`),
     factory.namedNode(`${base}/vocab/revision`),

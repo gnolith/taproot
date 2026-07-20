@@ -1,5 +1,6 @@
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
+import { withoutTrailingSlashes } from './iri.js';
 import { exportEntityJson } from './canonical.js';
 import type {
   DataValueValue,
@@ -173,7 +174,7 @@ function addStatement(
   quad: (s: RDF.Quad_Subject, p: string, o: RDF.Quad_Object) => void,
 ): void {
   const statementNode = factory.namedNode(
-    `${ns.statement}${encodeURIComponent(statement.id.replace('$', '-'))}`,
+    `${ns.statement}${encodeURIComponent(statement.id.replaceAll('$', '-'))}`,
   );
   quad(entity, `${ns.claim}${property}`, statementNode);
   quad(
@@ -518,7 +519,7 @@ function addFullValue(
 }
 
 function namespaces(baseIri: string): Namespaces {
-  const base = baseIri.replace(/\/+$/u, '');
+  const base = withoutTrailingSlashes(baseIri);
   if (!/^https?:\/\//u.test(base))
     throw new TypeError('baseIri must be an absolute HTTP(S) IRI');
   return {

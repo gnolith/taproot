@@ -100,6 +100,29 @@ describe('canonical JSON and RDF projection', () => {
     expect(exportEntityJson(parseEntityJson(json))).toBe(json);
   });
 
+  it('normalizes every statement-id separator and trailing base slash', () => {
+    const entity: WikibaseEntity = {
+      id: 'Q1',
+      type: 'item',
+      labels: {},
+      descriptions: {},
+      aliases: {},
+      claims: { P1: [statement('Q1$part$two', 'P1', 'string', 'value')] },
+      sitelinks: {},
+      lastrevid: 1,
+      modified: '2026-07-20T00:00:00.000Z',
+    };
+    const quads = buildEntityQuads(entity, { baseIri: `${baseIri}////` });
+    expect(
+      quads.some(
+        ({ subject }) =>
+          subject.termType === 'NamedNode' &&
+          subject.value ===
+            'https://knowledge.example/entity/statement/Q1-part-two',
+      ),
+    ).toBe(true);
+  });
+
   it('maps every required datatype and full-value fields deterministically', () => {
     const values: Array<[EntityDatatype, unknown]> = [
       ['wikibase-item', { 'entity-type': 'item', 'numeric-id': 2, id: 'Q2' }],
