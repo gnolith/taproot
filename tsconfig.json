@@ -17,6 +17,7 @@
     "src/**/*.ts",
     "test/**/*.ts",
     "examples/**/*.ts",
+    "vitest.config.ts",
     "eslint.config.js"
   ]
 }

@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
@@ -13,35 +14,57 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  quality:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:coverage
+      - run: npm run build
+      - run: npm run example:check
+      - run: npm run licenses:check
+      - run: npm run readiness:check
+      - run: npm run pack:check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: taproot-coverage
+          path: coverage/coverage-summary.json
+          if-no-files-found: error
+
+  node-compatibility:
     strategy:
       fail-fast: false
       matrix:
         node: [22, 24]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          path: taproot
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          repository: gnolith/diamond
-          ref: d90c67ef5b2dda368a0508cb222f0027941af89c
-          path: diamond
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-          cache-dependency-path: taproot/package-lock.json
       - run: npm ci
-        working-directory: diamond
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - run: npm run test:integration
       - run: npm run build
-        working-directory: diamond
+
+  packed-consumer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
       - run: npm ci
-        working-directory: taproot
-      - run: npm run check
-        working-directory: taproot
-      - run: npm run pack:check
-        if: matrix.node == 24
-        working-directory: taproot
+      - run: npm run consumer:check

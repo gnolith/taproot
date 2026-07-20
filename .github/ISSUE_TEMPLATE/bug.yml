@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible Taproot defect
+title: '[Bug]: '
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report security vulnerabilities here; follow SECURITY.md.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the entity JSON or commands and the smallest setup that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Runtime versions
+      description: Taproot, Diamond, Node, Wrangler/Workerd, and schema versions.
+    validations:
+      required: true

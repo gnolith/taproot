@@ -17,17 +17,15 @@ This audit covers the complete Taproot package boundary defined in
 | Migration            | Versioned SQL, programmatic v1 hash/audit backfill, resumable v1-to-v2 RDF reprojection and ownership creation               |
 | Integrity/repair     | Schema inspection, audit-chain verification, JSON/revision/term/RDF comparison, cursor scan, audited reprojection repair     |
 | Extension points     | Required attribution, async host validators, isolated observations, injected clock and IDs                                   |
-| Operations/release   | Architecture/API/operations/scope docs, changelog, Node 22/24 CI, Dependabot, pack gate, private dependency release guard    |
+| Operations/release   | Architecture/API/operations/scope/security/testing docs, Node 22/24 CI, packed consumer, license and release gates           |
 
 ## Reproduction
 
 ```sh
 npm ci
 npm run check
-npm run pack:check
 ```
 
-The Diamond composable-patch branch must pass its own full gate. Taproot stays
-private until that dependency is released to npm and the local dependency is
-replaced with its registry version. That is the sole package-publication gate;
-it is not an omitted Taproot feature.
+Diamond `0.3.2` or later supplies the registry-published composable patch API.
+The packed-consumer gate installs Taproot and Diamond without repository
+siblings or local paths and exercises a fresh Workerd D1 database.

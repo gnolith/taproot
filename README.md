@@ -12,10 +12,9 @@ editing commands, term search, repairable projections, and a deterministic RDF p
 
 ## Status
 
-The complete package API is implemented as `0.1.0-rc.0`. Publication remains
-intentionally disabled only because Taproot currently tests against an
-unreleased local Diamond patch dependency. That release-order guard is not an
-unfinished product surface.
+Version `0.1.0` is the first public release. Taproot supports Node 22 and 24 and
+depends on the registry release of Diamond that exposes transaction-composable
+quad patches.
 
 ## What it owns
 
@@ -121,8 +120,8 @@ edits apply up to 100 commands in one revision. All list limits are capped at 50
 
 See the [Codex Site example](examples/codex-site/README.md),
 [`COMPATIBILITY.md`](COMPATIBILITY.md), and the architecture, API, operations,
-and release documents under `docs/`. Run `npm run check && npm run pack:check`
-for the complete local gate.
+and release documents under `docs/`. Run `npm run check` for the complete local
+release-quality gate.
 
 ## License
 

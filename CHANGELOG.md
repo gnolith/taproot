@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-rc.0
+## 0.1.0
 
 - Complete Wikibase Item/Property JSON model and validated editing API.
 - Atomic current entities, immutable revisions, terms, RDF, and ownership.

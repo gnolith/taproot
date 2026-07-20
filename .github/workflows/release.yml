@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Verify the release commit belongs to main
+        shell: bash
+        run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          release_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          git merge-base --is-ancestor "$release_commit" refs/remotes/origin/main
+      - run: npm ci
+      - run: npm run check
+      - name: Verify release metadata and artifact contents
+        run: npm run release:check -- "$GITHUB_REF_NAME"
+      - run: npm pack
+      - name: Generate SBOM and checksums
+        shell: bash
+        run: |
+          npm sbom --omit=dev --sbom-format cyclonedx > "taproot-${GITHUB_REF_NAME#v}.sbom.json"
+          sha256sum ./*.tgz ./*.sbom.json > SHA256SUMS
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: |
+            *.tgz
+            *.sbom.json
+            SHA256SUMS
+      - name: Publish to npm through the configured OIDC trusted publisher
+        run: npm publish ./*.tgz --access public --provenance
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" ./*.tgz ./*.sbom.json SHA256SUMS
+          --generate-notes --verify-tag
