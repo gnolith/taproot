@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added host-created authorization contexts, canonical CNF visibility scopes,
+  lossless scope intersection, portable fingerprints, explicit `search:admin`
+  checks, and fail-closed pre/post-hydration canonical reads.
+
 - Added required, explicitly authored nonblank `Statement.text` to canonical
   JSON and to every logical statement mutation.
 - Added canonical JSON migration 3. Existing databases with no unauthored

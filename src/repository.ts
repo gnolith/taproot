@@ -171,6 +171,12 @@ export interface BulkImportOptions {
   mode?: 'create' | 'upsert';
 }
 
+/**
+ * Trusted maintenance/compatibility repository.
+ *
+ * @deprecated Application, agent, MCP, and search canonical reads must use
+ * `AuthorizedTaprootReader`. This class does not enforce authorization.
+ */
 export class TaprootRepository {
   readonly #db: SqliteDatabaseLike;
   readonly #options: Required<
