@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const requiredFiles = [
   'LICENSE',
@@ -28,8 +28,8 @@ const requiredFiles = [
   'docs/release-policy.md',
   'docs/testing.md',
   'docs/threat-model.md',
-  'examples/codex-site/README.md',
-  'examples/codex-site/demo.ts',
+  'examples/d1-diamond-interop/README.md',
+  'examples/d1-diamond-interop/demo.ts',
   'migrations/0001_taproot.sql',
   'migrations/0002_audit_operations.sql',
   'scripts/consumer-smoke.mjs',
@@ -45,11 +45,19 @@ const repositoryFiles = execFileSync('git', [
 ])
   .toString('utf8')
   .split('\0')
-  .filter(Boolean);
+  .filter((file) => file && existsSync(file));
 const repositoryFileSet = new Set(repositoryFiles);
 for (const file of requiredFiles) {
   assert.ok(repositoryFileSet.has(file), `required file is missing: ${file}`);
 }
+
+assert.ok(
+  !repositoryFiles.some(
+    (file) =>
+      file === '.openai/hosting.json' || file.endsWith('/.openai/hosting.json'),
+  ),
+  'hosting configuration belongs to the Site-creating agent',
+);
 
 const packageJson = JSON.parse(readFileSync('package.json', 'utf8'));
 assert.equal(packageJson.name, '@gnolith/taproot');
@@ -98,6 +106,8 @@ const release = readFileSync('.github/workflows/release.yml', 'utf8');
 for (const required of [
   'environment: release',
   'id-token: write',
+  'tag_type="$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")"',
+  'test "$tag_type" = tag',
   'npm run release:check',
   'npm sbom',
   'sha256sum',
@@ -119,6 +129,6 @@ assert.ok(
 );
 
 console.log(
-  `open-source structure validated: ${requiredFiles.length} required files, ` +
-    `${repositoryFiles.length} repository files, pinned Actions, clean local paths`,
+  `package repository structure validated: ${requiredFiles.length} required files, ` +
+    `${repositoryFiles.length} repository files, pinned Actions, clean local paths, no hosting config`,
 );

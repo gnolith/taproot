@@ -1,6 +1,6 @@
 # Architecture
 
-Taproot is the knowledge-domain layer between a Codex Site and Diamond. The
+Taproot is the knowledge-domain layer between a D1-backed application and Diamond. The
 canonical source of truth is one Wikibase-shaped JSON document per Item or
 Property. Revisions are append-only snapshots. Search terms and RDF are
 rebuildable projections and never become a competing statement model.
@@ -28,3 +28,4 @@ Taproot owns Items, Properties, their values and lifecycle, revisions,
 attribution/audit history, deterministic projections, migration, integrity,
 and repair. It deliberately does not own authentication, authorization, MCP,
 agents, UI, wiki article bodies, media storage, or arbitrary SPARQL Update.
+It also does not own Site assembly, provisioning, deployment, or acceptance.

@@ -11,9 +11,13 @@ canonical history or RDF query results, and whether untrusted JSON or SPARQL
 input is required. Do not include production data or credentials.
 
 Taproot records attribution claims but does not authenticate identities or
-authorize writes. Hosts must keep mutation routes trusted. Canonical JSON,
+authorize writes. It assumes mutation routes admit trusted callers. Canonical JSON,
 revision/audit immutability, size limits, optimistic revision guards, and
 read-only Diamond SPARQL are security boundaries; projection tables are not.
 
 The threat model and host responsibilities are documented in
 `docs/threat-model.md`.
+
+Package security checks do not qualify a deployed Site. The Codex agent creating
+a Site owns its authentication, routing, provisioning, deployment, and
+production acceptance.

@@ -27,7 +27,8 @@ Intentional differences:
   link datatypes without claiming storage for those target entity documents.
 - Math, musical notation, geo-shape, and tabular-data values round-trip and
   project with Wikibase property types. Geo-shape/tabular-data values use
-  Commons data IRIs; deployments remain responsible for those resources.
+  Commons data IRIs; availability of those external resources is outside this
+  package.
 - Taproot adds a site-owned mapping-version triple and retains
   `schema:isBasedOn` beside standard `prov:wasDerivedFrom` for backward
   compatibility. These additive triples do not change Wikibase query paths.
