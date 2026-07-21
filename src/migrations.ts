@@ -90,9 +90,15 @@ export function canonicalizeTaprootBaseIri(value: string): string {
     throw new InvalidBaseIriError(
       'baseIri must be an absolute HTTP(S) IRI without credentials, query, or fragment',
     );
-  const canonical = url.href.replace(/\/+$/u, '');
+  const canonical = stripTrailingSlashes(url.href);
   if (!canonical) throw new InvalidBaseIriError('baseIri cannot be empty');
   return canonical;
+}
+
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
 }
 
 export async function inspectTaprootPersistence(

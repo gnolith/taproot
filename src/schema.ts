@@ -379,7 +379,9 @@ function lifecycleQuads(
 ) {
   if (!deletedAt && !redirectTo)
     return buildEntityQuads(entity, { baseIri, mappingVersion, factory });
-  const base = baseIri.replace(/\/+$/u, '');
+  let end = baseIri.length;
+  while (end > 0 && baseIri.charCodeAt(end - 1) === 47) end -= 1;
+  const base = baseIri.slice(0, end);
   const subject = factory.namedNode(`${base}/entity/${entity.id}`);
   const quads = [
     factory.quad(
