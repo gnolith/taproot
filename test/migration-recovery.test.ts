@@ -1,5 +1,7 @@
+import { encodeTerm } from '@gnolith/diamond';
 import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
 import { Miniflare } from 'miniflare';
+import { DataFactory } from 'rdf-data-factory';
 import { describe, expect, it } from 'vitest';
 import {
   initializeTaproot,
@@ -167,6 +169,32 @@ describe('legacy migration interruption recovery', () => {
     }
   });
 
+  it('fails closed when the durable source base marker is corrupted', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await seedLegacy(db);
+      await expect(
+        initializeTaproot(new InterruptingDatabase(db, 'structure'), {
+          baseIri,
+        }),
+      ).rejects.toBe(interrupted);
+      await db
+        .prepare(
+          `UPDATE taproot_metadata SET metadata_value = 'https://other.example'
+           WHERE metadata_key = 'migration_source_base_iri'`,
+        )
+        .run();
+
+      await expect(initializeTaproot(db, { baseIri })).rejects.toThrow(
+        /source base IRI/iu,
+      );
+      expect(await taprootLedgerCount(db)).toBe(0);
+      expect(await metadata(db, 'migration_phase')).toBe('structure');
+    } finally {
+      await db.close();
+    }
+  });
+
   it('repairs a prematurely stamped database left by an older initializer', async () => {
     const db = new NodeSqliteDatabase(':memory:');
     try {
@@ -181,6 +209,128 @@ describe('legacy migration interruption recovery', () => {
 
       await initializeTaproot(db, { baseIri });
       await expectCurrentRecoveredState(db);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('repairs missing Diamond quads without trusting intact ownership rows', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await seedLegacy(db);
+      await initializeTaproot(db, { baseIri });
+      const ownershipBefore = await scalar(
+        db,
+        `SELECT COUNT(*) AS count FROM taproot_rdf_ownership`,
+      );
+      expect(ownershipBefore).toBeGreaterThan(0);
+      await insertUnrelatedQuad(db);
+      await db.batch([
+        db.prepare(
+          `DELETE FROM rdf_quads
+           WHERE EXISTS (
+             SELECT 1 FROM taproot_rdf_ownership o
+             WHERE o.subject_key = rdf_quads.subject_key
+               AND o.predicate_key = rdf_quads.predicate_key
+               AND o.object_key = rdf_quads.object_key
+               AND o.graph_key = rdf_quads.graph_key
+           )`,
+        ),
+      ]);
+
+      expect(await taprootLedgerCount(db)).toBe(2);
+      expect(
+        await scalar(db, `SELECT COUNT(*) AS count FROM taproot_rdf_ownership`),
+      ).toBe(ownershipBefore);
+      await expect(inspectTaprootPersistence(db)).resolves.toMatchObject({
+        current: false,
+      });
+
+      await initializeTaproot(db, { baseIri });
+      await expectCurrentRecoveredState(db);
+      expect(await scalar(db, `SELECT COUNT(*) AS count FROM rdf_quads`)).toBe(
+        ownershipBefore + 1,
+      );
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('removes old lexical RDF when adopting an equivalent canonical identity', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    const oldLexicalBase = 'HTTPS://Knowledge.Example';
+    try {
+      await seedLegacy(db);
+      await initializeTaproot(db, { baseIri });
+      const ownershipBefore = await scalar(
+        db,
+        `SELECT COUNT(*) AS count FROM taproot_rdf_ownership`,
+      );
+      const quadReplacements = Array.from(
+        { length: 8 },
+        () => [baseIri, oldLexicalBase] as const,
+      ).flat();
+      const ownershipReplacements = Array.from(
+        { length: 4 },
+        () => [baseIri, oldLexicalBase] as const,
+      ).flat();
+      await db.batch([
+        db
+          .prepare(`DELETE FROM _gnolith_migrations WHERE namespace = ?`)
+          .bind('@gnolith/taproot'),
+        db
+          .prepare(
+            `UPDATE taproot_metadata SET metadata_value = ?
+             WHERE metadata_key = 'base_iri'`,
+          )
+          .bind(`${oldLexicalBase}///`),
+        db
+          .prepare(
+            `UPDATE rdf_quads SET
+             subject_key = replace(subject_key, ?, ?),
+             subject_json = replace(subject_json, ?, ?),
+             predicate_key = replace(predicate_key, ?, ?),
+             predicate_json = replace(predicate_json, ?, ?),
+             object_key = replace(object_key, ?, ?),
+             object_json = replace(object_json, ?, ?),
+             graph_key = replace(graph_key, ?, ?),
+             graph_json = replace(graph_json, ?, ?)`,
+          )
+          .bind(...quadReplacements),
+        db
+          .prepare(
+            `UPDATE taproot_rdf_ownership SET
+             subject_key = replace(subject_key, ?, ?),
+             predicate_key = replace(predicate_key, ?, ?),
+             object_key = replace(object_key, ?, ?),
+             graph_key = replace(graph_key, ?, ?)`,
+          )
+          .bind(...ownershipReplacements),
+      ]);
+
+      await expect(
+        initializeTaproot(new InterruptingDatabase(db, 'revisions'), {
+          baseIri,
+        }),
+      ).rejects.toBe(interrupted);
+      expect(await metadata(db, 'migration_source_base_iri')).toBe(
+        `${oldLexicalBase}///`,
+      );
+      await initializeTaproot(db, { baseIri });
+      await expectCurrentRecoveredState(db);
+      expect(
+        await scalar(
+          db,
+          `SELECT COUNT(*) AS count FROM rdf_quads
+           WHERE instr(subject_key, 'Knowledge.Example') > 0
+              OR instr(predicate_key, 'Knowledge.Example') > 0
+              OR instr(object_key, 'Knowledge.Example') > 0
+              OR instr(graph_key, 'Knowledge.Example') > 0`,
+        ),
+      ).toBe(0);
+      expect(await scalar(db, `SELECT COUNT(*) AS count FROM rdf_quads`)).toBe(
+        ownershipBefore,
+      );
     } finally {
       await db.close();
     }
@@ -303,6 +453,25 @@ async function seedLegacy(db: SqliteDatabaseLike): Promise<void> {
   ]);
 }
 
+async function insertUnrelatedQuad(db: SqliteDatabaseLike): Promise<void> {
+  const factory = new DataFactory();
+  const encoded = [
+    factory.namedNode('https://unrelated.example/subject'),
+    factory.namedNode('https://unrelated.example/predicate'),
+    factory.literal('unrelated'),
+    factory.defaultGraph(),
+  ].map((term) => encodeTerm(term));
+  await db
+    .prepare(
+      `INSERT INTO rdf_quads(
+         subject_key, subject_json, predicate_key, predicate_json,
+         object_key, object_json, graph_key, graph_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(...encoded.flatMap(({ key, json }) => [key, json]))
+    .run();
+}
+
 async function expectCurrentRecoveredState(
   db: SqliteDatabaseLike,
 ): Promise<void> {
@@ -311,6 +480,9 @@ async function expectCurrentRecoveredState(
     current: true,
   });
   expect(await metadata(db, 'migration_phase')).toBeUndefined();
+  expect(await metadata(db, 'migration_source')).toBeUndefined();
+  expect(await metadata(db, 'migration_source_rdf_version')).toBeUndefined();
+  expect(await metadata(db, 'migration_source_base_iri')).toBeUndefined();
   expect(await taprootLedgerCount(db)).toBe(2);
   expect(
     await scalar(

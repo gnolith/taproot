@@ -51,6 +51,7 @@ type MigrationSource = 'legacy' | 'current';
 const migrationPhaseKey = 'migration_phase';
 const migrationSourceKey = 'migration_source';
 const migrationSourceRdfKey = 'migration_source_rdf_version';
+const migrationSourceBaseIriKey = 'migration_source_base_iri';
 
 export interface TaprootMigrationPlanEntry {
   id: string;
@@ -326,7 +327,8 @@ export async function applyTaprootMigrations(
     }
     if (phase === 'audit') {
       const previousRdf = await readMetadata(db, migrationSourceRdfKey);
-      await backfillRdfOwnership(db, previousRdf);
+      const previousBaseIri = await readMetadata(db, migrationSourceBaseIriKey);
+      await backfillRdfOwnership(db, previousRdf, previousBaseIri);
       await transitionPhase(db, 'audit', 'rdf');
       phase = 'rdf';
       continue;
@@ -405,7 +407,7 @@ function recoveryMetadataStatements(
     db
       .prepare(
         `INSERT INTO taproot_metadata(metadata_key, metadata_value)
-         VALUES (?, 'structure'), (?, ?), (?, ?)
+         VALUES (?, 'structure'), (?, ?), (?, ?), (?, ?)
          ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
       )
       .bind(
@@ -414,6 +416,8 @@ function recoveryMetadataStatements(
         source,
         migrationSourceRdfKey,
         previousRdf,
+        migrationSourceBaseIriKey,
+        observedIdentity ?? identity,
       ),
   ];
 }
@@ -485,10 +489,30 @@ async function finalizeRecovery(
            WHERE version = 2 AND name = 'audit-and-operations'
          )`,
     ),
+    db.prepare(
+      `INSERT INTO taproot_assertions(assertion_key)
+       SELECT NULL WHERE EXISTS (
+         SELECT 1 FROM taproot_rdf_ownership o
+         WHERE NOT EXISTS (
+           SELECT 1 FROM rdf_quads q
+           WHERE q.subject_key = o.subject_key
+             AND q.predicate_key = o.predicate_key
+             AND q.object_key = o.object_key
+             AND q.graph_key = o.graph_key
+         )
+       )`,
+    ),
     ...ledgerStatements(db, expected, adopted ? 1 : 0, appliedAt),
     db
-      .prepare(`DELETE FROM taproot_metadata WHERE metadata_key IN (?, ?, ?)`)
-      .bind(migrationPhaseKey, migrationSourceKey, migrationSourceRdfKey),
+      .prepare(
+        `DELETE FROM taproot_metadata WHERE metadata_key IN (?, ?, ?, ?)`,
+      )
+      .bind(
+        migrationPhaseKey,
+        migrationSourceKey,
+        migrationSourceRdfKey,
+        migrationSourceBaseIriKey,
+      ),
   ]);
 }
 
@@ -590,9 +614,35 @@ async function validateRecoveryState(
     throw new TaprootMigrationStateError(
       'Taproot recovery catalog differs from its durable recovery source',
     );
-  if ((await readMetadata(db, migrationSourceRdfKey)) === undefined)
+  const sourceRdf = await readMetadata(db, migrationSourceRdfKey);
+  if (sourceRdf !== '1' && sourceRdf !== TAPROOT_RDF_VERSION)
     throw new TaprootMigrationStateError(
-      'Taproot recovery source RDF version is missing',
+      'Taproot recovery source RDF version is missing or unsupported',
+    );
+  const sourceBaseIri = await readMetadata(db, migrationSourceBaseIriKey);
+  const currentBaseIri = await readMetadata(db, 'base_iri');
+  let sourceCanonical: string | undefined;
+  let currentCanonical: string | undefined;
+  try {
+    sourceCanonical =
+      sourceBaseIri === undefined
+        ? undefined
+        : canonicalizeTaprootBaseIri(sourceBaseIri);
+    currentCanonical =
+      currentBaseIri === undefined
+        ? undefined
+        : canonicalizeTaprootBaseIri(currentBaseIri);
+  } catch {
+    // Converted below into one package-specific fail-closed state error.
+  }
+  if (
+    sourceCanonical === undefined ||
+    currentCanonical === undefined ||
+    currentCanonical !== currentBaseIri ||
+    sourceCanonical !== currentCanonical
+  )
+    throw new TaprootMigrationStateError(
+      'Taproot recovery source base IRI is missing, invalid, or does not match the durable identity',
     );
 }
 

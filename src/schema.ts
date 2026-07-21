@@ -307,6 +307,7 @@ async function readMetadata(
 export async function backfillRdfOwnership(
   db: SqliteDatabaseLike,
   previousVersion: string | undefined,
+  previousBaseIri?: string,
 ): Promise<void> {
   const rows = await db
     .prepare(
@@ -336,12 +337,13 @@ export async function backfillRdfOwnership(
       factory,
     );
     const old =
-      previousVersion && previousVersion !== TAPROOT_RDF_VERSION
+      previousVersion &&
+      (previousVersion !== TAPROOT_RDF_VERSION || previousBaseIri !== baseIri)
         ? lifecycleQuads(
             entity,
             row.deleted_at,
             row.redirect_to,
-            baseIri,
+            previousBaseIri ?? baseIri,
             previousVersion,
             factory,
           )
@@ -546,6 +548,22 @@ export async function verifyTaprootSemanticState(
   if (Number(dangling.results[0]?.count ?? 0) !== 0)
     throw new SchemaMismatchError(
       'Taproot RDF ownership contains dangling rows',
+    );
+  const missingProjection = await db
+    .prepare(
+      `SELECT COUNT(*) AS count
+       FROM taproot_rdf_ownership o
+       LEFT JOIN rdf_quads q
+         ON q.subject_key = o.subject_key
+        AND q.predicate_key = o.predicate_key
+        AND q.object_key = o.object_key
+        AND q.graph_key = o.graph_key
+       WHERE q.id IS NULL`,
+    )
+    .all<{ count: number }>();
+  if (Number(missingProjection.results[0]?.count ?? 0) !== 0)
+    throw new SchemaMismatchError(
+      'Taproot RDF ownership is missing its Diamond quad projection',
     );
   const rows = await db
     .prepare(
