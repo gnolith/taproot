@@ -632,53 +632,96 @@ export async function verifyTaprootSemanticState(
 }
 
 /** Uses JavaScript trim semantics, including Unicode whitespace, for parity with runtime validation. */
+export const PERSISTED_STATEMENT_TEXT_PAGE_SIZE = 100;
+
 export async function verifyPersistedStatementText(
   db: SqliteDatabaseLike,
 ): Promise<void> {
-  const rows = await db
-    .prepare(
-      `SELECT 'current' AS source, entity_id, revision, entity_json
-       FROM taproot_entities
-       UNION ALL
-       SELECT 'historical' AS source, entity_id, revision, entity_json
-       FROM taproot_entity_revisions
-       ORDER BY entity_id, revision, source`,
-    )
-    .all<{
-      source: string;
-      entity_id: string;
-      revision: number;
-      entity_json: string;
-    }>();
-  for (const row of rows.results) {
-    let entity: unknown;
-    try {
-      entity = JSON.parse(row.entity_json);
-    } catch (cause) {
+  let currentEntityId = '';
+  while (true) {
+    const page = await db
+      .prepare(
+        `/* taproot:statement-text-current-page */
+         SELECT entity_id, revision, entity_json
+         FROM taproot_entities
+         WHERE entity_id > ?
+         ORDER BY entity_id
+         LIMIT ?`,
+      )
+      .bind(currentEntityId, PERSISTED_STATEMENT_TEXT_PAGE_SIZE)
+      .all<PersistedStatementTextRow>();
+    for (const row of page.results)
+      validatePersistedStatementText(row, 'current');
+    if (page.results.length < PERSISTED_STATEMENT_TEXT_PAGE_SIZE) break;
+    currentEntityId = (page.results.at(-1) as PersistedStatementTextRow)
+      .entity_id;
+  }
+
+  let historicalEntityId = '';
+  let historicalRevision = -1;
+  while (true) {
+    const page = await db
+      .prepare(
+        `/* taproot:statement-text-history-page */
+         SELECT entity_id, revision, entity_json
+         FROM taproot_entity_revisions
+         WHERE entity_id > ? OR (entity_id = ? AND revision > ?)
+         ORDER BY entity_id, revision
+         LIMIT ?`,
+      )
+      .bind(
+        historicalEntityId,
+        historicalEntityId,
+        historicalRevision,
+        PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
+      )
+      .all<PersistedStatementTextRow>();
+    for (const row of page.results)
+      validatePersistedStatementText(row, 'historical');
+    if (page.results.length < PERSISTED_STATEMENT_TEXT_PAGE_SIZE) break;
+    const last = page.results.at(-1) as PersistedStatementTextRow;
+    historicalEntityId = last.entity_id;
+    historicalRevision = last.revision;
+  }
+}
+
+interface PersistedStatementTextRow {
+  entity_id: string;
+  revision: number;
+  entity_json: string;
+}
+
+function validatePersistedStatementText(
+  row: PersistedStatementTextRow,
+  source: 'current' | 'historical',
+): void {
+  let entity: unknown;
+  try {
+    entity = JSON.parse(row.entity_json);
+  } catch (cause) {
+    throw new SchemaMismatchError(
+      `Taproot ${source} entity ${row.entity_id}@${row.revision} is not valid JSON`,
+      { cause },
+    );
+  }
+  if (!isRecord(entity) || !isRecord(entity.claims))
+    throw new SchemaMismatchError(
+      `Taproot ${source} entity ${row.entity_id}@${row.revision} has invalid claims`,
+    );
+  for (const statements of Object.values(entity.claims)) {
+    if (!Array.isArray(statements))
       throw new SchemaMismatchError(
-        `Taproot ${row.source} entity ${row.entity_id}@${row.revision} is not valid JSON`,
-        { cause },
+        `Taproot ${source} entity ${row.entity_id}@${row.revision} has an invalid claim group`,
       );
-    }
-    if (!isRecord(entity) || !isRecord(entity.claims))
-      throw new SchemaMismatchError(
-        `Taproot ${row.source} entity ${row.entity_id}@${row.revision} has invalid claims`,
-      );
-    for (const statements of Object.values(entity.claims)) {
-      if (!Array.isArray(statements))
+    for (const statement of statements) {
+      if (
+        !isRecord(statement) ||
+        typeof statement.text !== 'string' ||
+        statement.text.trim().length === 0
+      )
         throw new SchemaMismatchError(
-          `Taproot ${row.source} entity ${row.entity_id}@${row.revision} has an invalid claim group`,
+          `Taproot ${source} statement text is missing or blank at ${row.entity_id}@${row.revision}`,
         );
-      for (const statement of statements) {
-        if (
-          !isRecord(statement) ||
-          typeof statement.text !== 'string' ||
-          statement.text.trim().length === 0
-        )
-          throw new SchemaMismatchError(
-            `Taproot ${row.source} statement text is missing or blank at ${row.entity_id}@${row.revision}`,
-          );
-      }
     }
   }
 }

@@ -2,6 +2,7 @@ import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
 import { describe, expect, it } from 'vitest';
 import {
   InvalidStatementError,
+  PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
   SchemaMismatchError,
   TaprootMigrationStateError,
   TaprootRepository,
@@ -10,6 +11,9 @@ import {
   initializeTaproot,
   legacyTaprootV1Statements,
   type EntityCommand,
+  type SqliteDatabaseLike,
+  type SqlitePreparedStatementLike,
+  type SqliteResultLike,
   type Statement,
 } from '../src/index.js';
 
@@ -334,10 +338,75 @@ describe('authored statement text on native SQLite', () => {
       await db.close();
     }
   });
+
+  it.each(['current', 'historical'] as const)(
+    'uses bounded keyset pages and rejects a later-page %s violation',
+    async (source) => {
+      const db = new NodeSqliteDatabase(':memory:');
+      try {
+        await initializeTaproot(db, { baseIri });
+        await downgradeStatementTextMigration(db);
+        await insertPagedCorpus(db, source);
+        const tracked = new PageTrackingDatabase(db);
+        await expect(applyTaprootMigrations(tracked)).rejects.toBeInstanceOf(
+          TaprootMigrationStateError,
+        );
+        expect(
+          tracked.pageSizes.every(
+            (size) => size <= PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
+          ),
+        ).toBe(true);
+        expect(tracked.pageSizes).toContain(PERSISTED_STATEMENT_TEXT_PAGE_SIZE);
+        expect(tracked.pageSizes.at(-1)).toBe(1);
+        const state = await db
+          .prepare(
+            `SELECT
+               (SELECT metadata_value FROM taproot_metadata
+                WHERE metadata_key = 'canonical_json_version') AS json_version,
+               (SELECT COUNT(*) FROM _gnolith_migrations
+                WHERE namespace = '@gnolith/taproot') AS ledger_count`,
+          )
+          .all<{ json_version: string; ledger_count: number }>();
+        expect(state.results[0]).toMatchObject({
+          json_version: '1',
+          ledger_count: 2,
+        });
+      } finally {
+        await db.close();
+      }
+    },
+  );
+
+  it('migrates a valid corpus spanning multiple bounded current and history pages', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await initializeTaproot(db, { baseIri });
+      const repository = new TaprootRepository(db, { baseIri });
+      for (
+        let index = 0;
+        index <= PERSISTED_STATEMENT_TEXT_PAGE_SIZE;
+        index += 1
+      )
+        await repository.createItem();
+      await downgradeStatementTextMigration(db);
+      const tracked = new PageTrackingDatabase(db);
+      await expect(applyTaprootMigrations(tracked)).resolves.toMatchObject({
+        current: true,
+      });
+      expect(tracked.pageSizes).toEqual([
+        PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
+        1,
+        PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
+        1,
+      ]);
+    } finally {
+      await db.close();
+    }
+  });
 });
 
 async function downgradeStatementTextMigration(
-  db: NodeSqliteDatabase,
+  db: SqliteDatabaseLike,
 ): Promise<void> {
   await db.batch([
     db.prepare(
@@ -351,6 +420,141 @@ async function downgradeStatementTextMigration(
        WHERE metadata_key = 'canonical_json_version'`,
     ),
   ]);
+}
+
+async function insertPagedCorpus(
+  db: SqliteDatabaseLike,
+  source: 'current' | 'historical',
+): Promise<void> {
+  const page = PERSISTED_STATEMENT_TEXT_PAGE_SIZE;
+  if (source === 'current') {
+    await db.batch(
+      Array.from({ length: page + 1 }, (_, index) => {
+        const id = `Q${String(index + 1).padStart(4, '0')}`;
+        const json = pagedEntityJson(
+          id,
+          1,
+          index === page ? '\u00a0' : undefined,
+        );
+        return db
+          .prepare(
+            `INSERT INTO taproot_entities(
+               entity_id, entity_type, datatype, revision, entity_json, modified_at
+             ) VALUES (?, 'item', NULL, 1, ?, '2026-01-01T00:00:00.000Z')`,
+          )
+          .bind(id, json);
+      }),
+    );
+    return;
+  }
+  const id = 'Q1';
+  const current = pagedEntityJson(id, page + 1);
+  await db
+    .prepare(
+      `INSERT INTO taproot_entities(
+         entity_id, entity_type, datatype, revision, entity_json, modified_at
+       ) VALUES (?, 'item', NULL, ?, ?, '2026-01-01T00:00:00.000Z')`,
+    )
+    .bind(id, page + 1, current)
+    .run();
+  await db.batch(
+    Array.from({ length: page + 1 }, (_, index) => {
+      const revision = index + 1;
+      const json = pagedEntityJson(
+        id,
+        revision,
+        index === page ? '\u00a0' : undefined,
+      );
+      return db
+        .prepare(
+          `INSERT INTO taproot_entity_revisions(
+             entity_id, revision, entity_json, tags_json, event_id,
+             content_hash, created_at
+           ) VALUES (?, ?, ?, '[]', ?, ?, '2026-01-01T00:00:00.000Z')`,
+        )
+        .bind(id, revision, json, `event-${revision}`, `hash-${revision}`);
+    }),
+  );
+}
+
+function pagedEntityJson(
+  id: string,
+  revision: number,
+  statementText?: string,
+): string {
+  return JSON.stringify({
+    id,
+    type: 'item',
+    labels: {},
+    descriptions: {},
+    aliases: {},
+    claims:
+      statementText === undefined
+        ? {}
+        : {
+            P1: [
+              {
+                id: `${id}$later-page`,
+                type: 'statement',
+                text: statementText,
+              },
+            ],
+          },
+    sitelinks: {},
+    lastrevid: revision,
+    modified: '2026-01-01T00:00:00.000Z',
+  });
+}
+
+class PageTrackingStatement implements SqlitePreparedStatementLike {
+  constructor(
+    readonly sql: string,
+    readonly inner: SqlitePreparedStatementLike,
+    private readonly recordPage: (size: number) => void,
+  ) {}
+
+  bind(...values: unknown[]): PageTrackingStatement {
+    return new PageTrackingStatement(
+      this.sql,
+      this.inner.bind(...values),
+      this.recordPage,
+    );
+  }
+
+  run<T = Record<string, unknown>>(): Promise<SqliteResultLike<T>> {
+    return this.inner.run<T>();
+  }
+
+  async all<T = Record<string, unknown>>(): Promise<SqliteResultLike<T>> {
+    const result = await this.inner.all<T>();
+    if (this.sql.includes('taproot:statement-text-'))
+      this.recordPage(result.results.length);
+    return result;
+  }
+}
+
+class PageTrackingDatabase implements SqliteDatabaseLike {
+  readonly pageSizes: number[] = [];
+
+  constructor(private readonly inner: SqliteDatabaseLike) {}
+
+  prepare(sql: string): PageTrackingStatement {
+    return new PageTrackingStatement(sql, this.inner.prepare(sql), (size) =>
+      this.pageSizes.push(size),
+    );
+  }
+
+  batch<T = Record<string, unknown>>(
+    statements: SqlitePreparedStatementLike[],
+  ): Promise<Array<SqliteResultLike<T>>> {
+    return this.inner.batch<T>(
+      statements.map((statement) => {
+        if (!(statement instanceof PageTrackingStatement))
+          throw new Error('Expected a page-tracked statement');
+        return statement.inner;
+      }),
+    );
+  }
 }
 
 async function insertCurrentAndHistorical(

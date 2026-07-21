@@ -6,6 +6,7 @@ import {
   EntityTooLargeError,
   InvalidEntityError,
   InvalidStatementError,
+  PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
   PropertyDatatypeMismatchError,
   PropertyNotFoundError,
   QuadPatchTooLargeError,
@@ -43,6 +44,47 @@ async function environment() {
 }
 
 describe('TaprootRepository on Workerd D1', () => {
+  it.each(['current', 'historical'] as const)(
+    'keyset-paginates D1 %s data and rejects a violation after page one',
+    async (source) => {
+      const env = await environment();
+      try {
+        await env.db.batch([
+          env.db.prepare(
+            `DELETE FROM _gnolith_migrations
+             WHERE namespace = '@gnolith/taproot'
+               AND migration_id = '0003-canonical-statement-text'`,
+          ),
+          env.db.prepare(`DELETE FROM taproot_migrations WHERE version = 3`),
+          env.db.prepare(
+            `UPDATE taproot_metadata SET metadata_value = '1'
+             WHERE metadata_key = 'canonical_json_version'`,
+          ),
+        ]);
+        await insertD1PagedCorpus(env.db, source);
+        await expect(applyTaprootMigrations(env.db)).rejects.toBeInstanceOf(
+          TaprootMigrationStateError,
+        );
+        const state = await env.db
+          .prepare(
+            `SELECT
+               (SELECT metadata_value FROM taproot_metadata
+                WHERE metadata_key = 'canonical_json_version') AS json_version,
+               (SELECT COUNT(*) FROM _gnolith_migrations
+                WHERE namespace = '@gnolith/taproot') AS ledger_count`,
+          )
+          .all<{ json_version: string; ledger_count: number }>();
+        expect(state.results[0]).toMatchObject({
+          json_version: '1',
+          ledger_count: 2,
+        });
+      } finally {
+        await env.dispose();
+      }
+    },
+    30_000,
+  );
+
   it('rejects Unicode-whitespace text in historical-only D1 migration data', async () => {
     const env = await environment();
     try {
@@ -919,3 +961,89 @@ describe('TaprootRepository on Workerd D1', () => {
     }
   }, 30_000);
 });
+
+async function insertD1PagedCorpus(
+  db: D1DatabaseLike,
+  source: 'current' | 'historical',
+): Promise<void> {
+  const page = PERSISTED_STATEMENT_TEXT_PAGE_SIZE;
+  if (source === 'current') {
+    await db.batch(
+      Array.from({ length: page + 1 }, (_, index) => {
+        const id = `Q${String(index + 1).padStart(4, '0')}`;
+        return db
+          .prepare(
+            `INSERT INTO taproot_entities(
+               entity_id, entity_type, datatype, revision, entity_json, modified_at
+             ) VALUES (?, 'item', NULL, 1, ?, '2026-01-01T00:00:00.000Z')`,
+          )
+          .bind(
+            id,
+            d1PagedEntityJson(id, 1, index === page ? '\u00a0' : undefined),
+          );
+      }),
+    );
+    return;
+  }
+  const id = 'Q1';
+  await db
+    .prepare(
+      `INSERT INTO taproot_entities(
+         entity_id, entity_type, datatype, revision, entity_json, modified_at
+       ) VALUES (?, 'item', NULL, ?, ?, '2026-01-01T00:00:00.000Z')`,
+    )
+    .bind(id, page + 1, d1PagedEntityJson(id, page + 1))
+    .run();
+  await db.batch(
+    Array.from({ length: page + 1 }, (_, index) => {
+      const revision = index + 1;
+      return db
+        .prepare(
+          `INSERT INTO taproot_entity_revisions(
+             entity_id, revision, entity_json, tags_json, event_id,
+             content_hash, created_at
+           ) VALUES (?, ?, ?, '[]', ?, ?, '2026-01-01T00:00:00.000Z')`,
+        )
+        .bind(
+          id,
+          revision,
+          d1PagedEntityJson(
+            id,
+            revision,
+            index === page ? '\u00a0' : undefined,
+          ),
+          `event-${revision}`,
+          `hash-${revision}`,
+        );
+    }),
+  );
+}
+
+function d1PagedEntityJson(
+  id: string,
+  revision: number,
+  statementText?: string,
+): string {
+  return JSON.stringify({
+    id,
+    type: 'item',
+    labels: {},
+    descriptions: {},
+    aliases: {},
+    claims:
+      statementText === undefined
+        ? {}
+        : {
+            P1: [
+              {
+                id: `${id}$later-page`,
+                type: 'statement',
+                text: statementText,
+              },
+            ],
+          },
+    sitelinks: {},
+    lastrevid: revision,
+    modified: '2026-01-01T00:00:00.000Z',
+  });
+}

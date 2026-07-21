@@ -23,6 +23,8 @@ revision has a statement without nonblank `text`, migration fails closed and
 leaves canonical JSON version 1 recorded. An operator must use a separately
 authorized curation/import process to supply genuinely authored text; Taproot
 does not infer a fallback from structured statement fields.
+The validation scans current entities and immutable history with deterministic
+100-row keyset pages, so migration does not require an unbounded D1 result set.
 
 Hosts can call `planTaprootMigrations(db)`,
 `inspectTaprootPersistence(db)`, and
