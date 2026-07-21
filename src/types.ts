@@ -108,6 +108,8 @@ export interface Reference {
 export interface Statement {
   id: string;
   type: 'statement';
+  /** Authored natural-language description of this exact statement revision. */
+  text: string;
   rank: Rank;
   mainsnak: Snak;
   qualifiers: Record<PropertyId, Snak[]>;
@@ -174,6 +176,11 @@ export interface EditMetadata {
 
 export interface ExpectedRevision extends EditMetadata {
   expectedRevision: number;
+}
+
+/** Explicit authored text for every statement carried into a whole-entity revision. */
+export interface StatementRevisionEdit extends ExpectedRevision {
+  statementTexts: Readonly<Record<string, string>>;
 }
 
 export interface WriteResult {
@@ -293,22 +300,39 @@ export type EntityCommand =
   | { type: 'add-statement'; statement: Statement }
   | { type: 'replace-statement'; statementId: string; statement: Statement }
   | { type: 'remove-statement'; statementId: string }
-  | { type: 'set-statement-rank'; statementId: string; rank: Rank }
-  | { type: 'add-qualifier'; statementId: string; snak: Snak }
+  | {
+      type: 'set-statement-rank';
+      statementId: string;
+      rank: Rank;
+      text: string;
+    }
+  | { type: 'add-qualifier'; statementId: string; snak: Snak; text: string }
   | {
       type: 'remove-qualifier';
       statementId: string;
       property: PropertyId;
       ordinal: number;
+      text: string;
     }
-  | { type: 'add-reference'; statementId: string; reference: Reference }
+  | {
+      type: 'add-reference';
+      statementId: string;
+      reference: Reference;
+      text: string;
+    }
   | {
       type: 'replace-reference';
       statementId: string;
       hash: string;
       reference: Reference;
+      text: string;
     }
-  | { type: 'remove-reference'; statementId: string; hash: string };
+  | {
+      type: 'remove-reference';
+      statementId: string;
+      hash: string;
+      text: string;
+    };
 
 export type TaprootValidator = (
   entity: WikibaseEntity,

@@ -10,7 +10,7 @@ import type { EntityId, WikibaseEntity } from './types.js';
 import { SchemaMismatchError } from './errors.js';
 
 export const TAPROOT_SCHEMA_VERSION = '2';
-export const TAPROOT_JSON_VERSION = '1';
+export const TAPROOT_JSON_VERSION = '2';
 export const TAPROOT_RDF_VERSION = '2';
 
 export const taprootSchemaStatements = [
@@ -124,9 +124,20 @@ export const taprootSchemaStatements = [
       ('canonical_json_version', '${TAPROOT_JSON_VERSION}'),
       ('rdf_mapping_version', '${TAPROOT_RDF_VERSION}')
     ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
-  `INSERT INTO taproot_migrations(version, name) VALUES (1, 'initial'), (2, 'audit-and-operations')
+  `INSERT INTO taproot_migrations(version, name) VALUES (1, 'initial'), (2, 'audit-and-operations'), (3, 'canonical-statement-text')
     ON CONFLICT(version) DO NOTHING`,
 ] as const;
+
+/** Exact package-created schema before authored statement text became required. */
+export const preStatementTextTaprootSchemaStatements =
+  taprootSchemaStatements.map((sql) =>
+    sql
+      .replace(
+        "('canonical_json_version', '2')",
+        "('canonical_json_version', '1')",
+      )
+      .replace(", (3, 'canonical-statement-text')", ''),
+  );
 
 const schemaStatement = (prefix: string): string => {
   const statement = taprootSchemaStatements.find((sql) =>
@@ -620,6 +631,101 @@ export async function verifyTaprootSemanticState(
   }
 }
 
+/** Uses JavaScript trim semantics, including Unicode whitespace, for parity with runtime validation. */
+export const PERSISTED_STATEMENT_TEXT_PAGE_SIZE = 100;
+
+export async function verifyPersistedStatementText(
+  db: SqliteDatabaseLike,
+): Promise<void> {
+  let currentEntityId = '';
+  while (true) {
+    const page = await db
+      .prepare(
+        `/* taproot:statement-text-current-page */
+         SELECT entity_id, revision, entity_json
+         FROM taproot_entities
+         WHERE entity_id > ?
+         ORDER BY entity_id
+         LIMIT ?`,
+      )
+      .bind(currentEntityId, PERSISTED_STATEMENT_TEXT_PAGE_SIZE)
+      .all<PersistedStatementTextRow>();
+    for (const row of page.results)
+      validatePersistedStatementText(row, 'current');
+    if (page.results.length < PERSISTED_STATEMENT_TEXT_PAGE_SIZE) break;
+    currentEntityId = (page.results.at(-1) as PersistedStatementTextRow)
+      .entity_id;
+  }
+
+  let historicalEntityId = '';
+  let historicalRevision = -1;
+  while (true) {
+    const page = await db
+      .prepare(
+        `/* taproot:statement-text-history-page */
+         SELECT entity_id, revision, entity_json
+         FROM taproot_entity_revisions
+         WHERE entity_id > ? OR (entity_id = ? AND revision > ?)
+         ORDER BY entity_id, revision
+         LIMIT ?`,
+      )
+      .bind(
+        historicalEntityId,
+        historicalEntityId,
+        historicalRevision,
+        PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
+      )
+      .all<PersistedStatementTextRow>();
+    for (const row of page.results)
+      validatePersistedStatementText(row, 'historical');
+    if (page.results.length < PERSISTED_STATEMENT_TEXT_PAGE_SIZE) break;
+    const last = page.results.at(-1) as PersistedStatementTextRow;
+    historicalEntityId = last.entity_id;
+    historicalRevision = last.revision;
+  }
+}
+
+interface PersistedStatementTextRow {
+  entity_id: string;
+  revision: number;
+  entity_json: string;
+}
+
+function validatePersistedStatementText(
+  row: PersistedStatementTextRow,
+  source: 'current' | 'historical',
+): void {
+  let entity: unknown;
+  try {
+    entity = JSON.parse(row.entity_json);
+  } catch (cause) {
+    throw new SchemaMismatchError(
+      `Taproot ${source} entity ${row.entity_id}@${row.revision} is not valid JSON`,
+      { cause },
+    );
+  }
+  if (!isRecord(entity) || !isRecord(entity.claims))
+    throw new SchemaMismatchError(
+      `Taproot ${source} entity ${row.entity_id}@${row.revision} has invalid claims`,
+    );
+  for (const statements of Object.values(entity.claims)) {
+    if (!Array.isArray(statements))
+      throw new SchemaMismatchError(
+        `Taproot ${source} entity ${row.entity_id}@${row.revision} has an invalid claim group`,
+      );
+    for (const statement of statements) {
+      if (
+        !isRecord(statement) ||
+        typeof statement.text !== 'string' ||
+        statement.text.trim().length === 0
+      )
+        throw new SchemaMismatchError(
+          `Taproot ${source} statement text is missing or blank at ${row.entity_id}@${row.revision}`,
+        );
+    }
+  }
+}
+
 export async function verifyTaprootPackageSeeds(
   db: SqliteDatabaseLike,
 ): Promise<void> {
@@ -627,15 +733,16 @@ export async function verifyTaprootPackageSeeds(
     .prepare(
       `SELECT COUNT(*) AS count FROM taproot_migrations
        WHERE (version = 1 AND name = 'initial')
-          OR (version = 2 AND name = 'audit-and-operations')`,
+          OR (version = 2 AND name = 'audit-and-operations')
+          OR (version = 3 AND name = 'canonical-statement-text')`,
     )
     .all<{ count: number }>();
   const migrationSeedTotal = await db
     .prepare(`SELECT COUNT(*) AS count FROM taproot_migrations`)
     .all<{ count: number }>();
   if (
-    Number(migrationSeeds.results[0]?.count ?? 0) !== 2 ||
-    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 2
+    Number(migrationSeeds.results[0]?.count ?? 0) !== 3 ||
+    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 3
   )
     throw new SchemaMismatchError(
       'Taproot package migration seeds are incomplete',
@@ -796,6 +903,10 @@ export async function isExactTaprootPreFinalizeSchema(
   db: SqliteDatabaseLike,
 ): Promise<boolean> {
   return matchesExactCatalog(db, taprootPreFinalizeCatalogStatements);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 async function matchesExactCatalog(

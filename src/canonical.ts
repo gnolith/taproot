@@ -147,6 +147,7 @@ function canonicalizeStatement(statement: Statement): Statement {
   return {
     id: statement.id,
     type: 'statement',
+    text: statement.text,
     rank: statement.rank,
     mainsnak: canonicalizeSnak(statement.mainsnak),
     qualifiers: sortRecord(statement.qualifiers, (snaks) =>
@@ -255,6 +256,7 @@ function validateStatement(
   if (typeof value.id !== 'string' || value.id.length === 0) {
     throw new InvalidStatementError('Statement id is required');
   }
+  assertAuthoredStatementText(value.text, String(value.id));
   if (!value.id.startsWith(`${entityId}$`)) {
     throw new InvalidStatementError(
       `Statement ${value.id} is not owned by ${entityId}`,
@@ -643,18 +645,31 @@ export function cloneDataValue(value: DataValueValue): DataValueValue {
 export function createStatement(
   entityId: EntityId,
   mainsnak: Snak,
+  text: string,
   options: { id?: string; rank?: Statement['rank'] } = {},
 ): Statement {
   validateSnak(mainsnak);
+  assertAuthoredStatementText(text);
   return {
     id: options.id ?? `${entityId}$${crypto.randomUUID()}`,
     type: 'statement',
+    text,
     rank: options.rank ?? 'normal',
     mainsnak: structuredClone(mainsnak),
     qualifiers: {},
     'qualifiers-order': [],
     references: [],
   };
+}
+
+export function assertAuthoredStatementText(
+  text: unknown,
+  statementId?: string,
+): asserts text is string {
+  if (typeof text !== 'string' || text.trim().length === 0)
+    throw new InvalidStatementError(
+      `Statement${statementId ? ` ${statementId}` : ''} text must be explicitly authored and non-empty`,
+    );
 }
 
 export function createReference(

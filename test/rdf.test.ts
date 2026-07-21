@@ -55,6 +55,7 @@ function statement(
   return {
     id,
     type: 'statement',
+    text: `${id} authored text`,
     rank,
     mainsnak,
     qualifiers: {},

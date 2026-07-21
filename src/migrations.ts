@@ -26,22 +26,55 @@ import {
   isRecognizedLegacyV1,
   legacyRevisionFinalizeStatements,
   legacyTaprootStructureStatements,
+  preStatementTextTaprootSchemaStatements,
   taprootFinalizeStatements,
   taprootSchemaStatements,
   verifyTaprootPackageSeeds,
+  verifyPersistedStatementText,
   verifyTaprootSemanticState,
 } from './schema.js';
 
 export const taprootMigrationNamespace = '@gnolith/taproot';
 
 export const taprootMigrations = [
-  { id: '0001-v0.1-schema', statements: taprootSchemaStatements },
+  {
+    id: '0001-v0.1-schema',
+    statements: preStatementTextTaprootSchemaStatements,
+  },
   {
     id: '0002-durable-database-identity',
     statements: [
       `INSERT INTO taproot_metadata(metadata_key, metadata_value)
        VALUES ('migration_api_version', '1')
        ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
+    ],
+  },
+  {
+    id: '0003-canonical-statement-text',
+    statements: [
+      `INSERT INTO taproot_assertions(assertion_key)
+       WITH canonical_json(entity_json) AS (
+         SELECT entity_json FROM taproot_entities
+         UNION ALL
+         SELECT entity_json FROM taproot_entity_revisions
+       )
+       SELECT NULL
+       FROM canonical_json AS source,
+         json_each(source.entity_json, '$.claims') AS claim,
+         json_each(claim.value) AS statement
+       WHERE json_type(statement.value, '$.text') IS NOT 'text'
+          OR trim(json_extract(statement.value, '$.text')) = ''
+       LIMIT 1`,
+      `UPDATE taproot_metadata SET metadata_value = '2'
+       WHERE metadata_key = 'canonical_json_version' AND metadata_value = '1'`,
+      `INSERT INTO taproot_assertions(assertion_key)
+       SELECT NULL WHERE NOT EXISTS (
+         SELECT 1 FROM taproot_metadata
+         WHERE metadata_key = 'canonical_json_version' AND metadata_value = '2'
+       )`,
+      `INSERT INTO taproot_migrations(version, name)
+       VALUES (3, 'canonical-statement-text')
+       ON CONFLICT(version) DO NOTHING`,
     ],
   },
 ] as const satisfies readonly NamespacedMigration[];
@@ -155,10 +188,6 @@ export async function planTaprootMigrations(
       adopted: false,
     }));
   }
-  if (applied.length > 0 && applied.length !== expected.length)
-    throw new TaprootMigrationStateError(
-      'Taproot migration ledger is partial and has no recovery marker',
-    );
   const schema = knownSchema ?? (await inspectTaprootSchema(db));
   const taprootTableCount = await countTaprootTables(db);
   const exactCurrent =
@@ -226,6 +255,48 @@ export async function applyTaprootMigrations(
   let phase = await readMetadata(db, migrationPhaseKey);
 
   if (phase !== undefined) await validateRecoveryState(db, phase, applied);
+  if (
+    phase === undefined &&
+    applied.length > 0 &&
+    applied.length < expected.length
+  ) {
+    if (!(await isExactTaprootSchema(db)))
+      throw new TaprootMigrationStateError(
+        'Pending Taproot migrations require the exact prior package catalog',
+      );
+    const pending = expected.slice(applied.length);
+    if (
+      pending.length !== 1 ||
+      pending[0]?.migration.id !== '0003-canonical-statement-text'
+    )
+      throw new TaprootMigrationStateError(
+        'Taproot migration ledger is partial and has no supported upgrade path',
+      );
+    const appliedAt = new Date().toISOString();
+    try {
+      await verifyPersistedStatementText(db);
+    } catch (cause) {
+      throw new TaprootMigrationStateError(
+        'Existing Taproot statements lack explicitly authored nonblank text; migration refused without rewriting or inventing historical text',
+        { cause },
+      );
+    }
+    try {
+      await db.batch([
+        ...pending.flatMap(({ migration }) =>
+          migration.statements.map((sql) => db.prepare(sql)),
+        ),
+        ...ledgerStatements(db, pending, 0, appliedAt),
+      ]);
+    } catch (cause) {
+      throw new TaprootMigrationStateError(
+        'Canonical statement-text migration failed; existing data may lack explicitly authored text and no historical text was inferred or rewritten',
+        { cause },
+      );
+    }
+    applied = await readAppliedMigrations(db, taprootMigrationNamespace);
+    validateApplied(applied, expected);
+  }
   if (phase === undefined && applied.length > 0) {
     if (applied.length !== expected.length)
       throw new TaprootMigrationStateError(
@@ -334,6 +405,7 @@ export async function applyTaprootMigrations(
       continue;
     }
     if (phase === 'rdf') {
+      await verifyPersistedStatementText(db);
       await verifyTaprootSemanticState(db, identity);
       await finalizeRecovery(
         db,
@@ -479,7 +551,7 @@ async function finalizeRecovery(
     db.prepare(
       `INSERT INTO taproot_assertions(assertion_key)
        SELECT NULL WHERE
-         (SELECT COUNT(*) FROM taproot_migrations) != 2
+         (SELECT COUNT(*) FROM taproot_migrations) != 3
          OR NOT EXISTS (
            SELECT 1 FROM taproot_migrations
            WHERE version = 1 AND name = 'initial'
@@ -487,6 +559,10 @@ async function finalizeRecovery(
          OR NOT EXISTS (
            SELECT 1 FROM taproot_migrations
            WHERE version = 2 AND name = 'audit-and-operations'
+         )
+         OR NOT EXISTS (
+           SELECT 1 FROM taproot_migrations
+           WHERE version = 3 AND name = 'canonical-statement-text'
          )`,
     ),
     db.prepare(

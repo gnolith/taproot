@@ -5,12 +5,16 @@ import {
   EntityAlreadyExistsError,
   EntityTooLargeError,
   InvalidEntityError,
+  InvalidStatementError,
+  PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
   PropertyDatatypeMismatchError,
   PropertyNotFoundError,
   QuadPatchTooLargeError,
   RevisionConflictError,
   SchemaMismatchError,
   TaprootRepository,
+  TaprootMigrationStateError,
+  applyTaprootMigrations,
   initializeTaproot,
   inspectTaprootPersistence,
   legacyTaprootV1Statements,
@@ -40,6 +44,181 @@ async function environment() {
 }
 
 describe('TaprootRepository on Workerd D1', () => {
+  it.each(['current', 'historical'] as const)(
+    'keyset-paginates D1 %s data and rejects a violation after page one',
+    async (source) => {
+      const env = await environment();
+      try {
+        await env.db.batch([
+          env.db.prepare(
+            `DELETE FROM _gnolith_migrations
+             WHERE namespace = '@gnolith/taproot'
+               AND migration_id = '0003-canonical-statement-text'`,
+          ),
+          env.db.prepare(`DELETE FROM taproot_migrations WHERE version = 3`),
+          env.db.prepare(
+            `UPDATE taproot_metadata SET metadata_value = '1'
+             WHERE metadata_key = 'canonical_json_version'`,
+          ),
+        ]);
+        await insertD1PagedCorpus(env.db, source);
+        await expect(applyTaprootMigrations(env.db)).rejects.toBeInstanceOf(
+          TaprootMigrationStateError,
+        );
+        const state = await env.db
+          .prepare(
+            `SELECT
+               (SELECT metadata_value FROM taproot_metadata
+                WHERE metadata_key = 'canonical_json_version') AS json_version,
+               (SELECT COUNT(*) FROM _gnolith_migrations
+                WHERE namespace = '@gnolith/taproot') AS ledger_count`,
+          )
+          .all<{ json_version: string; ledger_count: number }>();
+        expect(state.results[0]).toMatchObject({
+          json_version: '1',
+          ledger_count: 2,
+        });
+      } finally {
+        await env.dispose();
+      }
+    },
+    30_000,
+  );
+
+  it('rejects Unicode-whitespace text in historical-only D1 migration data', async () => {
+    const env = await environment();
+    try {
+      const current = JSON.stringify({
+        id: 'Q1',
+        type: 'item',
+        labels: {},
+        descriptions: {},
+        aliases: {},
+        claims: {},
+        sitelinks: {},
+        lastrevid: 2,
+        modified: '2026-01-02T00:00:00.000Z',
+      });
+      const historical = JSON.stringify({
+        ...JSON.parse(current),
+        claims: {
+          P1: [
+            {
+              id: 'Q1$historical',
+              type: 'statement',
+              text: '\u00a0',
+              rank: 'normal',
+              mainsnak: {
+                snaktype: 'somevalue',
+                property: 'P1',
+                datatype: 'string',
+              },
+              qualifiers: {},
+              'qualifiers-order': [],
+              references: [],
+            },
+          ],
+        },
+        lastrevid: 1,
+        modified: '2026-01-01T00:00:00.000Z',
+      });
+      await env.db.batch([
+        env.db.prepare(
+          `DELETE FROM _gnolith_migrations
+           WHERE namespace = '@gnolith/taproot'
+             AND migration_id = '0003-canonical-statement-text'`,
+        ),
+        env.db.prepare(`DELETE FROM taproot_migrations WHERE version = 3`),
+        env.db.prepare(
+          `UPDATE taproot_metadata SET metadata_value = '1'
+           WHERE metadata_key = 'canonical_json_version'`,
+        ),
+        env.db
+          .prepare(
+            `INSERT INTO taproot_entities(entity_id, entity_type, datatype, revision, entity_json, modified_at)
+             VALUES ('Q1', 'item', NULL, 2, ?, '2026-01-02T00:00:00.000Z')`,
+          )
+          .bind(current),
+        env.db
+          .prepare(
+            `INSERT INTO taproot_entity_revisions(
+               entity_id, revision, entity_json, tags_json, event_id,
+               content_hash, created_at
+             ) VALUES ('Q1', 1, ?, '[]', 'historical-event',
+               'historical-hash', '2026-01-01T00:00:00.000Z'),
+               ('Q1', 2, ?, '[]', 'current-event',
+               'current-hash', '2026-01-02T00:00:00.000Z')`,
+          )
+          .bind(historical, current),
+      ]);
+      await expect(applyTaprootMigrations(env.db)).rejects.toBeInstanceOf(
+        TaprootMigrationStateError,
+      );
+    } finally {
+      await env.dispose();
+    }
+  }, 20_000);
+
+  it('enforces authored statement text and explicit resupply on D1', async () => {
+    const env = await environment();
+    try {
+      await env.repository.createProperty({ id: 'P1', datatype: 'string' });
+      await env.repository.createItem({ id: 'Q1' });
+      const statement: Statement = {
+        id: 'Q1$text-contract',
+        type: 'statement',
+        text: 'The item concerns wood-fired ceramics.',
+        rank: 'normal',
+        mainsnak: {
+          snaktype: 'value',
+          property: 'P1',
+          datatype: 'string',
+          datavalue: { type: 'string', value: 'wood-fired ceramics' },
+        },
+        qualifiers: {},
+        'qualifiers-order': [],
+        references: [],
+      };
+      await expect(
+        env.repository.addStatement(
+          'Q1',
+          { ...statement, text: '   ' },
+          {
+            expectedRevision: 1,
+          },
+        ),
+      ).rejects.toBeInstanceOf(InvalidStatementError);
+      const added = await env.repository.addStatement('Q1', statement, {
+        expectedRevision: 1,
+      });
+      await expect(
+        env.repository.setStatementRank(
+          'Q1',
+          statement.id,
+          'preferred',
+          undefined as never,
+          { expectedRevision: added.newRevision },
+        ),
+      ).rejects.toBeInstanceOf(InvalidStatementError);
+      const updated = await env.repository.setStatementRank(
+        'Q1',
+        statement.id,
+        'preferred',
+        'The item concerns reviewed wood-fired ceramics.',
+        { expectedRevision: added.newRevision },
+      );
+      expect(updated.entity.claims.P1?.[0]?.text).toBe(
+        'The item concerns reviewed wood-fired ceramics.',
+      );
+      expect(
+        (await env.repository.getEntityRevision('Q1', 2)).entity.claims.P1?.[0]
+          ?.text,
+      ).toBe('The item concerns wood-fired ceramics.');
+    } finally {
+      await env.dispose();
+    }
+  }, 20_000);
+
   it('upgrades a version-one database and backfills immutable audit history', async () => {
     const miniflare = new Miniflare({
       modules: true,
@@ -177,6 +356,7 @@ describe('TaprootRepository on Workerd D1', () => {
       const statement: Statement = {
         id: 'Q1$s1',
         type: 'statement',
+        text: 'Ada Lovelace worked as a programmer.',
         rank: 'normal',
         mainsnak,
         qualifiers: {},
@@ -190,12 +370,14 @@ describe('TaprootRepository on Workerd D1', () => {
         'Q1',
         statement.id,
         qualifier,
+        'Ada Lovelace worked as a programmer during this period.',
         { expectedRevision: withStatement.newRevision },
       );
       const withReference = await env.repository.addReference(
         'Q1',
         statement.id,
         reference,
+        'Ada Lovelace worked as a programmer, according to source 1.',
         {
           expectedRevision: withQualifier.newRevision,
           actor: 'test',
@@ -253,12 +435,14 @@ describe('TaprootRepository on Workerd D1', () => {
         statement.id,
         reference.hash,
         replacementReference,
+        'Ada Lovelace worked as a programmer, according to source 2.',
         { expectedRevision: withReference.newRevision },
       );
       const removedReference = await env.repository.removeReference(
         'Q1',
         statement.id,
         replacementReference.hash,
+        'Ada Lovelace worked as a programmer.',
         { expectedRevision: replacedReference.newRevision },
       );
       const removedQualifier = await env.repository.removeQualifier(
@@ -266,16 +450,19 @@ describe('TaprootRepository on Workerd D1', () => {
         statement.id,
         'P2',
         0,
+        'Ada Lovelace worked as a programmer.',
         { expectedRevision: removedReference.newRevision },
       );
       const ranked = await env.repository.setStatementRank(
         'Q1',
         statement.id,
         'preferred',
+        'Ada Lovelace worked as a programmer (preferred statement).',
         { expectedRevision: removedQualifier.newRevision },
       );
       const replacementStatement: Statement = {
         ...statement,
+        text: 'Ada Lovelace worked as a researcher.',
         rank: 'preferred',
         mainsnak: {
           ...mainsnak,
@@ -446,6 +633,7 @@ describe('TaprootRepository on Workerd D1', () => {
       const missing: Statement = {
         id: 'Q1$missing',
         type: 'statement',
+        text: 'The item has an unavailable property value.',
         rank: 'normal',
         mainsnak: {
           snaktype: 'somevalue',
@@ -493,6 +681,7 @@ describe('TaprootRepository on Workerd D1', () => {
       await expect(
         env.repository.replaceEntity('P1', changedProperty, {
           expectedRevision: property.newRevision,
+          statementTexts: {},
         }),
       ).rejects.toBeInstanceOf(InvalidEntityError);
     } finally {
@@ -675,6 +864,7 @@ describe('TaprootRepository on Workerd D1', () => {
             {
               id: 'Q30$bulk',
               type: 'statement',
+              text: 'Q30 has a planned dependency.',
               rank: 'normal',
               mainsnak: {
                 snaktype: 'value',
@@ -721,6 +911,7 @@ describe('TaprootRepository on Workerd D1', () => {
       const sharedStatement = (id: `Q${number}`): Statement => ({
         id: `${id}$shared`,
         type: 'statement',
+        text: `${id} shares the recorded time.`,
         rank: 'normal',
         mainsnak: structuredClone(sharedSnak),
         qualifiers: {},
@@ -760,6 +951,7 @@ describe('TaprootRepository on Workerd D1', () => {
       ).toBe(true);
       const reverted = await env.repository.revertEntity('Q1', 1, {
         expectedRevision: edited.newRevision,
+        statementTexts: {},
         editSummary: 'revert to seed',
       });
       expect(reverted.entity.labels.en?.value).toBe('seed');
@@ -769,3 +961,89 @@ describe('TaprootRepository on Workerd D1', () => {
     }
   }, 30_000);
 });
+
+async function insertD1PagedCorpus(
+  db: D1DatabaseLike,
+  source: 'current' | 'historical',
+): Promise<void> {
+  const page = PERSISTED_STATEMENT_TEXT_PAGE_SIZE;
+  if (source === 'current') {
+    await db.batch(
+      Array.from({ length: page + 1 }, (_, index) => {
+        const id = `Q${String(index + 1).padStart(4, '0')}`;
+        return db
+          .prepare(
+            `INSERT INTO taproot_entities(
+               entity_id, entity_type, datatype, revision, entity_json, modified_at
+             ) VALUES (?, 'item', NULL, 1, ?, '2026-01-01T00:00:00.000Z')`,
+          )
+          .bind(
+            id,
+            d1PagedEntityJson(id, 1, index === page ? '\u00a0' : undefined),
+          );
+      }),
+    );
+    return;
+  }
+  const id = 'Q1';
+  await db
+    .prepare(
+      `INSERT INTO taproot_entities(
+         entity_id, entity_type, datatype, revision, entity_json, modified_at
+       ) VALUES (?, 'item', NULL, ?, ?, '2026-01-01T00:00:00.000Z')`,
+    )
+    .bind(id, page + 1, d1PagedEntityJson(id, page + 1))
+    .run();
+  await db.batch(
+    Array.from({ length: page + 1 }, (_, index) => {
+      const revision = index + 1;
+      return db
+        .prepare(
+          `INSERT INTO taproot_entity_revisions(
+             entity_id, revision, entity_json, tags_json, event_id,
+             content_hash, created_at
+           ) VALUES (?, ?, ?, '[]', ?, ?, '2026-01-01T00:00:00.000Z')`,
+        )
+        .bind(
+          id,
+          revision,
+          d1PagedEntityJson(
+            id,
+            revision,
+            index === page ? '\u00a0' : undefined,
+          ),
+          `event-${revision}`,
+          `hash-${revision}`,
+        );
+    }),
+  );
+}
+
+function d1PagedEntityJson(
+  id: string,
+  revision: number,
+  statementText?: string,
+): string {
+  return JSON.stringify({
+    id,
+    type: 'item',
+    labels: {},
+    descriptions: {},
+    aliases: {},
+    claims:
+      statementText === undefined
+        ? {}
+        : {
+            P1: [
+              {
+                id: `${id}$later-page`,
+                type: 'statement',
+                text: statementText,
+              },
+            ],
+          },
+    sitelinks: {},
+    lastrevid: revision,
+    modified: '2026-01-01T00:00:00.000Z',
+  });
+}
