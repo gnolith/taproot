@@ -60,6 +60,7 @@ import type {
   Sitelink,
   Snak,
   Statement,
+  StatementRevisionEdit,
   StoredEntity,
   TaprootOptions,
   WikibaseEntity,
@@ -573,14 +574,15 @@ export class TaprootRepository {
   async replaceEntity(
     id: EntityId,
     replacement: WikibaseEntity,
-    edit: ExpectedRevision,
+    edit: StatementRevisionEdit,
   ): Promise<WriteResult> {
     if (replacement.id !== id)
       throw new InvalidEntityError('Replacement entity id cannot change');
     return this.#mutate(
       id,
       edit,
-      () => cloneEntity(replacement),
+      () =>
+        resupplyStatementTexts(cloneEntity(replacement), edit.statementTexts),
       undefined,
       'update',
     );
@@ -589,13 +591,14 @@ export class TaprootRepository {
   async revertEntity(
     id: EntityId,
     targetRevision: number,
-    edit: ExpectedRevision,
+    edit: StatementRevisionEdit,
   ): Promise<WriteResult> {
     const target = await this.getEntityRevision(id, targetRevision);
     return this.#mutate(
       id,
       edit,
-      () => cloneEntity(target.entity),
+      () =>
+        resupplyStatementTexts(cloneEntity(target.entity), edit.statementTexts),
       { deletedAt: target.deletedAt, redirectTo: target.redirectTo },
       'revert',
     );
@@ -823,10 +826,13 @@ export class TaprootRepository {
     id: EntityId,
     statementId: string,
     rank: Statement['rank'],
+    text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
     return this.#mutate(id, edit, (entity) => {
-      locateStatement(entity, statementId).statement.rank = rank;
+      const statement = locateStatement(entity, statementId).statement;
+      statement.rank = rank;
+      statement.text = text;
       return entity;
     });
   }
@@ -835,11 +841,13 @@ export class TaprootRepository {
     id: EntityId,
     statementId: string,
     snak: Snak,
+    text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
     validateSnak(snak);
     return this.#mutate(id, edit, (entity) => {
       const statement = locateStatement(entity, statementId).statement;
+      statement.text = text;
       const property = snak.property;
       if (!statement.qualifiers[property]) {
         statement.qualifiers[property] = [];
@@ -855,10 +863,12 @@ export class TaprootRepository {
     statementId: string,
     property: PropertyId,
     ordinal: number,
+    text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
     return this.#mutate(id, edit, (entity) => {
       const statement = locateStatement(entity, statementId).statement;
+      statement.text = text;
       const snaks = statement.qualifiers[property];
       if (!snaks?.[ordinal])
         throw new InvalidStatementError('Qualifier does not exist');
@@ -877,12 +887,13 @@ export class TaprootRepository {
     id: EntityId,
     statementId: string,
     reference: Reference,
+    text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
     return this.#mutate(id, edit, (entity) => {
-      locateStatement(entity, statementId).statement.references.push(
-        structuredClone(reference),
-      );
+      const statement = locateStatement(entity, statementId).statement;
+      statement.text = text;
+      statement.references.push(structuredClone(reference));
       return entity;
     });
   }
@@ -891,11 +902,13 @@ export class TaprootRepository {
     id: EntityId,
     statementId: string,
     hash: string,
+    text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
     return this.#mutate(id, edit, (entity) => {
-      const references = locateStatement(entity, statementId).statement
-        .references;
+      const statement = locateStatement(entity, statementId).statement;
+      statement.text = text;
+      const references = statement.references;
       const index = references.findIndex(
         (reference) => reference.hash === hash,
       );
@@ -911,11 +924,13 @@ export class TaprootRepository {
     statementId: string,
     hash: string,
     reference: Reference,
+    text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
     return this.#mutate(id, edit, (entity) => {
-      const references = locateStatement(entity, statementId).statement
-        .references;
+      const statement = locateStatement(entity, statementId).statement;
+      statement.text = text;
+      const references = statement.references;
       const index = references.findIndex((item) => item.hash === hash);
       if (index < 0)
         throw new InvalidStatementError(`Reference ${hash} does not exist`);
@@ -1006,6 +1021,7 @@ export class TaprootRepository {
         const current = await this.getEntity(entity.id);
         return await this.replaceEntity(entity.id, entity, {
           expectedRevision: current.entity.lastrevid,
+          statementTexts: authoredStatementTexts(entity),
           ...options.metadata,
         });
       } catch (error) {
@@ -2065,6 +2081,39 @@ function locateStatement(
   throw new InvalidStatementError(`Statement ${id} does not exist`);
 }
 
+function resupplyStatementTexts(
+  entity: WikibaseEntity,
+  supplied: Readonly<Record<string, string>>,
+): WikibaseEntity {
+  const expected = new Set<string>();
+  for (const statements of Object.values(entity.claims)) {
+    for (const statement of statements) {
+      expected.add(statement.id);
+      if (!Object.hasOwn(supplied, statement.id))
+        throw new InvalidStatementError(
+          `Statement ${statement.id} text must be explicitly resupplied for this revision`,
+        );
+      statement.text = supplied[statement.id] as string;
+    }
+  }
+  const unexpected = Object.keys(supplied).filter((id) => !expected.has(id));
+  if (unexpected.length)
+    throw new InvalidStatementError(
+      `Statement text was supplied for unknown statement ${unexpected[0]}`,
+    );
+  return entity;
+}
+
+function authoredStatementTexts(
+  entity: WikibaseEntity,
+): Readonly<Record<string, string>> {
+  return Object.fromEntries(
+    Object.values(entity.claims).flatMap((statements) =>
+      statements.map((statement) => [statement.id, statement.text]),
+    ),
+  );
+}
+
 function collectSnak(snak: Snak, used: Map<PropertyId, EntityDatatype>): void {
   const current = used.get(snak.property);
   if (current && current !== snak.datatype)
@@ -2143,10 +2192,13 @@ function applyEntityCommand(
     case 'set-statement-rank':
       locateStatement(entity, command.statementId).statement.rank =
         command.rank;
+      locateStatement(entity, command.statementId).statement.text =
+        command.text;
       break;
     case 'add-qualifier': {
       validateSnak(command.snak);
       const statement = locateStatement(entity, command.statementId).statement;
+      statement.text = command.text;
       const property = command.snak.property;
       if (!statement.qualifiers[property]) {
         statement.qualifiers[property] = [];
@@ -2157,6 +2209,7 @@ function applyEntityCommand(
     }
     case 'remove-qualifier': {
       const statement = locateStatement(entity, command.statementId).statement;
+      statement.text = command.text;
       const snaks = statement.qualifiers[command.property];
       if (!snaks?.[command.ordinal])
         throw new InvalidStatementError('Qualifier does not exist');
@@ -2169,14 +2222,16 @@ function applyEntityCommand(
       }
       break;
     }
-    case 'add-reference':
-      locateStatement(entity, command.statementId).statement.references.push(
-        structuredClone(command.reference),
-      );
+    case 'add-reference': {
+      const statement = locateStatement(entity, command.statementId).statement;
+      statement.text = command.text;
+      statement.references.push(structuredClone(command.reference));
       break;
+    }
     case 'replace-reference': {
-      const references = locateStatement(entity, command.statementId).statement
-        .references;
+      const statement = locateStatement(entity, command.statementId).statement;
+      statement.text = command.text;
+      const references = statement.references;
       const index = references.findIndex(({ hash }) => hash === command.hash);
       if (index < 0)
         throw new InvalidStatementError(
@@ -2186,8 +2241,9 @@ function applyEntityCommand(
       break;
     }
     case 'remove-reference': {
-      const references = locateStatement(entity, command.statementId).statement
-        .references;
+      const statement = locateStatement(entity, command.statementId).statement;
+      statement.text = command.text;
+      const references = statement.references;
       const index = references.findIndex(({ hash }) => hash === command.hash);
       if (index < 0)
         throw new InvalidStatementError(

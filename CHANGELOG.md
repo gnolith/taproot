@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Added required, explicitly authored nonblank `Statement.text` to canonical
+  JSON and to every logical statement mutation.
+- Added canonical JSON migration 3. Existing databases with no unauthored
+  statements upgrade atomically; persisted statements without text fail closed
+  rather than receiving inferred fallback prose.
+- Whole-entity replacement and historical revert now require an exact
+  statement-ID-to-text resupply map, preventing silent stale-text carry.
+
 ## 0.2.0
 
 - Added a runtime-neutral SQLite persistence surface while retaining D1

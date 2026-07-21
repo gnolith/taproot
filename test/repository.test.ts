@@ -5,6 +5,7 @@ import {
   EntityAlreadyExistsError,
   EntityTooLargeError,
   InvalidEntityError,
+  InvalidStatementError,
   PropertyDatatypeMismatchError,
   PropertyNotFoundError,
   QuadPatchTooLargeError,
@@ -40,6 +41,66 @@ async function environment() {
 }
 
 describe('TaprootRepository on Workerd D1', () => {
+  it('enforces authored statement text and explicit resupply on D1', async () => {
+    const env = await environment();
+    try {
+      await env.repository.createProperty({ id: 'P1', datatype: 'string' });
+      await env.repository.createItem({ id: 'Q1' });
+      const statement: Statement = {
+        id: 'Q1$text-contract',
+        type: 'statement',
+        text: 'The item concerns wood-fired ceramics.',
+        rank: 'normal',
+        mainsnak: {
+          snaktype: 'value',
+          property: 'P1',
+          datatype: 'string',
+          datavalue: { type: 'string', value: 'wood-fired ceramics' },
+        },
+        qualifiers: {},
+        'qualifiers-order': [],
+        references: [],
+      };
+      await expect(
+        env.repository.addStatement(
+          'Q1',
+          { ...statement, text: '   ' },
+          {
+            expectedRevision: 1,
+          },
+        ),
+      ).rejects.toBeInstanceOf(InvalidStatementError);
+      const added = await env.repository.addStatement('Q1', statement, {
+        expectedRevision: 1,
+      });
+      await expect(
+        env.repository.setStatementRank(
+          'Q1',
+          statement.id,
+          'preferred',
+          undefined as never,
+          { expectedRevision: added.newRevision },
+        ),
+      ).rejects.toBeInstanceOf(InvalidStatementError);
+      const updated = await env.repository.setStatementRank(
+        'Q1',
+        statement.id,
+        'preferred',
+        'The item concerns reviewed wood-fired ceramics.',
+        { expectedRevision: added.newRevision },
+      );
+      expect(updated.entity.claims.P1?.[0]?.text).toBe(
+        'The item concerns reviewed wood-fired ceramics.',
+      );
+      expect(
+        (await env.repository.getEntityRevision('Q1', 2)).entity.claims.P1?.[0]
+          ?.text,
+      ).toBe('The item concerns wood-fired ceramics.');
+    } finally {
+      await env.dispose();
+    }
+  }, 20_000);
+
   it('upgrades a version-one database and backfills immutable audit history', async () => {
     const miniflare = new Miniflare({
       modules: true,
@@ -177,6 +238,7 @@ describe('TaprootRepository on Workerd D1', () => {
       const statement: Statement = {
         id: 'Q1$s1',
         type: 'statement',
+        text: 'Ada Lovelace worked as a programmer.',
         rank: 'normal',
         mainsnak,
         qualifiers: {},
@@ -190,12 +252,14 @@ describe('TaprootRepository on Workerd D1', () => {
         'Q1',
         statement.id,
         qualifier,
+        'Ada Lovelace worked as a programmer during this period.',
         { expectedRevision: withStatement.newRevision },
       );
       const withReference = await env.repository.addReference(
         'Q1',
         statement.id,
         reference,
+        'Ada Lovelace worked as a programmer, according to source 1.',
         {
           expectedRevision: withQualifier.newRevision,
           actor: 'test',
@@ -253,12 +317,14 @@ describe('TaprootRepository on Workerd D1', () => {
         statement.id,
         reference.hash,
         replacementReference,
+        'Ada Lovelace worked as a programmer, according to source 2.',
         { expectedRevision: withReference.newRevision },
       );
       const removedReference = await env.repository.removeReference(
         'Q1',
         statement.id,
         replacementReference.hash,
+        'Ada Lovelace worked as a programmer.',
         { expectedRevision: replacedReference.newRevision },
       );
       const removedQualifier = await env.repository.removeQualifier(
@@ -266,16 +332,19 @@ describe('TaprootRepository on Workerd D1', () => {
         statement.id,
         'P2',
         0,
+        'Ada Lovelace worked as a programmer.',
         { expectedRevision: removedReference.newRevision },
       );
       const ranked = await env.repository.setStatementRank(
         'Q1',
         statement.id,
         'preferred',
+        'Ada Lovelace worked as a programmer (preferred statement).',
         { expectedRevision: removedQualifier.newRevision },
       );
       const replacementStatement: Statement = {
         ...statement,
+        text: 'Ada Lovelace worked as a researcher.',
         rank: 'preferred',
         mainsnak: {
           ...mainsnak,
@@ -446,6 +515,7 @@ describe('TaprootRepository on Workerd D1', () => {
       const missing: Statement = {
         id: 'Q1$missing',
         type: 'statement',
+        text: 'The item has an unavailable property value.',
         rank: 'normal',
         mainsnak: {
           snaktype: 'somevalue',
@@ -493,6 +563,7 @@ describe('TaprootRepository on Workerd D1', () => {
       await expect(
         env.repository.replaceEntity('P1', changedProperty, {
           expectedRevision: property.newRevision,
+          statementTexts: {},
         }),
       ).rejects.toBeInstanceOf(InvalidEntityError);
     } finally {
@@ -675,6 +746,7 @@ describe('TaprootRepository on Workerd D1', () => {
             {
               id: 'Q30$bulk',
               type: 'statement',
+              text: 'Q30 has a planned dependency.',
               rank: 'normal',
               mainsnak: {
                 snaktype: 'value',
@@ -721,6 +793,7 @@ describe('TaprootRepository on Workerd D1', () => {
       const sharedStatement = (id: `Q${number}`): Statement => ({
         id: `${id}$shared`,
         type: 'statement',
+        text: `${id} shares the recorded time.`,
         rank: 'normal',
         mainsnak: structuredClone(sharedSnak),
         qualifiers: {},
@@ -760,6 +833,7 @@ describe('TaprootRepository on Workerd D1', () => {
       ).toBe(true);
       const reverted = await env.repository.revertEntity('Q1', 1, {
         expectedRevision: edited.newRevision,
+        statementTexts: {},
         editSummary: 'revert to seed',
       });
       expect(reverted.entity.labels.en?.value).toBe('seed');

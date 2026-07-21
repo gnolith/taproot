@@ -46,6 +46,15 @@ chain and reports every hop.
 accepts trusted explicit Q/P IDs and advances counters. `importEntities`
 supports create-only or upsert mode and reports per-entity failures.
 
+`Statement.text` is required, non-whitespace authored text describing that
+exact structured revision. `addStatement` and `replaceStatement` receive it on
+the statement. Rank, qualifier, and reference mutations receive a separate
+required text argument so stale text is never silently retained.
+`replaceEntity` and `revertEntity` use `StatementRevisionEdit`; its
+`statementTexts` map must cover every resulting statement ID exactly. Imports
+validate text on every statement, while upsert imports treat the complete
+imported statements as the caller's explicit resupply.
+
 ## Edit context
 
 An edit can contain structured `attribution`, `editSummary`, sorted/deduplicated

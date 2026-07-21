@@ -43,7 +43,11 @@ describe('portable Taproot persistence', () => {
     const db = new NodeSqliteDatabase(':memory:');
     try {
       const plan = await planTaprootMigrations(db);
-      expect(plan.map(({ status }) => status)).toEqual(['pending', 'pending']);
+      expect(plan.map(({ status }) => status)).toEqual([
+        'pending',
+        'pending',
+        'pending',
+      ]);
       const tablesBefore = await db
         .prepare(
           `SELECT name FROM sqlite_schema WHERE type = 'table' AND name LIKE 'taproot_%'`,
@@ -57,6 +61,7 @@ describe('portable Taproot persistence', () => {
       const inspection = await inspectTaprootPersistence(db);
       expect(inspection).toMatchObject({ baseIri, current: true });
       expect(inspection.migrations.map(({ status }) => status)).toEqual([
+        'applied',
         'applied',
         'applied',
       ]);
@@ -221,6 +226,7 @@ describe('portable Taproot persistence', () => {
       expect(await planTaprootMigrations(exact)).toMatchObject([
         { id: '0001-v0.1-schema', status: 'adoptable' },
         { id: '0002-durable-database-identity', status: 'pending' },
+        { id: '0003-canonical-statement-text', status: 'pending' },
       ]);
       await applyTaprootMigrations(exact, {
         baseIri: 'HTTPS://Knowledge.Example///',

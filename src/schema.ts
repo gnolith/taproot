@@ -10,7 +10,7 @@ import type { EntityId, WikibaseEntity } from './types.js';
 import { SchemaMismatchError } from './errors.js';
 
 export const TAPROOT_SCHEMA_VERSION = '2';
-export const TAPROOT_JSON_VERSION = '1';
+export const TAPROOT_JSON_VERSION = '2';
 export const TAPROOT_RDF_VERSION = '2';
 
 export const taprootSchemaStatements = [
@@ -124,9 +124,20 @@ export const taprootSchemaStatements = [
       ('canonical_json_version', '${TAPROOT_JSON_VERSION}'),
       ('rdf_mapping_version', '${TAPROOT_RDF_VERSION}')
     ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
-  `INSERT INTO taproot_migrations(version, name) VALUES (1, 'initial'), (2, 'audit-and-operations')
+  `INSERT INTO taproot_migrations(version, name) VALUES (1, 'initial'), (2, 'audit-and-operations'), (3, 'canonical-statement-text')
     ON CONFLICT(version) DO NOTHING`,
 ] as const;
+
+/** Exact package-created schema before authored statement text became required. */
+export const preStatementTextTaprootSchemaStatements =
+  taprootSchemaStatements.map((sql) =>
+    sql
+      .replace(
+        "('canonical_json_version', '2')",
+        "('canonical_json_version', '1')",
+      )
+      .replace(", (3, 'canonical-statement-text')", ''),
+  );
 
 const schemaStatement = (prefix: string): string => {
   const statement = taprootSchemaStatements.find((sql) =>
@@ -627,15 +638,16 @@ export async function verifyTaprootPackageSeeds(
     .prepare(
       `SELECT COUNT(*) AS count FROM taproot_migrations
        WHERE (version = 1 AND name = 'initial')
-          OR (version = 2 AND name = 'audit-and-operations')`,
+          OR (version = 2 AND name = 'audit-and-operations')
+          OR (version = 3 AND name = 'canonical-statement-text')`,
     )
     .all<{ count: number }>();
   const migrationSeedTotal = await db
     .prepare(`SELECT COUNT(*) AS count FROM taproot_migrations`)
     .all<{ count: number }>();
   if (
-    Number(migrationSeeds.results[0]?.count ?? 0) !== 2 ||
-    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 2
+    Number(migrationSeeds.results[0]?.count ?? 0) !== 3 ||
+    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 3
   )
     throw new SchemaMismatchError(
       'Taproot package migration seeds are incomplete',

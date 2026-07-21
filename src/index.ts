@@ -26,6 +26,7 @@ import type {
   Sitelink,
   Snak,
   Statement,
+  StatementRevisionEdit,
   TaprootOptions,
   WikibaseEntity,
 } from './types.js';
@@ -181,7 +182,7 @@ export const replaceEntity = (
   options: TaprootOptions,
   id: EntityId,
   entity: WikibaseEntity,
-  edit: ExpectedRevision,
+  edit: StatementRevisionEdit,
 ) => createTaproot(db, options).replaceEntity(id, entity, edit);
 
 export const revertEntity = (
@@ -189,7 +190,7 @@ export const revertEntity = (
   options: TaprootOptions,
   id: EntityId,
   targetRevision: number,
-  edit: ExpectedRevision,
+  edit: StatementRevisionEdit,
 ) => createTaproot(db, options).revertEntity(id, targetRevision, edit);
 
 export const softDeleteEntity = (
@@ -315,8 +316,16 @@ export const setStatementRank = (
   id: EntityId,
   statementId: string,
   rank: Statement['rank'],
+  text: string,
   edit: ExpectedRevision,
-) => createTaproot(db, options).setStatementRank(id, statementId, rank, edit);
+) =>
+  createTaproot(db, options).setStatementRank(
+    id,
+    statementId,
+    rank,
+    text,
+    edit,
+  );
 
 export const addQualifier = (
   db: D1DatabaseLike,
@@ -324,8 +333,9 @@ export const addQualifier = (
   id: EntityId,
   statementId: string,
   snak: Snak,
+  text: string,
   edit: ExpectedRevision,
-) => createTaproot(db, options).addQualifier(id, statementId, snak, edit);
+) => createTaproot(db, options).addQualifier(id, statementId, snak, text, edit);
 
 export const removeQualifier = (
   db: D1DatabaseLike,
@@ -334,6 +344,7 @@ export const removeQualifier = (
   statementId: string,
   property: PropertyId,
   ordinal: number,
+  text: string,
   edit: ExpectedRevision,
 ) =>
   createTaproot(db, options).removeQualifier(
@@ -341,6 +352,7 @@ export const removeQualifier = (
     statementId,
     property,
     ordinal,
+    text,
     edit,
   );
 
@@ -350,8 +362,16 @@ export const addReference = (
   id: EntityId,
   statementId: string,
   reference: Reference,
+  text: string,
   edit: ExpectedRevision,
-) => createTaproot(db, options).addReference(id, statementId, reference, edit);
+) =>
+  createTaproot(db, options).addReference(
+    id,
+    statementId,
+    reference,
+    text,
+    edit,
+  );
 
 export const removeReference = (
   db: D1DatabaseLike,
@@ -359,8 +379,10 @@ export const removeReference = (
   id: EntityId,
   statementId: string,
   hash: string,
+  text: string,
   edit: ExpectedRevision,
-) => createTaproot(db, options).removeReference(id, statementId, hash, edit);
+) =>
+  createTaproot(db, options).removeReference(id, statementId, hash, text, edit);
 
 export const replaceReference = (
   db: D1DatabaseLike,
@@ -369,6 +391,7 @@ export const replaceReference = (
   statementId: string,
   hash: string,
   reference: Reference,
+  text: string,
   edit: ExpectedRevision,
 ) =>
   createTaproot(db, options).replaceReference(
@@ -376,5 +399,6 @@ export const replaceReference = (
     statementId,
     hash,
     reference,
+    text,
     edit,
   );

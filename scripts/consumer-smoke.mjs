@@ -88,6 +88,7 @@ writeFileSync(
         {
           id: 'Q1$consumer',
           type: 'statement',
+          text: 'The packed Taproot consumer works.',
           rank: 'normal',
           mainsnak: {
             snaktype: 'value',
@@ -155,6 +156,7 @@ for (const path of [
   'docs/threat-model.md',
   'migrations/0001_taproot.sql',
   'migrations/0002_audit_operations.sql',
+  'migrations/0003_canonical_statement_text.sql',
 ]) {
   if (!existsSync(join(root, 'node_modules', packagePath, path))) {
     throw new Error(`packed artifact is missing ${path}`);

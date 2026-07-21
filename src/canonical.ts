@@ -147,6 +147,7 @@ function canonicalizeStatement(statement: Statement): Statement {
   return {
     id: statement.id,
     type: 'statement',
+    text: statement.text,
     rank: statement.rank,
     mainsnak: canonicalizeSnak(statement.mainsnak),
     qualifiers: sortRecord(statement.qualifiers, (snaks) =>
@@ -254,6 +255,11 @@ function validateStatement(
   }
   if (typeof value.id !== 'string' || value.id.length === 0) {
     throw new InvalidStatementError('Statement id is required');
+  }
+  if (typeof value.text !== 'string' || value.text.trim().length === 0) {
+    throw new InvalidStatementError(
+      `Statement ${value.id} text must be explicitly authored and non-empty`,
+    );
   }
   if (!value.id.startsWith(`${entityId}$`)) {
     throw new InvalidStatementError(
@@ -643,12 +649,18 @@ export function cloneDataValue(value: DataValueValue): DataValueValue {
 export function createStatement(
   entityId: EntityId,
   mainsnak: Snak,
+  text: string,
   options: { id?: string; rank?: Statement['rank'] } = {},
 ): Statement {
   validateSnak(mainsnak);
+  if (typeof text !== 'string' || text.trim().length === 0)
+    throw new InvalidStatementError(
+      'Statement text must be explicitly authored and non-empty',
+    );
   return {
     id: options.id ?? `${entityId}$${crypto.randomUUID()}`,
     type: 'statement',
+    text,
     rank: options.rank ?? 'normal',
     mainsnak: structuredClone(mainsnak),
     qualifiers: {},

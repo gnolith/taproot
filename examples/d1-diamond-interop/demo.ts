@@ -42,6 +42,7 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
   const occupation: Statement = {
     id: `${created.entityId}$occupation`,
     type: 'statement',
+    text: 'Ada Lovelace worked as a computer programmer in 1843.',
     rank: 'normal',
     mainsnak: {
       snaktype: 'value',
@@ -97,11 +98,13 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
     created.entityId,
     occupation.id,
     'preferred',
+    'Ada Lovelace worked as a computer programmer in 1843 (preferred).',
     { expectedRevision: added.newRevision },
   );
   const unknownOccupation: Statement = {
     id: `${created.entityId}$unknown-occupation`,
     type: 'statement',
+    text: 'Ada Lovelace had another occupation whose value is unknown.',
     rank: 'normal',
     mainsnak: {
       snaktype: 'somevalue',

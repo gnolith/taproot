@@ -21,6 +21,8 @@ capability, and a process-local `node:sqlite` adapter.
 - Items and Properties with Wikibase-style canonical JSON.
 - Labels, descriptions, aliases, sitelinks, statements, qualifiers,
   references, ranks, and all three snak types.
+- Nonblank, explicitly authored text for every logical statement revision;
+  Taproot never generates prose from properties or values.
 - Item, Property, Lexeme, Form, Sense, and EntitySchema links; string,
   external ID, URL, Commons media, monolingual text, time,
   quantity, coordinate, math, musical notation, geo-shape, and tabular-data
@@ -96,6 +98,12 @@ restore, and redirect; all term/sitelink commands; complete statement,
 qualifier, reference, and rank commands; audit/history and integrity reads;
 bulk workflows; and canonical JSON parse, validate, create, and export helpers. Top-level function forms are exported alongside
 `TaprootRepository`.
+
+Statement creation and replacement include `text` on the `Statement` itself.
+Rank, qualifier, and reference mutation methods require authored text for the
+new logical statement revision. `replaceEntity` and `revertEntity` require an
+exact `statementTexts` map for every statement they carry forward. Reusing old
+wording is allowed only when the caller deliberately supplies it again.
 
 Set `requireAttribution: true` to reject unattributed writes. `validators`
 provide host policy checks without coupling Taproot to authentication, and
