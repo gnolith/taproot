@@ -75,6 +75,9 @@
     "rdf-data-factory": "^2.0.2"
   },
   "packageManager": "npm@11.9.0",
+  "overrides": {
+    "sharp": "0.35.3"
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
