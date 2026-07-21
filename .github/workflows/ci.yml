@@ -33,7 +33,7 @@ jobs:
           npm ci --ignore-scripts --prefix .diamond-handoff
           npm pack ./.diamond-handoff --pack-destination "$RUNNER_TEMP"
           echo "ac8e34810a8504bd891b36a199973f2d65ef652555644813c7a36f1c7016c9d2  $RUNNER_TEMP/gnolith-diamond-0.4.0.tgz" | sha256sum --check
-          npm install --ignore-scripts --package-lock=false "$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz"
+          npm install --no-save --ignore-scripts --package-lock=false "$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz"
           node -e "require('node:fs').rmSync('.diamond-handoff', { recursive: true, force: true })"
       - run: npm run format:check
       - run: npm run lint
@@ -73,7 +73,7 @@ jobs:
           npm ci --ignore-scripts --prefix .diamond-handoff
           npm pack ./.diamond-handoff --pack-destination "$RUNNER_TEMP"
           echo "ac8e34810a8504bd891b36a199973f2d65ef652555644813c7a36f1c7016c9d2  $RUNNER_TEMP/gnolith-diamond-0.4.0.tgz" | sha256sum --check
-          npm install --ignore-scripts --package-lock=false "$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz"
+          npm install --no-save --ignore-scripts --package-lock=false "$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz"
           node -e "require('node:fs').rmSync('.diamond-handoff', { recursive: true, force: true })"
       - run: npm run typecheck
       - run: npm run test:unit
@@ -98,7 +98,7 @@ jobs:
           npm ci --ignore-scripts --prefix .diamond-handoff
           npm pack ./.diamond-handoff --pack-destination "$RUNNER_TEMP"
           echo "ac8e34810a8504bd891b36a199973f2d65ef652555644813c7a36f1c7016c9d2  $RUNNER_TEMP/gnolith-diamond-0.4.0.tgz" | sha256sum --check
-          npm install --ignore-scripts --package-lock=false "$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz"
+          npm install --no-save --ignore-scripts --package-lock=false "$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz"
           node -e "require('node:fs').rmSync('.diamond-handoff', { recursive: true, force: true })"
           echo "DIAMOND_TARBALL=$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz" >> "$GITHUB_ENV"
       - run: npm run consumer:check
