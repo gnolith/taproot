@@ -69,6 +69,60 @@ describe('portable Taproot persistence', () => {
     }
   });
 
+  it('does not report a noncanonical stored identity current', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await initializeTaproot(db, { baseIri });
+      await db
+        .prepare(
+          `UPDATE taproot_metadata SET metadata_value = 'HTTPS://Knowledge.Example///'
+           WHERE metadata_key = 'base_iri'`,
+        )
+        .run();
+      await expect(inspectTaprootPersistence(db)).resolves.toMatchObject({
+        current: false,
+      });
+      await initializeTaproot(db, { baseIri });
+      await expect(inspectTaprootPersistence(db)).resolves.toMatchObject({
+        baseIri,
+        current: true,
+      });
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('never lets concurrent first-use identities overwrite each other', async () => {
+    const directory = temporaryDirectory();
+    const path = join(directory, 'identity-race.sqlite');
+    const first = new NodeSqliteDatabase(path, { busyTimeoutMs: 10_000 });
+    const second = new NodeSqliteDatabase(path, { busyTimeoutMs: 10_000 });
+    const otherIri = 'https://other.example';
+    try {
+      const outcomes = await Promise.allSettled([
+        initializeTaproot(first, { baseIri }),
+        initializeTaproot(second, { baseIri: otherIri }),
+      ]);
+      expect(
+        outcomes.filter(({ status }) => status === 'fulfilled'),
+      ).toHaveLength(1);
+      const stored = await first
+        .prepare(
+          `SELECT metadata_value FROM taproot_metadata WHERE metadata_key = 'base_iri'`,
+        )
+        .all<{ metadata_value: string }>();
+      const winner = stored.results[0]?.metadata_value;
+      expect([baseIri, otherIri]).toContain(winner);
+      await expect(
+        initializeTaproot(first, {
+          baseIri: winner === baseIri ? otherIri : baseIri,
+        }),
+      ).rejects.toBeInstanceOf(BaseIriMismatchError);
+    } finally {
+      await Promise.all([first.close(), second.close()]);
+    }
+  });
+
   it.each([
     'relative/path',
     'urn:gnolith:test',
@@ -217,8 +271,8 @@ describe('portable Taproot persistence', () => {
       );
       const ledger = await db
         .prepare(
-          `SELECT COUNT(*) AS count FROM sqlite_schema
-           WHERE type = 'table' AND name = '_gnolith_migrations'`,
+          `SELECT COUNT(*) AS count FROM _gnolith_migrations
+           WHERE namespace = '@gnolith/taproot'`,
         )
         .all<{ count: number }>();
       expect(Number(ledger.results[0]?.count)).toBe(0);

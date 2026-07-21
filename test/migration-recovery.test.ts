@@ -167,6 +167,70 @@ describe('legacy migration interruption recovery', () => {
     }
   });
 
+  it('repairs a prematurely stamped database left by an older initializer', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await seedLegacy(db);
+      await initializeTaproot(db, { baseIri });
+      await db.batch([db.prepare(`DELETE FROM taproot_rdf_ownership`)]);
+
+      expect(await taprootLedgerCount(db)).toBe(2);
+      await expect(inspectTaprootPersistence(db)).resolves.toMatchObject({
+        current: false,
+      });
+
+      await initializeTaproot(db, { baseIri });
+      await expectCurrentRecoveredState(db);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('refuses to stamp conflicting audit contents', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await seedLegacy(db);
+      await expect(
+        initializeTaproot(new InterruptingDatabase(db, 'audit'), { baseIri }),
+      ).rejects.toBe(interrupted);
+      await db
+        .prepare(
+          `UPDATE taproot_audit_events SET edit_summary = 'conflict'
+           WHERE event_id = 'legacy-Q1-1'`,
+        )
+        .run();
+
+      await expect(initializeTaproot(db, { baseIri })).rejects.toThrow(
+        /audit|identity/iu,
+      );
+      expect(await taprootLedgerCount(db)).toBe(0);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('refuses to stamp conflicting package migration seeds', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await seedLegacy(db);
+      await expect(
+        initializeTaproot(new InterruptingDatabase(db, 'rdf'), { baseIri }),
+      ).rejects.toBe(interrupted);
+      await db
+        .prepare(
+          `INSERT INTO taproot_migrations(version, name)
+           VALUES (1, 'conflict')`,
+        )
+        .run();
+
+      await expect(initializeTaproot(db, { baseIri })).rejects.toThrow();
+      expect(await taprootLedgerCount(db)).toBe(0);
+      expect(await metadata(db, 'migration_phase')).toBe('rdf');
+    } finally {
+      await db.close();
+    }
+  });
+
   it('resumes a committed per-row backfill through a D1-compatible adapter', async () => {
     const miniflare = new Miniflare({
       modules: true,
@@ -261,6 +325,14 @@ async function expectCurrentRecoveredState(
   expect(
     await scalar(db, `SELECT COUNT(*) AS count FROM taproot_rdf_ownership`),
   ).toBeGreaterThan(0);
+  expect(
+    await scalar(
+      db,
+      `SELECT COUNT(*) AS count FROM taproot_migrations
+       WHERE (version = 1 AND name = 'initial')
+          OR (version = 2 AND name = 'audit-and-operations')`,
+    ),
+  ).toBe(2);
 }
 
 async function metadata(

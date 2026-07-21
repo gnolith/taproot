@@ -1,6 +1,5 @@
 import {
   encodeTerm,
-  migrateDiamondStore,
   prepareQuadPatch,
   type SqliteDatabaseLike,
 } from '@gnolith/diamond';
@@ -8,7 +7,7 @@ import { DataFactory } from 'rdf-data-factory';
 import { parseEntityJson } from './canonical.js';
 import { buildEntityQuads } from './rdf.js';
 import type { EntityId, WikibaseEntity } from './types.js';
-import { BaseIriMismatchError, SchemaMismatchError } from './errors.js';
+import { SchemaMismatchError } from './errors.js';
 
 export const TAPROOT_SCHEMA_VERSION = '2';
 export const TAPROOT_JSON_VERSION = '1';
@@ -168,6 +167,70 @@ export const legacyTaprootV1Statements = [
      ('rdf_mapping_version', '1')`,
 ] as const;
 
+const currentRevisionStatement = schemaStatement(
+  'CREATE TABLE IF NOT EXISTS taproot_entity_revisions',
+);
+const transitionalRevisionStatement = currentRevisionStatement
+  .replace('event_id TEXT NOT NULL', 'event_id TEXT')
+  .replace('content_hash TEXT NOT NULL', 'content_hash TEXT');
+
+export const taprootUpgradeCatalogStatements = taprootSchemaStatements
+  .filter(
+    (sql) =>
+      /^\s*CREATE\s+(?:TABLE|INDEX)\s+/iu.test(sql) &&
+      !/^\s*CREATE\s+TRIGGER\s+/iu.test(sql) &&
+      !sql.includes('taproot_audit'),
+  )
+  .map((sql) =>
+    sql === currentRevisionStatement ? transitionalRevisionStatement : sql,
+  );
+
+export const taprootPreFinalizeCatalogStatements =
+  taprootSchemaStatements.filter(
+    (sql) =>
+      /^\s*CREATE\s+(?:TABLE|INDEX)\s+/iu.test(sql) &&
+      !/^\s*CREATE\s+TRIGGER\s+/iu.test(sql),
+  );
+
+export const legacyTaprootStructureStatements = [
+  `ALTER TABLE taproot_entity_revisions RENAME TO taproot_entity_revisions_v1`,
+  transitionalRevisionStatement,
+  `INSERT INTO taproot_entity_revisions(
+     entity_id, revision, entity_json, actor, attribution_json, edit_summary,
+     tags_json, event_id, content_hash, parent_hash, deleted_at, redirect_to, created_at
+   )
+   SELECT entity_id, revision, entity_json, actor, NULL, edit_summary,
+     '[]', NULL, NULL, NULL, NULL, NULL, created_at
+   FROM taproot_entity_revisions_v1`,
+  `DROP TABLE taproot_entity_revisions_v1`,
+  ...taprootUpgradeCatalogStatements.filter(
+    (sql) => !sql.includes('taproot_entity_revisions ('),
+  ),
+] as const;
+
+export const legacyRevisionFinalizeStatements = [
+  `ALTER TABLE taproot_entity_revisions RENAME TO taproot_entity_revisions_backfill`,
+  currentRevisionStatement,
+  `INSERT INTO taproot_entity_revisions(
+     entity_id, revision, entity_json, actor, attribution_json, edit_summary,
+     tags_json, event_id, content_hash, parent_hash, deleted_at, redirect_to, created_at
+   ) SELECT entity_id, revision, entity_json, actor, attribution_json, edit_summary,
+     tags_json, event_id, content_hash, parent_hash, deleted_at, redirect_to, created_at
+   FROM taproot_entity_revisions_backfill`,
+  `DROP TABLE taproot_entity_revisions_backfill`,
+  schemaStatement('CREATE TABLE IF NOT EXISTS taproot_audit_events'),
+  schemaStatement('CREATE INDEX IF NOT EXISTS taproot_revisions_entity_idx'),
+  schemaStatement('CREATE INDEX IF NOT EXISTS taproot_audit_entity_idx'),
+  schemaStatement('CREATE INDEX IF NOT EXISTS taproot_audit_request_idx'),
+] as const;
+
+export const taprootFinalizeStatements = taprootSchemaStatements.filter(
+  (sql) =>
+    /^\s*CREATE\s+TRIGGER\s+/iu.test(sql) ||
+    sql.includes(`('schema_version', '${TAPROOT_SCHEMA_VERSION}')`) ||
+    sql.includes('INSERT INTO taproot_migrations'),
+);
+
 export interface TaprootSchemaInspection {
   valid: boolean;
   versions: Record<string, string>;
@@ -183,112 +246,11 @@ export async function initializeTaproot(
   db: SqliteDatabaseLike,
   options: { baseIri?: string } = {},
 ): Promise<void> {
-  const previousRdfVersion =
-    (await readMetadata(db, 'rdf_migration_from')) ??
-    (await readMetadata(db, 'rdf_mapping_version'));
-  const initialInspection = await inspectTaprootSchema(db);
-  const existingTables = await db
-    .prepare(
-      `SELECT name FROM sqlite_schema
-       WHERE type = 'table' AND name LIKE 'taproot_%' ORDER BY name`,
-    )
-    .all<{ name: string }>();
-  if (existingTables.results.length > 0 && !initialInspection.valid) {
-    const { canonicalizeTaprootBaseIri } = await import('./migrations.js');
-    const storedIdentity = await readMetadata(db, 'base_iri');
-    const requestedIdentity = options.baseIri ?? storedIdentity;
-    if (requestedIdentity === undefined) {
-      throw new SchemaMismatchError(
-        'baseIri is required to adopt a legacy Taproot database',
-      );
-    }
-    const canonicalIdentity = canonicalizeTaprootBaseIri(requestedIdentity);
-    if (
-      storedIdentity !== undefined &&
-      canonicalizeTaprootBaseIri(storedIdentity) !== canonicalIdentity
-    ) {
-      throw new BaseIriMismatchError(
-        `Taproot database identity is ${storedIdentity}, not ${requestedIdentity}`,
-      );
-    }
-    if (!(await isRecognizedLegacyV1(db, existingTables.results))) {
-      throw new SchemaMismatchError(
-        `Existing Taproot schema is not the exact supported version-one layout: ${initialInspection.errors.join('; ')}`,
-      );
-    }
-    await migrateDiamondStore(db);
-    await upgradeLegacySchema(db);
-    await db.batch(taprootSchemaStatements.map((sql) => db.prepare(sql)));
-    const { checksumMigration } = await import('@gnolith/diamond');
-    const { taprootMigrationNamespace, taprootMigrations } =
-      await import('./migrations.js');
-    const checksum = await checksumMigration(taprootMigrations[0]);
-    await db.batch([
-      db
-        .prepare(
-          `INSERT INTO taproot_metadata(metadata_key, metadata_value)
-           VALUES ('base_iri', ?)
-           ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
-        )
-        .bind(canonicalIdentity),
-      db
-        .prepare(
-          `INSERT INTO taproot_assertions(assertion_key)
-           SELECT NULL WHERE NOT EXISTS (
-             SELECT 1 FROM taproot_metadata
-             WHERE metadata_key = 'base_iri' AND metadata_value = ?
-           )`,
-        )
-        .bind(canonicalIdentity),
-      db
-        .prepare(
-          `INSERT INTO _gnolith_migrations
-           (namespace, migration_id, checksum, adopted, applied_at)
-           VALUES (?, ?, ?, 1, ?)`,
-        )
-        .bind(
-          taprootMigrationNamespace,
-          taprootMigrations[0].id,
-          checksum,
-          new Date().toISOString(),
-        ),
-    ]);
-  }
-  if (previousRdfVersion && previousRdfVersion !== TAPROOT_RDF_VERSION) {
-    await db
-      .prepare(
-        `INSERT INTO taproot_metadata(metadata_key, metadata_value) VALUES ('rdf_migration_from', ?)
-      ON CONFLICT(metadata_key) DO NOTHING`,
-      )
-      .bind(previousRdfVersion)
-      .run();
-  }
   const { applyTaprootMigrations } = await import('./migrations.js');
   await applyTaprootMigrations(db, options);
-  await upgradeLegacySchema(db);
-  await db.batch(taprootSchemaStatements.map((sql) => db.prepare(sql)));
-  await db
-    .prepare(
-      `INSERT INTO taproot_audit_events(
-      event_id, entity_id, revision, event_type, attribution_json, edit_summary,
-      tags_json, request_id, content_hash, parent_hash, details_json, created_at
-    ) SELECT event_id, entity_id, revision,
-      CASE WHEN revision = 1 THEN 'import' ELSE 'update' END,
-      attribution_json, edit_summary, tags_json, NULL, content_hash, parent_hash,
-      json_object('deletedAt', deleted_at, 'redirectTo', redirect_to), created_at
-      FROM taproot_entity_revisions WHERE event_id IS NOT NULL AND content_hash IS NOT NULL
-      ON CONFLICT(event_id) DO NOTHING`,
-    )
-    .run();
-  await backfillRdfOwnership(db, previousRdfVersion);
-  await db
-    .prepare(
-      `DELETE FROM taproot_metadata WHERE metadata_key = 'rdf_migration_from'`,
-    )
-    .run();
 }
 
-async function isRecognizedLegacyV1(
+export async function isRecognizedLegacyV1(
   db: SqliteDatabaseLike,
   tables: Array<{ name: string }>,
 ): Promise<boolean> {
@@ -342,7 +304,7 @@ async function readMetadata(
   return result.results[0]?.metadata_value;
 }
 
-async function backfillRdfOwnership(
+export async function backfillRdfOwnership(
   db: SqliteDatabaseLike,
   previousVersion: string | undefined,
 ): Promise<void> {
@@ -358,7 +320,10 @@ async function backfillRdfOwnership(
     }>();
   if (!rows.results.length) return;
   const baseIri = await readMetadata(db, 'base_iri');
-  if (!baseIri) return;
+  if (!baseIri)
+    throw new SchemaMismatchError(
+      'Taproot RDF ownership cannot be rebuilt without a database identity',
+    );
   const factory = new DataFactory();
   for (const row of rows.results) {
     const entity = parseEntityJson(row.entity_json);
@@ -370,17 +335,6 @@ async function backfillRdfOwnership(
       TAPROOT_RDF_VERSION,
       factory,
     );
-    const existingOwnership = await db
-      .prepare(
-        `SELECT COUNT(*) AS count FROM taproot_rdf_ownership WHERE entity_id = ?`,
-      )
-      .bind(row.entity_id)
-      .all<{ count: number }>();
-    if (
-      previousVersion === TAPROOT_RDF_VERSION &&
-      Number(existingOwnership.results[0]?.count ?? 0) > 0
-    )
-      continue;
     const old =
       previousVersion && previousVersion !== TAPROOT_RDF_VERSION
         ? lifecycleQuads(
@@ -459,38 +413,9 @@ function lifecycleQuads(
   return quads;
 }
 
-async function upgradeLegacySchema(db: SqliteDatabaseLike): Promise<void> {
-  const tables = await db
-    .prepare(
-      `SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'taproot_entity_revisions'`,
-    )
-    .all<{ name: string }>();
-  if (!tables.results.length) return;
-  const columns = await db
-    .prepare(`PRAGMA table_info(taproot_entity_revisions)`)
-    .all<{ name: string }>();
-  const names = new Set(columns.results.map(({ name }) => name));
-  const additions = [
-    [
-      'attribution_json',
-      `TEXT CHECK (attribution_json IS NULL OR json_valid(attribution_json))`,
-    ],
-    ['tags_json', `TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags_json))`],
-    ['event_id', `TEXT`],
-    ['content_hash', `TEXT`],
-    ['parent_hash', `TEXT`],
-    ['deleted_at', `TEXT`],
-    ['redirect_to', `TEXT`],
-  ] as const;
-  for (const [name, definition] of additions) {
-    if (!names.has(name)) {
-      await db
-        .prepare(
-          `ALTER TABLE taproot_entity_revisions ADD COLUMN ${name} ${definition}`,
-        )
-        .run();
-    }
-  }
+export async function backfillLegacyRevisions(
+  db: SqliteDatabaseLike,
+): Promise<void> {
   const revisions = await db
     .prepare(
       `SELECT r.entity_id, r.revision, r.entity_json, r.actor, r.event_id, r.content_hash,
@@ -513,38 +438,188 @@ async function upgradeLegacySchema(db: SqliteDatabaseLike): Promise<void> {
   let parentHash: string | null = null;
   for (const revision of revisions.results) {
     if (revision.entity_id !== previousEntity) parentHash = null;
-    const contentHash =
-      revision.content_hash ??
-      (await hash(
-        `${revision.entity_json}\n${JSON.stringify({ deletedAt: revision.deleted_at, redirectTo: revision.redirect_to })}`,
-      ));
+    const contentHash = await hash(
+      `${revision.entity_json}\n${JSON.stringify({ deletedAt: revision.deleted_at, redirectTo: revision.redirect_to })}`,
+    );
+    const eventId = `legacy-${revision.entity_id}-${revision.revision}`;
+    if (
+      (revision.event_id !== null && revision.event_id !== eventId) ||
+      (revision.content_hash !== null && revision.content_hash !== contentHash)
+    ) {
+      throw new SchemaMismatchError(
+        `Legacy revision ${revision.entity_id}@${revision.revision} has conflicting durable identity`,
+      );
+    }
     if (!revision.event_id || !revision.content_hash) {
       const attribution = revision.actor
         ? JSON.stringify({ id: revision.actor, kind: 'human' })
         : null;
-      await db
-        .prepare(
-          `UPDATE taproot_entity_revisions SET event_id = ?, content_hash = ?,
+      await db.batch([
+        db
+          .prepare(
+            `UPDATE taproot_entity_revisions SET event_id = ?, content_hash = ?,
           parent_hash = ?, attribution_json = COALESCE(attribution_json, ?),
           tags_json = COALESCE(tags_json, '[]'), deleted_at = ?, redirect_to = ?
           WHERE entity_id = ? AND revision = ?`,
+          )
+          .bind(
+            eventId,
+            contentHash,
+            parentHash,
+            attribution,
+            revision.deleted_at,
+            revision.redirect_to,
+            revision.entity_id,
+            revision.revision,
+          ),
+      ]);
+    } else {
+      const storedParent = await db
+        .prepare(
+          `SELECT parent_hash FROM taproot_entity_revisions
+           WHERE entity_id = ? AND revision = ?`,
         )
-        .bind(
-          revision.event_id ??
-            `legacy-${revision.entity_id}-${revision.revision}`,
-          contentHash,
-          parentHash,
-          attribution,
-          revision.deleted_at,
-          revision.redirect_to,
-          revision.entity_id,
-          revision.revision,
-        )
-        .run();
+        .bind(revision.entity_id, revision.revision)
+        .all<{ parent_hash: string | null }>();
+      if (storedParent.results[0]?.parent_hash !== parentHash)
+        throw new SchemaMismatchError(
+          `Legacy revision ${revision.entity_id}@${revision.revision} has a conflicting parent hash`,
+        );
     }
     previousEntity = revision.entity_id;
     parentHash = contentHash;
   }
+}
+
+export async function backfillTaprootAudit(
+  db: SqliteDatabaseLike,
+): Promise<void> {
+  await db.batch([
+    db.prepare(
+      `INSERT INTO taproot_audit_events(
+         event_id, entity_id, revision, event_type, attribution_json,
+         edit_summary, tags_json, content_hash, parent_hash, details_json, created_at
+       )
+       SELECT event_id, entity_id, revision, 'import',
+         attribution_json, edit_summary, tags_json, content_hash, parent_hash,
+         json_object('source', 'legacy-v1'), created_at
+       FROM taproot_entity_revisions
+       WHERE true
+       ON CONFLICT(event_id) DO NOTHING`,
+    ),
+  ]);
+}
+
+export async function verifyTaprootSemanticState(
+  db: SqliteDatabaseLike,
+  baseIri: string,
+): Promise<void> {
+  const incomplete = await db
+    .prepare(
+      `SELECT COUNT(*) AS count
+       FROM taproot_entity_revisions r
+       LEFT JOIN taproot_audit_events a ON a.event_id = r.event_id
+       WHERE r.event_id IS NULL OR r.content_hash IS NULL OR a.event_id IS NULL
+         OR a.entity_id IS NOT r.entity_id OR a.revision IS NOT r.revision
+         OR a.content_hash IS NOT r.content_hash
+         OR a.parent_hash IS NOT r.parent_hash
+         OR a.attribution_json IS NOT r.attribution_json
+         OR a.edit_summary IS NOT r.edit_summary
+         OR a.tags_json IS NOT r.tags_json
+         OR a.created_at IS NOT r.created_at`,
+    )
+    .all<{ count: number }>();
+  if (Number(incomplete.results[0]?.count ?? 0) !== 0)
+    throw new SchemaMismatchError(
+      'Taproot revision identity or audit backfill is incomplete',
+    );
+  const dangling = await db
+    .prepare(
+      `SELECT COUNT(*) AS count
+       FROM taproot_rdf_ownership o
+       LEFT JOIN taproot_entities e ON e.entity_id = o.entity_id
+       WHERE e.entity_id IS NULL`,
+    )
+    .all<{ count: number }>();
+  if (Number(dangling.results[0]?.count ?? 0) !== 0)
+    throw new SchemaMismatchError(
+      'Taproot RDF ownership contains dangling rows',
+    );
+  const rows = await db
+    .prepare(
+      `SELECT entity_id, entity_json, deleted_at, redirect_to
+       FROM taproot_entities ORDER BY entity_id`,
+    )
+    .all<{
+      entity_id: EntityId;
+      entity_json: string;
+      deleted_at: string | null;
+      redirect_to: EntityId | null;
+    }>();
+  const factory = new DataFactory();
+  for (const row of rows.results) {
+    const expected = lifecycleQuads(
+      parseEntityJson(row.entity_json),
+      row.deleted_at,
+      row.redirect_to,
+      baseIri,
+      TAPROOT_RDF_VERSION,
+      factory,
+    )
+      .map((quad) =>
+        [
+          encodeTerm(quad.subject).key,
+          encodeTerm(quad.predicate).key,
+          encodeTerm(quad.object).key,
+          encodeTerm(quad.graph).key,
+        ].join('\u0000'),
+      )
+      .sort();
+    const actual = await db
+      .prepare(
+        `SELECT subject_key, predicate_key, object_key, graph_key
+         FROM taproot_rdf_ownership WHERE entity_id = ?
+         ORDER BY subject_key, predicate_key, object_key, graph_key`,
+      )
+      .bind(row.entity_id)
+      .all<{
+        subject_key: string;
+        predicate_key: string;
+        object_key: string;
+        graph_key: string;
+      }>();
+    const keys = actual.results
+      .map(({ subject_key, predicate_key, object_key, graph_key }) =>
+        [subject_key, predicate_key, object_key, graph_key].join('\u0000'),
+      )
+      .sort();
+    if (JSON.stringify(keys) !== JSON.stringify(expected))
+      throw new SchemaMismatchError(
+        `Taproot RDF ownership backfill is incomplete for ${row.entity_id}`,
+      );
+  }
+}
+
+export async function verifyTaprootPackageSeeds(
+  db: SqliteDatabaseLike,
+): Promise<void> {
+  const migrationSeeds = await db
+    .prepare(
+      `SELECT COUNT(*) AS count FROM taproot_migrations
+       WHERE (version = 1 AND name = 'initial')
+          OR (version = 2 AND name = 'audit-and-operations')`,
+    )
+    .all<{ count: number }>();
+  const migrationSeedTotal = await db
+    .prepare(`SELECT COUNT(*) AS count FROM taproot_migrations`)
+    .all<{ count: number }>();
+  if (
+    Number(migrationSeeds.results[0]?.count ?? 0) !== 2 ||
+    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 2
+  )
+    throw new SchemaMismatchError(
+      'Taproot package migration seeds are incomplete',
+    );
 }
 
 async function hash(value: string): Promise<string> {
@@ -689,6 +764,18 @@ export async function isExactTaprootSchema(
   db: SqliteDatabaseLike,
 ): Promise<boolean> {
   return matchesExactCatalog(db, taprootSchemaStatements);
+}
+
+export async function isExactTaprootUpgradeSchema(
+  db: SqliteDatabaseLike,
+): Promise<boolean> {
+  return matchesExactCatalog(db, taprootUpgradeCatalogStatements);
+}
+
+export async function isExactTaprootPreFinalizeSchema(
+  db: SqliteDatabaseLike,
+): Promise<boolean> {
+  return matchesExactCatalog(db, taprootPreFinalizeCatalogStatements);
 }
 
 async function matchesExactCatalog(
