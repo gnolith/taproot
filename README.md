@@ -2,7 +2,7 @@
 
 **The D1-native, Wikibase-compatible knowledge layer for Gnolith.**
 
-Taproot gives a Codex Site one authoritative Wikibase-shaped Item/Property
+Taproot gives a D1-backed consumer one authoritative Wikibase-shaped Item/Property
 document, tamper-evident revision and attribution history, typed and batched
 editing commands, term search, repairable projections, and a deterministic RDF projection stored and queried by
 [`@gnolith/diamond`](https://github.com/gnolith/diamond).
@@ -61,11 +61,11 @@ const item = await knowledge.createItem({
 });
 ```
 
-For migration-driven deployments, apply Diamond's migrations and the numbered
-Taproot SQL files, then call `initializeTaproot()`. The initializer performs
+Consumers applying migrations separately should apply Diamond's migrations and
+the numbered Taproot SQL files, then call `initializeTaproot()`. The initializer performs
 the application-level SHA-256 backfill that SQLite SQL alone cannot perform,
 reprojects older RDF mapping versions, installs immutability triggers, and is
-safe to run on every startup/deploy.
+safe to call repeatedly.
 
 ## Editing
 
@@ -118,10 +118,12 @@ Bulk imports default to create-only, can opt into `upsert`, are capped at 100
 entities by default, and commit one entity atomically at a time. Multi-command
 edits apply up to 100 commands in one revision. All list limits are capped at 500.
 
-See the [Codex Site example](examples/codex-site/README.md),
+See the [local D1 and Diamond interoperability example](examples/d1-diamond-interop/README.md),
 [`COMPATIBILITY.md`](COMPATIBILITY.md), and the architecture, API, operations,
 and release documents under `docs/`. Run `npm run check` for the complete local
-release-quality gate.
+package release-quality gate. These checks do not assemble, provision, deploy,
+or accept a complete Gnolith Site; the Codex agent creating a Site owns those
+responsibilities.
 
 ## License
 

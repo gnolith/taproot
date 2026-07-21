@@ -8,7 +8,7 @@ import {
 } from '@gnolith/taproot';
 import { createSparqlHandler } from '@gnolith/diamond';
 
-export async function runTaprootDemo(db: D1DatabaseLike) {
+export async function runTaprootInteropDemo(db: D1DatabaseLike) {
   await initializeTaproot(db);
   const taproot = new TaprootRepository(db, {
     baseIri: 'https://knowledge.example',
@@ -125,7 +125,7 @@ export async function runTaprootDemo(db: D1DatabaseLike) {
   }`;
   const response = await sparql(
     new Request(
-      `https://site.example/api/sparql?query=${encodeURIComponent(query)}`,
+      `https://interop.example/sparql?query=${encodeURIComponent(query)}`,
       { headers: { accept: 'application/sparql-results+json' } },
     ),
   );

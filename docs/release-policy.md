@@ -11,6 +11,10 @@ inspects the packed artifact, publishes to npm through OIDC trusted publishing,
 and attaches the tarball, SBOM, checksums, and build attestation to a GitHub
 Release.
 
+A Taproot release qualifies the published package and its supported local
+runtime contracts. It does not assemble, provision, deploy, or accept a complete
+Gnolith Site; the Codex agent creating a Site owns those responsibilities.
+
 The current minor line receives fixes. Security support follows `SECURITY.md`.
 Deprecations are announced in the changelog before removal whenever a safe
 migration path exists.

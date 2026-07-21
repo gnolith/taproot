@@ -2,8 +2,9 @@
 
 ## Initialize and migrate
 
-Run `initializeTaproot(db)` during deployment or startup. It is idempotent and
-initializes Diamond too. SQL migration users must still run the initializer
+Run `initializeTaproot(db)` before using a database. It is idempotent and
+initializes Diamond too. Consumers that apply SQL migrations separately must
+still run the initializer
 after applying `0002`: legacy revision hashes require Web Crypto and cannot be
 correctly produced by SQLite alone.
 
@@ -11,7 +12,8 @@ The v1-to-v2 migration backfills SHA-256 content/parent chains and audit
 events, migrates RDF mapping v1 to v2, creates ownership records, and uses a
 durable migration marker so an interrupted reprojection resumes safely.
 `inspectTaprootSchema` checks tables, required columns, indexes, triggers, and
-format versions. Treat a failed inspection as a deployment failure.
+format versions. A failed inspection means the database is not usable by this
+package. The consuming application decides how that affects startup or rollout.
 
 ## Integrity and repair
 
@@ -34,6 +36,11 @@ redirects, or audit history.
 
 After database restore, run schema inspection and paginated integrity checks.
 After JSON-only import, projections are generated during each import.
+
+Taproot documents persistence semantics but does not select or provision a D1
+database, run remote migrations, configure backups, deploy an application, or
+accept a complete Gnolith Site. The Codex agent creating a Site owns those
+operational decisions and checks.
 
 ## Limits and failure behavior
 

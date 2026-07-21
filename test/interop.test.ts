@@ -1,10 +1,10 @@
 import { createSparqlHandler, type D1DatabaseLike } from '@gnolith/diamond';
 import { Miniflare } from 'miniflare';
 import { describe, expect, it } from 'vitest';
-import { runTaprootDemo } from '../examples/codex-site/demo.js';
+import { runTaprootInteropDemo } from '../examples/d1-diamond-interop/demo.js';
 
-describe('published Codex Site example', () => {
-  it('coordinates Taproot writes and Diamond SPARQL on one Workerd D1 database', async () => {
+describe('local D1 and Diamond interoperability example', () => {
+  it('coordinates Taproot writes and Diamond SPARQL on local Workerd D1', async () => {
     const miniflare = new Miniflare({
       modules: true,
       script: 'export default { fetch() { return new Response("ok") } }',
@@ -16,7 +16,7 @@ describe('published Codex Site example', () => {
       const db = (await miniflare.getD1Database(
         'DB',
       )) as unknown as D1DatabaseLike;
-      const result = await runTaprootDemo(db);
+      const result = await runTaprootInteropDemo(db);
       expect(result.staleRevisionRejected).toBe(true);
       expect(result.integrity).toMatchObject({ valid: true });
       expect(result.audit).toHaveLength(4);

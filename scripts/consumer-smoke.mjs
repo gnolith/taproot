@@ -86,7 +86,7 @@ writeFileSync(
       );
       const query = 'ASK { <https://knowledge.example/entity/Q1> <https://knowledge.example/prop/direct/P1> "works" }';
       const response = await createSparqlHandler({ db })(
-        new Request('https://site.example/sparql?query=' + encodeURIComponent(query), {
+        new Request('https://consumer.example/sparql?query=' + encodeURIComponent(query), {
           headers: { accept: 'application/sparql-results+json' },
         }),
       );

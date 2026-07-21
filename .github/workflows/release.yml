@@ -23,9 +23,11 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - name: Verify the release commit belongs to main
+      - name: Verify the annotated tag and release commit
         shell: bash
         run: |
+          tag_type="$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")"
+          test "$tag_type" = tag
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
           release_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
           git merge-base --is-ancestor "$release_commit" refs/remotes/origin/main

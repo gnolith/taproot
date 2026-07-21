@@ -23,6 +23,6 @@ body:
     id: versions
     attributes:
       label: Runtime versions
-      description: Taproot, Diamond, Node, Wrangler/Workerd, and schema versions.
+      description: Taproot, Diamond, Node, D1 adapter, relevant Miniflare/Workerd, and schema versions.
     validations:
       required: true

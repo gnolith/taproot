@@ -10,5 +10,9 @@ involved, Workerd/D1 integration coverage. Compatibility claims require named
 fixtures or behavioral tests. Do not lower coverage or security gates merely to
 make a change pass.
 
+Workerd/D1 coverage is a local package-runtime check. It does not qualify a
+deployed Gnolith Site; that responsibility belongs to the Site-creating Codex
+agent.
+
 By contributing, you agree that your contribution is licensed under MIT and
 that project interactions follow `CODE_OF_CONDUCT.md`.

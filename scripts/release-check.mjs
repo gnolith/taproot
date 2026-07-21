@@ -55,8 +55,8 @@ for (const required of [
   'docs/api.md',
   'docs/architecture.md',
   'docs/threat-model.md',
-  'examples/codex-site/README.md',
-  'examples/codex-site/demo.ts',
+  'examples/d1-diamond-interop/README.md',
+  'examples/d1-diamond-interop/demo.ts',
   'migrations/0001_taproot.sql',
   'migrations/0002_audit_operations.sql',
 ]) {

@@ -1,6 +1,6 @@
 # Product scope
 
-Taproot exists so a Codex Site can own a Wikibase-style knowledge graph in D1
+Taproot exists so a D1-backed application can own a Wikibase-style knowledge graph
 and query it through Diamond without operating MediaWiki or another external
 knowledge service.
 
@@ -14,6 +14,11 @@ The following are separate products or future compatibility domains rather
 than missing Taproot implementation: MCP transport, agent orchestration,
 authentication/authorization, UI, wiki pages, media bytes, MediaWiki APIs,
 Lexeme/Form/Sense, MediaInfo, and EntitySchema entity storage.
+
+Complete-Site assembly, resource provisioning, remote migration execution,
+deployment, and production acceptance are also outside this package. The Codex
+agent creating a Gnolith Site owns those responsibilities. Taproot qualifies
+only its published package and supported local runtime contracts.
 
 Adding an extension entity type changes IDs, JSON, commands, RDF, migration,
 and compatibility fixtures. It must be designed and versioned as an explicit
