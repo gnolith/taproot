@@ -256,11 +256,7 @@ function validateStatement(
   if (typeof value.id !== 'string' || value.id.length === 0) {
     throw new InvalidStatementError('Statement id is required');
   }
-  if (typeof value.text !== 'string' || value.text.trim().length === 0) {
-    throw new InvalidStatementError(
-      `Statement ${value.id} text must be explicitly authored and non-empty`,
-    );
-  }
+  assertAuthoredStatementText(value.text, String(value.id));
   if (!value.id.startsWith(`${entityId}$`)) {
     throw new InvalidStatementError(
       `Statement ${value.id} is not owned by ${entityId}`,
@@ -653,10 +649,7 @@ export function createStatement(
   options: { id?: string; rank?: Statement['rank'] } = {},
 ): Statement {
   validateSnak(mainsnak);
-  if (typeof text !== 'string' || text.trim().length === 0)
-    throw new InvalidStatementError(
-      'Statement text must be explicitly authored and non-empty',
-    );
+  assertAuthoredStatementText(text);
   return {
     id: options.id ?? `${entityId}$${crypto.randomUUID()}`,
     type: 'statement',
@@ -667,6 +660,16 @@ export function createStatement(
     'qualifiers-order': [],
     references: [],
   };
+}
+
+export function assertAuthoredStatementText(
+  text: unknown,
+  statementId?: string,
+): asserts text is string {
+  if (typeof text !== 'string' || text.trim().length === 0)
+    throw new InvalidStatementError(
+      `Statement${statementId ? ` ${statementId}` : ''} text must be explicitly authored and non-empty`,
+    );
 }
 
 export function createReference(

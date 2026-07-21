@@ -30,6 +30,7 @@ import {
   taprootFinalizeStatements,
   taprootSchemaStatements,
   verifyTaprootPackageSeeds,
+  verifyPersistedStatementText,
   verifyTaprootSemanticState,
 } from './schema.js';
 
@@ -273,6 +274,14 @@ export async function applyTaprootMigrations(
       );
     const appliedAt = new Date().toISOString();
     try {
+      await verifyPersistedStatementText(db);
+    } catch (cause) {
+      throw new TaprootMigrationStateError(
+        'Existing Taproot statements lack explicitly authored nonblank text; migration refused without rewriting or inventing historical text',
+        { cause },
+      );
+    }
+    try {
       await db.batch([
         ...pending.flatMap(({ migration }) =>
           migration.statements.map((sql) => db.prepare(sql)),
@@ -396,6 +405,7 @@ export async function applyTaprootMigrations(
       continue;
     }
     if (phase === 'rdf') {
+      await verifyPersistedStatementText(db);
       await verifyTaprootSemanticState(db, identity);
       await finalizeRecovery(
         db,

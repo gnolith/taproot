@@ -10,6 +10,7 @@ import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
 import {
   cloneEntity,
+  assertAuthoredStatementText,
   entityNumericId,
   exportEntityJson,
   MAX_ENTITY_BYTES,
@@ -784,6 +785,7 @@ export class TaprootRepository {
     statement: Statement,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
+    assertAuthoredStatementText(statement.text, statement.id);
     return this.#mutate(id, edit, (entity) => {
       const property = statement.mainsnak.property;
       entity.claims[property] ??= [];
@@ -798,6 +800,7 @@ export class TaprootRepository {
     statement: Statement,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
+    assertAuthoredStatementText(statement.text, statement.id);
     return this.#mutate(id, edit, (entity) => {
       const located = locateStatement(entity, statementId);
       located.statements.splice(located.index, 1);
@@ -829,6 +832,7 @@ export class TaprootRepository {
     text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
+    assertAuthoredStatementText(text, statementId);
     return this.#mutate(id, edit, (entity) => {
       const statement = locateStatement(entity, statementId).statement;
       statement.rank = rank;
@@ -844,6 +848,7 @@ export class TaprootRepository {
     text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
+    assertAuthoredStatementText(text, statementId);
     validateSnak(snak);
     return this.#mutate(id, edit, (entity) => {
       const statement = locateStatement(entity, statementId).statement;
@@ -866,6 +871,7 @@ export class TaprootRepository {
     text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
+    assertAuthoredStatementText(text, statementId);
     return this.#mutate(id, edit, (entity) => {
       const statement = locateStatement(entity, statementId).statement;
       statement.text = text;
@@ -890,6 +896,7 @@ export class TaprootRepository {
     text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
+    assertAuthoredStatementText(text, statementId);
     return this.#mutate(id, edit, (entity) => {
       const statement = locateStatement(entity, statementId).statement;
       statement.text = text;
@@ -905,6 +912,7 @@ export class TaprootRepository {
     text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
+    assertAuthoredStatementText(text, statementId);
     return this.#mutate(id, edit, (entity) => {
       const statement = locateStatement(entity, statementId).statement;
       statement.text = text;
@@ -927,6 +935,7 @@ export class TaprootRepository {
     text: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
+    assertAuthoredStatementText(text, statementId);
     return this.#mutate(id, edit, (entity) => {
       const statement = locateStatement(entity, statementId).statement;
       statement.text = text;
@@ -2093,7 +2102,9 @@ function resupplyStatementTexts(
         throw new InvalidStatementError(
           `Statement ${statement.id} text must be explicitly resupplied for this revision`,
         );
-      statement.text = supplied[statement.id] as string;
+      const text = supplied[statement.id];
+      assertAuthoredStatementText(text, statement.id);
+      statement.text = text;
     }
   }
   const unexpected = Object.keys(supplied).filter((id) => !expected.has(id));
@@ -2127,6 +2138,17 @@ function applyEntityCommand(
   entity: WikibaseEntity,
   command: EntityCommand,
 ): void {
+  if (command.type === 'add-statement' || command.type === 'replace-statement')
+    assertAuthoredStatementText(command.statement.text, command.statement.id);
+  else if (
+    command.type === 'set-statement-rank' ||
+    command.type === 'add-qualifier' ||
+    command.type === 'remove-qualifier' ||
+    command.type === 'add-reference' ||
+    command.type === 'replace-reference' ||
+    command.type === 'remove-reference'
+  )
+    assertAuthoredStatementText(command.text, command.statementId);
   switch (command.type) {
     case 'set-label':
       entity.labels[command.language] = {

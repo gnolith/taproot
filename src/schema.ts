@@ -631,6 +631,58 @@ export async function verifyTaprootSemanticState(
   }
 }
 
+/** Uses JavaScript trim semantics, including Unicode whitespace, for parity with runtime validation. */
+export async function verifyPersistedStatementText(
+  db: SqliteDatabaseLike,
+): Promise<void> {
+  const rows = await db
+    .prepare(
+      `SELECT 'current' AS source, entity_id, revision, entity_json
+       FROM taproot_entities
+       UNION ALL
+       SELECT 'historical' AS source, entity_id, revision, entity_json
+       FROM taproot_entity_revisions
+       ORDER BY entity_id, revision, source`,
+    )
+    .all<{
+      source: string;
+      entity_id: string;
+      revision: number;
+      entity_json: string;
+    }>();
+  for (const row of rows.results) {
+    let entity: unknown;
+    try {
+      entity = JSON.parse(row.entity_json);
+    } catch (cause) {
+      throw new SchemaMismatchError(
+        `Taproot ${row.source} entity ${row.entity_id}@${row.revision} is not valid JSON`,
+        { cause },
+      );
+    }
+    if (!isRecord(entity) || !isRecord(entity.claims))
+      throw new SchemaMismatchError(
+        `Taproot ${row.source} entity ${row.entity_id}@${row.revision} has invalid claims`,
+      );
+    for (const statements of Object.values(entity.claims)) {
+      if (!Array.isArray(statements))
+        throw new SchemaMismatchError(
+          `Taproot ${row.source} entity ${row.entity_id}@${row.revision} has an invalid claim group`,
+        );
+      for (const statement of statements) {
+        if (
+          !isRecord(statement) ||
+          typeof statement.text !== 'string' ||
+          statement.text.trim().length === 0
+        )
+          throw new SchemaMismatchError(
+            `Taproot ${row.source} statement text is missing or blank at ${row.entity_id}@${row.revision}`,
+          );
+      }
+    }
+  }
+}
+
 export async function verifyTaprootPackageSeeds(
   db: SqliteDatabaseLike,
 ): Promise<void> {
@@ -808,6 +860,10 @@ export async function isExactTaprootPreFinalizeSchema(
   db: SqliteDatabaseLike,
 ): Promise<boolean> {
   return matchesExactCatalog(db, taprootPreFinalizeCatalogStatements);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 async function matchesExactCatalog(

@@ -2,11 +2,13 @@ import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
 import { describe, expect, it } from 'vitest';
 import {
   InvalidStatementError,
+  SchemaMismatchError,
   TaprootMigrationStateError,
   TaprootRepository,
   applyTaprootMigrations,
   createStatement,
   initializeTaproot,
+  legacyTaprootV1Statements,
   type EntityCommand,
   type Statement,
 } from '../src/index.js';
@@ -132,6 +134,25 @@ describe('authored statement text on native SQLite', () => {
       ).rejects.toBeInstanceOf(InvalidStatementError);
 
       await expect(
+        repository.applyCommands(
+          'Q1',
+          [
+            {
+              type: 'set-statement-rank',
+              statementId: 'Q1$authored',
+              rank: 'normal',
+              text: '\u00a0',
+            },
+            { type: 'remove-statement', statementId: 'Q1$authored' },
+          ],
+          { expectedRevision: 4 },
+        ),
+      ).rejects.toBeInstanceOf(InvalidStatementError);
+      expect((await repository.getEntity('Q1')).entity.claims.P1).toHaveLength(
+        1,
+      );
+
+      await expect(
         repository.replaceEntity('Q1', structuredClone(reauthored.entity), {
           expectedRevision: 4,
           statementTexts: {},
@@ -253,6 +274,66 @@ describe('authored statement text on native SQLite', () => {
       await legacy.close();
     }
   });
+
+  it.each(['\t\n', '\u00a0'])(
+    'rejects historical-only %j whitespace with runtime-equivalent migration semantics',
+    async (text) => {
+      const db = new NodeSqliteDatabase(':memory:');
+      try {
+        await initializeTaproot(db, { baseIri });
+        await downgradeStatementTextMigration(db);
+        await insertCurrentAndHistorical(db, text);
+        await expect(applyTaprootMigrations(db)).rejects.toBeInstanceOf(
+          TaprootMigrationStateError,
+        );
+        const version = await db
+          .prepare(
+            `SELECT metadata_value FROM taproot_metadata WHERE metadata_key = 'canonical_json_version'`,
+          )
+          .all<{ metadata_value: string }>();
+        expect(version.results[0]?.metadata_value).toBe('1');
+      } finally {
+        await db.close();
+      }
+    },
+  );
+
+  it('gates legacy recovery before stamping canonical v2 when only history lacks text', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await db.batch(
+        legacyTaprootV1Statements.map((statement) => db.prepare(statement)),
+      );
+      const current = entityJson(2);
+      const historical = entityJson(1, '\u00a0');
+      await db.batch([
+        db
+          .prepare(
+            `INSERT INTO taproot_entities(entity_id, entity_type, datatype, revision, entity_json, modified_at)
+             VALUES ('Q1', 'item', NULL, 2, ?, '2026-01-02T00:00:00.000Z')`,
+          )
+          .bind(current),
+        db
+          .prepare(
+            `INSERT INTO taproot_entity_revisions(entity_id, revision, entity_json, actor, edit_summary)
+             VALUES ('Q1', 1, ?, NULL, NULL), ('Q1', 2, ?, NULL, NULL)`,
+          )
+          .bind(historical, current),
+      ]);
+      await expect(
+        applyTaprootMigrations(db, { baseIri }),
+      ).rejects.toBeInstanceOf(SchemaMismatchError);
+      const ledger = await db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM _gnolith_migrations
+           WHERE namespace = '@gnolith/taproot'`,
+        )
+        .all<{ count: number }>();
+      expect(Number(ledger.results[0]?.count ?? 0)).toBe(0);
+    } finally {
+      await db.close();
+    }
+  });
 });
 
 async function downgradeStatementTextMigration(
@@ -270,4 +351,65 @@ async function downgradeStatementTextMigration(
        WHERE metadata_key = 'canonical_json_version'`,
     ),
   ]);
+}
+
+async function insertCurrentAndHistorical(
+  db: NodeSqliteDatabase,
+  historicalText: string,
+): Promise<void> {
+  const current = entityJson(2);
+  const historical = entityJson(1, historicalText);
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO taproot_entities(entity_id, entity_type, datatype, revision, entity_json, modified_at)
+         VALUES ('Q1', 'item', NULL, 2, ?, '2026-01-02T00:00:00.000Z')`,
+      )
+      .bind(current),
+    db
+      .prepare(
+        `INSERT INTO taproot_entity_revisions(
+           entity_id, revision, entity_json, tags_json, event_id,
+           content_hash, created_at
+         ) VALUES ('Q1', 1, ?, '[]', 'historical-event', 'historical-hash',
+           '2026-01-01T00:00:00.000Z'),
+           ('Q1', 2, ?, '[]', 'current-event', 'current-hash',
+           '2026-01-02T00:00:00.000Z')`,
+      )
+      .bind(historical, current),
+  ]);
+}
+
+function entityJson(revision: number, statementText?: string): string {
+  return JSON.stringify({
+    id: 'Q1',
+    type: 'item',
+    labels: {},
+    descriptions: {},
+    aliases: {},
+    claims:
+      statementText === undefined
+        ? {}
+        : {
+            P1: [
+              {
+                id: 'Q1$historical',
+                type: 'statement',
+                text: statementText,
+                rank: 'normal',
+                mainsnak: {
+                  snaktype: 'somevalue',
+                  property: 'P1',
+                  datatype: 'string',
+                },
+                qualifiers: {},
+                'qualifiers-order': [],
+                references: [],
+              },
+            ],
+          },
+    sitelinks: {},
+    lastrevid: revision,
+    modified: `2026-01-0${revision}T00:00:00.000Z`,
+  });
 }

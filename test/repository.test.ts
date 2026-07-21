@@ -12,6 +12,8 @@ import {
   RevisionConflictError,
   SchemaMismatchError,
   TaprootRepository,
+  TaprootMigrationStateError,
+  applyTaprootMigrations,
   initializeTaproot,
   inspectTaprootPersistence,
   legacyTaprootV1Statements,
@@ -41,6 +43,80 @@ async function environment() {
 }
 
 describe('TaprootRepository on Workerd D1', () => {
+  it('rejects Unicode-whitespace text in historical-only D1 migration data', async () => {
+    const env = await environment();
+    try {
+      const current = JSON.stringify({
+        id: 'Q1',
+        type: 'item',
+        labels: {},
+        descriptions: {},
+        aliases: {},
+        claims: {},
+        sitelinks: {},
+        lastrevid: 2,
+        modified: '2026-01-02T00:00:00.000Z',
+      });
+      const historical = JSON.stringify({
+        ...JSON.parse(current),
+        claims: {
+          P1: [
+            {
+              id: 'Q1$historical',
+              type: 'statement',
+              text: '\u00a0',
+              rank: 'normal',
+              mainsnak: {
+                snaktype: 'somevalue',
+                property: 'P1',
+                datatype: 'string',
+              },
+              qualifiers: {},
+              'qualifiers-order': [],
+              references: [],
+            },
+          ],
+        },
+        lastrevid: 1,
+        modified: '2026-01-01T00:00:00.000Z',
+      });
+      await env.db.batch([
+        env.db.prepare(
+          `DELETE FROM _gnolith_migrations
+           WHERE namespace = '@gnolith/taproot'
+             AND migration_id = '0003-canonical-statement-text'`,
+        ),
+        env.db.prepare(`DELETE FROM taproot_migrations WHERE version = 3`),
+        env.db.prepare(
+          `UPDATE taproot_metadata SET metadata_value = '1'
+           WHERE metadata_key = 'canonical_json_version'`,
+        ),
+        env.db
+          .prepare(
+            `INSERT INTO taproot_entities(entity_id, entity_type, datatype, revision, entity_json, modified_at)
+             VALUES ('Q1', 'item', NULL, 2, ?, '2026-01-02T00:00:00.000Z')`,
+          )
+          .bind(current),
+        env.db
+          .prepare(
+            `INSERT INTO taproot_entity_revisions(
+               entity_id, revision, entity_json, tags_json, event_id,
+               content_hash, created_at
+             ) VALUES ('Q1', 1, ?, '[]', 'historical-event',
+               'historical-hash', '2026-01-01T00:00:00.000Z'),
+               ('Q1', 2, ?, '[]', 'current-event',
+               'current-hash', '2026-01-02T00:00:00.000Z')`,
+          )
+          .bind(historical, current),
+      ]);
+      await expect(applyTaprootMigrations(env.db)).rejects.toBeInstanceOf(
+        TaprootMigrationStateError,
+      );
+    } finally {
+      await env.dispose();
+    }
+  }, 20_000);
+
   it('enforces authored statement text and explicit resupply on D1', async () => {
     const env = await environment();
     try {
