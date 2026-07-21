@@ -1,0 +1,310 @@
+import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
+import { Miniflare } from 'miniflare';
+import { describe, expect, it } from 'vitest';
+import {
+  initializeTaproot,
+  inspectTaprootPersistence,
+  legacyTaprootV1Statements,
+  type SqliteDatabaseLike,
+  type SqlitePreparedStatementLike,
+  type SqliteResultLike,
+} from '../src/index.js';
+
+const baseIri = 'https://knowledge.example';
+const interrupted = new Error('simulated process interruption');
+
+type RecoveryBoundary =
+  'structure' | 'revision-row' | 'revisions' | 'audit' | 'rdf-row' | 'rdf';
+
+class TrackedStatement implements SqlitePreparedStatementLike {
+  constructor(
+    readonly sql: string,
+    readonly inner: SqlitePreparedStatementLike,
+  ) {}
+
+  bind(...values: unknown[]): TrackedStatement {
+    return new TrackedStatement(this.sql, this.inner.bind(...values));
+  }
+
+  run<T = Record<string, unknown>>(): Promise<SqliteResultLike<T>> {
+    return this.inner.run<T>();
+  }
+
+  all<T = Record<string, unknown>>(): Promise<SqliteResultLike<T>> {
+    return this.inner.all<T>();
+  }
+}
+
+class InterruptingDatabase implements SqliteDatabaseLike {
+  private didInterrupt = false;
+
+  constructor(
+    private readonly inner: SqliteDatabaseLike,
+    private readonly boundary: RecoveryBoundary | 'inside-structure',
+  ) {}
+
+  prepare(sql: string): TrackedStatement {
+    return new TrackedStatement(sql, this.inner.prepare(sql));
+  }
+
+  async batch<T = Record<string, unknown>>(
+    statements: SqlitePreparedStatementLike[],
+  ): Promise<Array<SqliteResultLike<T>>> {
+    const tracked = statements.map((statement) => {
+      if (!(statement instanceof TrackedStatement)) {
+        throw new Error('Test adapter received an untracked statement');
+      }
+      return statement;
+    });
+    const structural = tracked.some((statement) =>
+      /ALTER TABLE taproot_entity_revisions RENAME/iu.test(statement.sql),
+    );
+    if (
+      !this.didInterrupt &&
+      this.boundary === 'inside-structure' &&
+      structural
+    ) {
+      this.didInterrupt = true;
+      const middle = Math.max(1, Math.floor(tracked.length / 2));
+      const broken = this.inner.prepare(
+        `INSERT INTO taproot_assertions(no_such_column) VALUES ('fail')`,
+      );
+      const injected = [
+        ...tracked.slice(0, middle).map(({ inner }) => inner),
+        broken,
+        ...tracked.slice(middle).map(({ inner }) => inner),
+      ];
+      return this.inner.batch<T>(injected);
+    }
+
+    const results = await this.inner.batch<T>(
+      tracked.map(({ inner }) => inner),
+    );
+    if (!this.didInterrupt && (await this.reachedBoundary())) {
+      this.didInterrupt = true;
+      throw interrupted;
+    }
+    return results;
+  }
+
+  private async reachedBoundary(): Promise<boolean> {
+    if (this.boundary === 'inside-structure') return false;
+    const phase = await metadata(this.inner, 'migration_phase');
+    const completedRevisions = await scalar(
+      this.inner,
+      `SELECT COUNT(*) AS count FROM taproot_entity_revisions
+       WHERE event_id IS NOT NULL AND content_hash IS NOT NULL`,
+    );
+    const ownership = await scalar(
+      this.inner,
+      `SELECT COUNT(*) AS count FROM taproot_rdf_ownership`,
+    );
+    switch (this.boundary) {
+      case 'structure':
+        return phase === 'structure' && completedRevisions === 0;
+      case 'revision-row':
+        return phase === 'structure' && completedRevisions === 1;
+      case 'revisions':
+        return phase === 'revisions';
+      case 'audit':
+        return phase === 'audit' && ownership === 0;
+      case 'rdf-row':
+        return phase === 'audit' && ownership > 0;
+      case 'rdf':
+        return phase === 'rdf';
+    }
+  }
+}
+
+describe('legacy migration interruption recovery', () => {
+  it('rolls back the complete structural upgrade when a statement fails', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await seedLegacy(db);
+      await expect(
+        initializeTaproot(new InterruptingDatabase(db, 'inside-structure'), {
+          baseIri,
+        }),
+      ).rejects.toThrow();
+
+      expect(await metadata(db, 'migration_phase')).toBeUndefined();
+      expect(await hasColumn(db, 'taproot_entity_revisions', 'event_id')).toBe(
+        false,
+      );
+      expect(await taprootLedgerCount(db)).toBe(0);
+
+      await initializeTaproot(db, { baseIri });
+      await expectCurrentRecoveredState(db);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it.each<RecoveryBoundary>([
+    'structure',
+    'revision-row',
+    'revisions',
+    'audit',
+    'rdf-row',
+    'rdf',
+  ])('resumes after a committed %s boundary', async (boundary) => {
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await seedLegacy(db);
+      await expect(
+        initializeTaproot(new InterruptingDatabase(db, boundary), { baseIri }),
+      ).rejects.toBe(interrupted);
+
+      expect(await taprootLedgerCount(db)).toBe(0);
+      await expect(inspectTaprootPersistence(db)).resolves.toMatchObject({
+        current: false,
+      });
+
+      await initializeTaproot(db, { baseIri });
+      await expectCurrentRecoveredState(db);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('resumes a committed per-row backfill through a D1-compatible adapter', async () => {
+    const miniflare = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok") } }',
+      compatibilityDate: '2026-07-19',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: { DB: crypto.randomUUID() },
+    });
+    try {
+      const db = (await miniflare.getD1Database(
+        'DB',
+      )) as unknown as SqliteDatabaseLike;
+      await seedLegacy(db);
+      await expect(
+        initializeTaproot(new InterruptingDatabase(db, 'revision-row'), {
+          baseIri,
+        }),
+      ).rejects.toBe(interrupted);
+      expect(await taprootLedgerCount(db)).toBe(0);
+
+      await initializeTaproot(db, { baseIri });
+      await expectCurrentRecoveredState(db);
+    } finally {
+      await miniflare.dispose();
+    }
+  }, 30_000);
+});
+
+async function seedLegacy(db: SqliteDatabaseLike): Promise<void> {
+  await db.batch(
+    legacyTaprootV1Statements.map((statement) => db.prepare(statement)),
+  );
+  const entities = ['Q1', 'Q2'].map((id) =>
+    JSON.stringify({
+      id,
+      type: 'item',
+      labels: {},
+      descriptions: {},
+      aliases: {},
+      claims: {},
+      sitelinks: {},
+      lastrevid: 1,
+      modified: '2026-01-01T00:00:00.000Z',
+    }),
+  );
+  await db.batch([
+    db.prepare(
+      `INSERT INTO taproot_metadata(metadata_key, metadata_value)
+       VALUES ('base_iri', 'HTTPS://Knowledge.Example///')`,
+    ),
+    ...entities.flatMap((entity, index) => {
+      const id = `Q${index + 1}`;
+      return [
+        db
+          .prepare(
+            `INSERT INTO taproot_entities(
+               entity_id, entity_type, revision, entity_json, modified_at
+             ) VALUES (?, 'item', 1, ?, '2026-01-01T00:00:00.000Z')`,
+          )
+          .bind(id, entity),
+        db
+          .prepare(
+            `INSERT INTO taproot_entity_revisions(
+               entity_id, revision, entity_json, actor
+             ) VALUES (?, 1, ?, 'legacy-user')`,
+          )
+          .bind(id, entity),
+      ];
+    }),
+  ]);
+}
+
+async function expectCurrentRecoveredState(
+  db: SqliteDatabaseLike,
+): Promise<void> {
+  await expect(inspectTaprootPersistence(db)).resolves.toMatchObject({
+    baseIri,
+    current: true,
+  });
+  expect(await metadata(db, 'migration_phase')).toBeUndefined();
+  expect(await taprootLedgerCount(db)).toBe(2);
+  expect(
+    await scalar(
+      db,
+      `SELECT COUNT(*) AS count FROM taproot_entity_revisions
+       WHERE event_id IS NULL OR content_hash IS NULL`,
+    ),
+  ).toBe(0);
+  expect(
+    await scalar(db, `SELECT COUNT(*) AS count FROM taproot_audit_events`),
+  ).toBe(2);
+  expect(
+    await scalar(db, `SELECT COUNT(*) AS count FROM taproot_rdf_ownership`),
+  ).toBeGreaterThan(0);
+}
+
+async function metadata(
+  db: SqliteDatabaseLike,
+  key: string,
+): Promise<string | undefined> {
+  try {
+    const result = await db
+      .prepare(
+        `SELECT metadata_value FROM taproot_metadata WHERE metadata_key = ?`,
+      )
+      .bind(key)
+      .all<{ metadata_value: string }>();
+    return result.results[0]?.metadata_value;
+  } catch {
+    return undefined;
+  }
+}
+
+async function scalar(db: SqliteDatabaseLike, sql: string): Promise<number> {
+  try {
+    const result = await db.prepare(sql).all<{ count: number }>();
+    return Number(result.results[0]?.count ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+async function hasColumn(
+  db: SqliteDatabaseLike,
+  table: string,
+  column: string,
+): Promise<boolean> {
+  const result = await db
+    .prepare(`SELECT name FROM pragma_table_info(?) WHERE name = ?`)
+    .bind(table, column)
+    .all<{ name: string }>();
+  return result.results.length > 0;
+}
+
+async function taprootLedgerCount(db: SqliteDatabaseLike): Promise<number> {
+  return scalar(
+    db,
+    `SELECT COUNT(*) AS count FROM _gnolith_migrations
+     WHERE namespace = '@gnolith/taproot'`,
+  );
+}
