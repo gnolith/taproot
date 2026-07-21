@@ -1,5 +1,14 @@
 # Wikibase compatibility target
 
+Taproot 0.2.x requires `@gnolith/diamond` 0.4.0 exactly. Existing Cloudflare D1
+objects remain compatible with the exported `D1DatabaseLike` surface. New
+embedders may use the equivalent `SqliteDatabaseLike`; both require one
+adapter/connection with ordered atomic batch semantics.
+
+Fresh databases require an explicit durable absolute HTTP(S) base IRI. A
+version-one database is adopted only when its known table and version markers
+match the supported legacy layout; arbitrary partial schemas fail closed.
+
 Taproot targets the canonical entity shapes and RDF vocabulary paths used by
 the Wikibase API/RDF model, with site-owned entity/property namespaces. The
 fixtures under `test/fixtures` are the named interoperability baseline.

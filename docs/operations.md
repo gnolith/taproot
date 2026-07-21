@@ -2,11 +2,13 @@
 
 ## Initialize and migrate
 
-Run `initializeTaproot(db)` before using a database. It is idempotent and
-initializes Diamond too. Consumers that apply SQL migrations separately must
-still run the initializer
-after applying `0002`: legacy revision hashes require Web Crypto and cannot be
-correctly produced by SQLite alone.
+Run `initializeTaproot(db, { baseIri })` before using a new database. The
+absolute HTTP(S) base IRI is stored as permanent database identity and cannot
+be replaced by a later hostname or runtime setting. Afterward,
+`initializeTaproot(db)` is idempotent and initializes Diamond too. Do not apply
+the historical numbered SQL files directly in 0.2; hosts orchestrate the
+package-owned plan/apply/initialize APIs because legacy revision hashes and
+adoption checks cannot be correctly produced by SQLite alone.
 
 The v1-to-v2 migration backfills SHA-256 content/parent chains and audit
 events, migrates RDF mapping v1 to v2, creates ownership records, and uses a
@@ -14,6 +16,13 @@ durable migration marker so an interrupted reprojection resumes safely.
 `inspectTaprootSchema` checks tables, required columns, indexes, triggers, and
 format versions. A failed inspection means the database is not usable by this
 package. The consuming application decides how that affects startup or rollout.
+
+Hosts can call `planTaprootMigrations(db)`,
+`inspectTaprootPersistence(db)`, and
+`applyTaprootMigrations(db, { baseIri })`. Planning and inspection are
+read-only. Taproot owns its schema, identity, and migration namespace; Seedbed
+owns local CLI, file path, process lifecycle, and Docker assembly, while a
+Codex Site host owns D1 and Site assembly.
 
 ## Integrity and repair
 

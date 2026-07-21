@@ -12,6 +12,8 @@ import {
   SchemaMismatchError,
   TaprootRepository,
   initializeTaproot,
+  inspectTaprootPersistence,
+  legacyTaprootV1Statements,
   inspectTaprootSchema,
   type Reference,
   type Snak,
@@ -29,7 +31,7 @@ async function environment() {
     d1Databases: { DB: crypto.randomUUID() },
   });
   const db = (await miniflare.getD1Database('DB')) as unknown as D1DatabaseLike;
-  await initializeTaproot(db);
+  await initializeTaproot(db, options);
   return {
     db,
     repository: new TaprootRepository(db, options),
@@ -50,32 +52,15 @@ describe('TaprootRepository on Workerd D1', () => {
       const db = (await miniflare.getD1Database(
         'DB',
       )) as unknown as D1DatabaseLike;
-      await db.batch([
-        db.prepare(
-          `CREATE TABLE taproot_entities (entity_id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, datatype TEXT, revision INTEGER NOT NULL, entity_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, modified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, deleted_at TEXT, redirect_to TEXT) STRICT`,
-        ),
-        db.prepare(
-          `CREATE TABLE taproot_entity_revisions (entity_id TEXT NOT NULL, revision INTEGER NOT NULL, entity_json TEXT NOT NULL, actor TEXT, edit_summary TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (entity_id, revision), FOREIGN KEY (entity_id) REFERENCES taproot_entities(entity_id)) STRICT`,
-        ),
-        db.prepare(
-          `CREATE TABLE taproot_id_counters (entity_type TEXT PRIMARY KEY, next_numeric_id INTEGER NOT NULL) STRICT`,
-        ),
-        db.prepare(
-          `CREATE TABLE taproot_terms (entity_id TEXT NOT NULL, language TEXT NOT NULL, term_type TEXT NOT NULL, value TEXT NOT NULL, ordinal INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (entity_id, language, term_type, ordinal)) STRICT`,
-        ),
-        db.prepare(
-          `CREATE TABLE taproot_metadata (metadata_key TEXT PRIMARY KEY, metadata_value TEXT NOT NULL) STRICT`,
-        ),
-        db.prepare(
-          `CREATE TABLE taproot_assertions (assertion_key TEXT PRIMARY KEY) STRICT`,
-        ),
-        db.prepare(
-          `INSERT INTO taproot_id_counters VALUES ('item', 2), ('property', 1)`,
-        ),
-        db.prepare(
-          `INSERT INTO taproot_metadata VALUES ('schema_version', '1'), ('canonical_json_version', '1'), ('rdf_mapping_version', '1')`,
-        ),
-      ]);
+      await db.batch(
+        legacyTaprootV1Statements.map((statement) => db.prepare(statement)),
+      );
+      await db
+        .prepare(
+          `INSERT INTO taproot_metadata(metadata_key, metadata_value)
+           VALUES ('base_iri', 'HTTPS://Knowledge.Example///')`,
+        )
+        .run();
       const entity = JSON.stringify({
         id: 'Q1',
         type: 'item',
@@ -99,9 +84,14 @@ describe('TaprootRepository on Workerd D1', () => {
         )
         .bind(entity)
         .run();
-      await initializeTaproot(db);
-      const repository = new TaprootRepository(db, options);
+      const legacyOptions = { baseIri: 'HTTPS://Knowledge.Example///' };
+      await initializeTaproot(db, legacyOptions);
+      const repository = new TaprootRepository(db, legacyOptions);
       expect(await inspectTaprootSchema(db)).toMatchObject({ valid: true });
+      await expect(inspectTaprootPersistence(db)).resolves.toMatchObject({
+        baseIri: 'https://knowledge.example',
+        current: true,
+      });
       expect(await repository.verifyAuditChain('Q1')).toMatchObject({
         valid: true,
       });

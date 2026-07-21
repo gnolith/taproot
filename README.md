@@ -1,6 +1,6 @@
 # Taproot
 
-**The D1-native, Wikibase-compatible knowledge layer for Gnolith.**
+**The portable SQLite and D1, Wikibase-compatible knowledge layer for Gnolith.**
 
 Taproot gives a D1-backed consumer one authoritative Wikibase-shaped Item/Property
 document, tamper-evident revision and attribution history, typed and batched
@@ -12,9 +12,9 @@ editing commands, term search, repairable projections, and a deterministic RDF p
 
 ## Status
 
-Version `0.1.0` is the first public release. Taproot supports Node 22 and 24 and
-depends on the registry release of Diamond that exposes transaction-composable
-quad patches.
+Version `0.2.0` supports Node 22 and 24 and depends exactly on Diamond `0.4.0`,
+which exposes transaction-composable RDF patches, a runtime-neutral SQLite
+capability, and a process-local `node:sqlite` adapter.
 
 ## What it owns
 
@@ -42,12 +42,13 @@ there is no relational statement store.
 
 Taproot requires Diamond's transaction-composable quad-patch API. Initialize a
 D1 binding once; the programmatic initializer creates both Diamond and Taproot
-tables idempotently:
+tables idempotently. First initialization requires the database's permanent
+identity:
 
 ```ts
 import { TaprootRepository, initializeTaproot } from '@gnolith/taproot';
 
-await initializeTaproot(env.DB);
+await initializeTaproot(env.DB, { baseIri: 'https://knowledge.example' });
 const knowledge = new TaprootRepository(env.DB, {
   baseIri: 'https://knowledge.example',
 });
@@ -61,11 +62,11 @@ const item = await knowledge.createItem({
 });
 ```
 
-Consumers applying migrations separately should apply Diamond's migrations and
-the numbered Taproot SQL files, then call `initializeTaproot()`. The initializer performs
-the application-level SHA-256 backfill that SQLite SQL alone cannot perform,
-reprojects older RDF mapping versions, installs immutability triggers, and is
-safe to call repeatedly.
+Use Taproot's `planTaprootMigrations`, `applyTaprootMigrations`, and
+`initializeTaproot` APIs for schema changes. The numbered SQL files document
+the historical 0.1 layout and are not an operator migration interface in 0.2.
+The package APIs own checksums, conservative adoption, application-level
+SHA-256 backfills, and RDF reprojection.
 
 ## Editing
 

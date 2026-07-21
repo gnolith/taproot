@@ -1,5 +1,12 @@
 import type { D1DatabaseLike } from '@gnolith/diamond';
-export type { D1DatabaseLike } from '@gnolith/diamond';
+export type {
+  D1DatabaseLike,
+  D1PreparedStatementLike,
+  D1ResultLike,
+  SqliteDatabaseLike,
+  SqlitePreparedStatementLike,
+  SqliteResultLike,
+} from '@gnolith/diamond';
 import {
   TaprootRepository,
   type CreateItemInput,
@@ -25,6 +32,7 @@ import type {
 
 export * from './canonical.js';
 export * from './errors.js';
+export * from './migrations.js';
 export * from './rdf.js';
 export * from './repository.js';
 export * from './schema.js';

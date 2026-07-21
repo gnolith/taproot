@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error('consumer smoke must be run through npm');
@@ -14,8 +15,23 @@ const packOutput = execFileSync(
   [npmCli, 'pack', '--json', '--pack-destination', root],
   { encoding: 'utf8' },
 );
-const [{ filename }] = JSON.parse(packOutput);
+const [{ filename, integrity, shasum }] = JSON.parse(packOutput);
 const archive = join(root, filename);
+const diamondSpec = process.env.DIAMOND_TARBALL
+  ? resolve(process.env.DIAMOND_TARBALL)
+  : '@gnolith/diamond@0.4.0';
+const taprootSha256 = createHash('sha256')
+  .update(readFileSync(archive))
+  .digest('hex');
+if (process.env.DIAMOND_TARBALL) {
+  const diamondSha256 = createHash('sha256')
+    .update(readFileSync(diamondSpec))
+    .digest('hex');
+  console.log(`Diamond packed artifact sha256=${diamondSha256}`);
+}
+console.log(
+  `Taproot packed artifact sha256=${taprootSha256} integrity=${integrity} shasum=${shasum}`,
+);
 
 writeFileSync(
   join(root, 'package.json'),
@@ -32,7 +48,7 @@ execFileSync(
     '--prefix',
     root,
     archive,
-    '@gnolith/diamond@^0.3.2',
+    diamondSpec,
     'miniflare@^4.20260714.0',
   ],
   { stdio: 'inherit' },
@@ -41,6 +57,7 @@ writeFileSync(
   join(root, 'smoke.mjs'),
   `
     import { createSparqlHandler } from '@gnolith/diamond';
+    import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
     import {
       TaprootRepository,
       initializeTaproot,
@@ -57,7 +74,7 @@ writeFileSync(
     });
     try {
       const db = await miniflare.getD1Database('DB');
-      await initializeTaproot(db);
+      await initializeTaproot(db, { baseIri: 'https://knowledge.example' });
       const taproot = new TaprootRepository(db, {
         baseIri: 'https://knowledge.example',
       });
@@ -98,6 +115,22 @@ writeFileSync(
       if (!schema.valid) throw new Error('fresh D1 schema inspection failed');
     } finally {
       await miniflare.dispose();
+    }
+
+    const local = new NodeSqliteDatabase(':memory:');
+    try {
+      await initializeTaproot(local, { baseIri: 'https://local.example' });
+      const taproot = new TaprootRepository(local, {
+        baseIri: 'https://local.example',
+      });
+      await taproot.createItem({
+        id: 'Q1',
+        labels: { en: { language: 'en', value: 'packed local consumer' } },
+      });
+      const schema = await inspectTaprootSchema(local);
+      if (!schema.valid) throw new Error('fresh node:sqlite schema inspection failed');
+    } finally {
+      await local.close();
     }
   `,
 );

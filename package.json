@@ -1,10 +1,11 @@
 {
   "name": "@gnolith/taproot",
-  "version": "0.1.0",
-  "description": "D1-native Wikibase-compatible knowledge graph and revision layer for Gnolith.",
+  "version": "0.2.0",
+  "description": "Portable SQLite and D1 Wikibase-compatible knowledge graph and revision layer for Gnolith.",
   "author": "Gnolith contributors",
   "keywords": [
     "cloudflare-d1",
+    "sqlite",
     "knowledge-graph",
     "rdf",
     "sparql",
@@ -68,7 +69,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@gnolith/diamond": "^0.3.2",
+    "@gnolith/diamond": "0.4.0",
     "@rdfjs/types": "^2.0.1",
     "rdf-data-factory": "^2.0.2"
   },

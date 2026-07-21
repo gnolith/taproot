@@ -1,14 +1,14 @@
 import {
   encodeTerm,
-  initializeStore,
+  migrateDiamondStore,
   prepareQuadPatch,
-  type D1DatabaseLike,
+  type SqliteDatabaseLike,
 } from '@gnolith/diamond';
 import { DataFactory } from 'rdf-data-factory';
 import { parseEntityJson } from './canonical.js';
 import { buildEntityQuads } from './rdf.js';
 import type { EntityId, WikibaseEntity } from './types.js';
-import { SchemaMismatchError } from './errors.js';
+import { BaseIriMismatchError, SchemaMismatchError } from './errors.js';
 
 export const TAPROOT_SCHEMA_VERSION = '2';
 export const TAPROOT_JSON_VERSION = '1';
@@ -129,6 +129,45 @@ export const taprootSchemaStatements = [
     ON CONFLICT(version) DO NOTHING`,
 ] as const;
 
+const schemaStatement = (prefix: string): string => {
+  const statement = taprootSchemaStatements.find((sql) =>
+    sql.trimStart().startsWith(prefix),
+  );
+  if (!statement)
+    throw new Error(`Missing Taproot schema statement: ${prefix}`);
+  return statement;
+};
+
+/** Exact package-created schema used before the v2 audit migration. */
+export const legacyTaprootV1Statements = [
+  schemaStatement('CREATE TABLE IF NOT EXISTS taproot_entities'),
+  `CREATE TABLE IF NOT EXISTS taproot_entity_revisions (
+    entity_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    entity_json TEXT NOT NULL CHECK (json_valid(entity_json)),
+    actor TEXT,
+    edit_summary TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (entity_id, revision),
+    FOREIGN KEY (entity_id) REFERENCES taproot_entities(entity_id)
+  ) STRICT`,
+  schemaStatement('CREATE TABLE IF NOT EXISTS taproot_id_counters'),
+  schemaStatement('CREATE TABLE IF NOT EXISTS taproot_terms'),
+  schemaStatement('CREATE TABLE IF NOT EXISTS taproot_metadata'),
+  schemaStatement('CREATE TABLE IF NOT EXISTS taproot_assertions'),
+  schemaStatement('CREATE INDEX IF NOT EXISTS taproot_entities_type_idx'),
+  schemaStatement('CREATE INDEX IF NOT EXISTS taproot_entities_modified_idx'),
+  schemaStatement('CREATE INDEX IF NOT EXISTS taproot_revisions_entity_idx'),
+  schemaStatement('CREATE INDEX IF NOT EXISTS taproot_terms_lookup_idx'),
+  `INSERT INTO taproot_id_counters(entity_type, next_numeric_id)
+   VALUES ('item', 1), ('property', 1)`,
+  `INSERT INTO taproot_metadata(metadata_key, metadata_value)
+   VALUES
+     ('schema_version', '1'),
+     ('canonical_json_version', '1'),
+     ('rdf_mapping_version', '1')`,
+] as const;
+
 export interface TaprootSchemaInspection {
   valid: boolean;
   versions: Record<string, string>;
@@ -140,10 +179,81 @@ export interface TaprootSchemaInspection {
   errors: string[];
 }
 
-export async function initializeTaproot(db: D1DatabaseLike): Promise<void> {
+export async function initializeTaproot(
+  db: SqliteDatabaseLike,
+  options: { baseIri?: string } = {},
+): Promise<void> {
   const previousRdfVersion =
     (await readMetadata(db, 'rdf_migration_from')) ??
     (await readMetadata(db, 'rdf_mapping_version'));
+  const initialInspection = await inspectTaprootSchema(db);
+  const existingTables = await db
+    .prepare(
+      `SELECT name FROM sqlite_schema
+       WHERE type = 'table' AND name LIKE 'taproot_%' ORDER BY name`,
+    )
+    .all<{ name: string }>();
+  if (existingTables.results.length > 0 && !initialInspection.valid) {
+    const { canonicalizeTaprootBaseIri } = await import('./migrations.js');
+    const storedIdentity = await readMetadata(db, 'base_iri');
+    const requestedIdentity = options.baseIri ?? storedIdentity;
+    if (requestedIdentity === undefined) {
+      throw new SchemaMismatchError(
+        'baseIri is required to adopt a legacy Taproot database',
+      );
+    }
+    const canonicalIdentity = canonicalizeTaprootBaseIri(requestedIdentity);
+    if (
+      storedIdentity !== undefined &&
+      canonicalizeTaprootBaseIri(storedIdentity) !== canonicalIdentity
+    ) {
+      throw new BaseIriMismatchError(
+        `Taproot database identity is ${storedIdentity}, not ${requestedIdentity}`,
+      );
+    }
+    if (!(await isRecognizedLegacyV1(db, existingTables.results))) {
+      throw new SchemaMismatchError(
+        `Existing Taproot schema is not the exact supported version-one layout: ${initialInspection.errors.join('; ')}`,
+      );
+    }
+    await migrateDiamondStore(db);
+    await upgradeLegacySchema(db);
+    await db.batch(taprootSchemaStatements.map((sql) => db.prepare(sql)));
+    const { checksumMigration } = await import('@gnolith/diamond');
+    const { taprootMigrationNamespace, taprootMigrations } =
+      await import('./migrations.js');
+    const checksum = await checksumMigration(taprootMigrations[0]);
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO taproot_metadata(metadata_key, metadata_value)
+           VALUES ('base_iri', ?)
+           ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
+        )
+        .bind(canonicalIdentity),
+      db
+        .prepare(
+          `INSERT INTO taproot_assertions(assertion_key)
+           SELECT NULL WHERE NOT EXISTS (
+             SELECT 1 FROM taproot_metadata
+             WHERE metadata_key = 'base_iri' AND metadata_value = ?
+           )`,
+        )
+        .bind(canonicalIdentity),
+      db
+        .prepare(
+          `INSERT INTO _gnolith_migrations
+           (namespace, migration_id, checksum, adopted, applied_at)
+           VALUES (?, ?, ?, 1, ?)`,
+        )
+        .bind(
+          taprootMigrationNamespace,
+          taprootMigrations[0].id,
+          checksum,
+          new Date().toISOString(),
+        ),
+    ]);
+  }
   if (previousRdfVersion && previousRdfVersion !== TAPROOT_RDF_VERSION) {
     await db
       .prepare(
@@ -153,7 +263,8 @@ export async function initializeTaproot(db: D1DatabaseLike): Promise<void> {
       .bind(previousRdfVersion)
       .run();
   }
-  await initializeStore(db);
+  const { applyTaprootMigrations } = await import('./migrations.js');
+  await applyTaprootMigrations(db, options);
   await upgradeLegacySchema(db);
   await db.batch(taprootSchemaStatements.map((sql) => db.prepare(sql)));
   await db
@@ -177,8 +288,43 @@ export async function initializeTaproot(db: D1DatabaseLike): Promise<void> {
     .run();
 }
 
+async function isRecognizedLegacyV1(
+  db: SqliteDatabaseLike,
+  tables: Array<{ name: string }>,
+): Promise<boolean> {
+  const expectedTables = [
+    'taproot_assertions',
+    'taproot_entities',
+    'taproot_entity_revisions',
+    'taproot_id_counters',
+    'taproot_metadata',
+    'taproot_terms',
+  ];
+  if (
+    JSON.stringify(tables.map(({ name }) => name)) !==
+    JSON.stringify(expectedTables)
+  )
+    return false;
+  if (!(await matchesExactCatalog(db, legacyTaprootV1Statements))) return false;
+  const metadata = await db
+    .prepare(
+      `SELECT metadata_key, metadata_value FROM taproot_metadata
+       WHERE metadata_key IN ('schema_version', 'canonical_json_version', 'rdf_mapping_version')
+       ORDER BY metadata_key`,
+    )
+    .all<{ metadata_key: string; metadata_value: string }>();
+  return (
+    JSON.stringify(metadata.results) ===
+    JSON.stringify([
+      { metadata_key: 'canonical_json_version', metadata_value: '1' },
+      { metadata_key: 'rdf_mapping_version', metadata_value: '1' },
+      { metadata_key: 'schema_version', metadata_value: '1' },
+    ])
+  );
+}
+
 async function readMetadata(
-  db: D1DatabaseLike,
+  db: SqliteDatabaseLike,
   key: string,
 ): Promise<string | undefined> {
   const table = await db
@@ -197,7 +343,7 @@ async function readMetadata(
 }
 
 async function backfillRdfOwnership(
-  db: D1DatabaseLike,
+  db: SqliteDatabaseLike,
   previousVersion: string | undefined,
 ): Promise<void> {
   const rows = await db
@@ -313,7 +459,7 @@ function lifecycleQuads(
   return quads;
 }
 
-async function upgradeLegacySchema(db: D1DatabaseLike): Promise<void> {
+async function upgradeLegacySchema(db: SqliteDatabaseLike): Promise<void> {
   const tables = await db
     .prepare(
       `SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'taproot_entity_revisions'`,
@@ -412,7 +558,7 @@ async function hash(value: string): Promise<string> {
 }
 
 export async function inspectTaprootSchema(
-  db: D1DatabaseLike,
+  db: SqliteDatabaseLike,
 ): Promise<TaprootSchemaInspection> {
   const required = [
     'taproot_entities',
@@ -534,7 +680,65 @@ export async function inspectTaprootSchema(
   };
 }
 
-export async function assertTaprootSchema(db: D1DatabaseLike): Promise<void> {
+/**
+ * Verify the exact package-owned catalog before adopting a current pre-ledger
+ * database. This is intentionally stricter than the operational inspection:
+ * names alone must never authorize stamping an arbitrary look-alike schema.
+ */
+export async function isExactTaprootSchema(
+  db: SqliteDatabaseLike,
+): Promise<boolean> {
+  return matchesExactCatalog(db, taprootSchemaStatements);
+}
+
+async function matchesExactCatalog(
+  db: SqliteDatabaseLike,
+  statements: readonly string[],
+): Promise<boolean> {
+  const expected = new Map<string, string>();
+  for (const sql of statements) {
+    const match =
+      /^\s*CREATE\s+(TABLE|INDEX|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z0-9_]+)/iu.exec(
+        sql,
+      );
+    if (!match?.[1] || !match[2]) continue;
+    expected.set(
+      `${match[1].toLowerCase()}:${match[2]}`,
+      normalizeCatalogSql(sql),
+    );
+  }
+  const catalog = await db
+    .prepare(
+      `SELECT type, name, sql FROM sqlite_schema
+       WHERE name LIKE 'taproot_%' AND type IN ('table', 'index', 'trigger')
+       ORDER BY type, name`,
+    )
+    .all<{ type: string; name: string; sql: string | null }>();
+  if (catalog.results.length !== expected.size) return false;
+  for (const entry of catalog.results) {
+    const expectedSql = expected.get(`${entry.type}:${entry.name}`);
+    if (
+      expectedSql === undefined ||
+      entry.sql === null ||
+      normalizeCatalogSql(entry.sql) !== expectedSql
+    )
+      return false;
+  }
+  return true;
+}
+
+function normalizeCatalogSql(sql: string): string {
+  return sql
+    .replace(/\bIF\s+NOT\s+EXISTS\s+/giu, '')
+    .replace(/\s+/gu, ' ')
+    .replace(/;\s*$/u, '')
+    .trim()
+    .toLowerCase();
+}
+
+export async function assertTaprootSchema(
+  db: SqliteDatabaseLike,
+): Promise<void> {
   const inspection = await inspectTaprootSchema(db);
   if (!inspection.valid) {
     throw new SchemaMismatchError(inspection.errors.join('; '));

@@ -1,5 +1,19 @@
 # API guide
 
+## Persistence and migrations
+
+Taproot accepts Diamond's runtime-neutral `SqliteDatabaseLike`; the exported
+`D1DatabaseLike` remains a structurally compatible name for existing Site
+consumers. `initializeTaproot(db, { baseIri })` initializes Diamond first, then
+Taproot, and records the canonical absolute HTTP(S) base IRI on first use.
+Later initialization may omit it; supplying a different identity fails closed.
+
+`planTaprootMigrations(db)` and `inspectTaprootPersistence(db)` are read-only.
+`applyTaprootMigrations(db, { baseIri })` applies the package-owned checksummed
+manifest in the `@gnolith/taproot` ledger namespace. Known version-one layouts
+are inspected before adoption. Unknown, partial, out-of-order, or
+checksum-drifted histories raise typed migration/schema errors.
+
 `TaprootRepository` is the primary API; equivalent top-level functions are
 exported for request-scoped use.
 

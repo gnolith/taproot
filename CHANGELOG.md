@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+- Added a runtime-neutral SQLite persistence surface while retaining D1
+  compatibility types and injection.
+- Added checksummed Taproot migration plan, inspect, conservative adoption,
+  and apply APIs.
+- Made the canonical HTTP(S) base IRI a durable, immutable database identity.
+- Added Workerd D1 and process-local Node SQLite parity coverage for reopen,
+  rollback, and concurrent writers.
+
 ## 0.1.0
 
 - Complete Wikibase Item/Property JSON model and validated editing API.

@@ -9,7 +9,7 @@ import {
 import { createSparqlHandler } from '@gnolith/diamond';
 
 export async function runTaprootInteropDemo(db: D1DatabaseLike) {
-  await initializeTaproot(db);
+  await initializeTaproot(db, { baseIri: 'https://knowledge.example' });
   const taproot = new TaprootRepository(db, {
     baseIri: 'https://knowledge.example',
   });

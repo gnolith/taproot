@@ -26,3 +26,6 @@ export class SchemaMismatchError extends TaprootError {}
 export class InvalidCursorError extends TaprootError {}
 export class IntegrityError extends TaprootError {}
 export class BulkLimitError extends TaprootError {}
+export class InvalidBaseIriError extends TaprootError {}
+export class BaseIriMismatchError extends TaprootError {}
+export class TaprootMigrationStateError extends SchemaMismatchError {}
