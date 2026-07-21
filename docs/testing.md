@@ -35,10 +35,10 @@ Miniflare is a development-only dependency used to qualify Taproot against its
 supported Workerd D1 runtime. Taproot applies an exact root override of
 `sharp@0.35.3` because Miniflare currently declares `sharp@0.34.5`, which is
 affected by GHSA-f88m-g3jw-g9cj. This is a temporary upstream-compatibility
-exception tracked in Cloudflare workers-sdk issue #14493. Remove the override
-once a Miniflare release in Taproot's supported range declares a non-vulnerable
-Sharp version and the full D1, interop, packed-consumer, Node 22/24, and audit
-gates pass without it.
+exception tracked in [Cloudflare workers-sdk PR #14493](https://github.com/cloudflare/workers-sdk/pull/14493).
+Remove the override once a Miniflare release in Taproot's supported range
+declares a non-vulnerable Sharp version and the full D1, interop,
+packed-consumer, Node 22/24, and audit gates pass without it.
 
 The override is qualified for Taproot's Miniflare D1 test use. It is not a claim
 of general Cloudflare Images compatibility, nor a compatibility claim for
