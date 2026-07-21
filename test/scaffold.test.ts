@@ -20,10 +20,10 @@ describe('package release guard', () => {
     expect(manifest).toMatchObject({
       name: '@gnolith/taproot',
       private: false,
-      version: '0.1.0',
+      version: '0.2.0',
       publishConfig: { access: 'public', provenance: true },
     });
-    expect(manifest.dependencies['@gnolith/diamond']).toBe('^0.3.2');
+    expect(manifest.dependencies['@gnolith/diamond']).toBe('0.4.0');
     expect(Object.values(manifest.dependencies)).not.toContainEqual(
       expect.stringMatching(/^(?:file:|link:)/),
     );

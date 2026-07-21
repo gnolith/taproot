@@ -3,8 +3,8 @@ import {
   encodeTerm,
   decodeTerm,
   prepareQuadPatch,
-  type D1DatabaseLike,
-  type D1PreparedStatementLike,
+  type SqliteDatabaseLike,
+  type SqlitePreparedStatementLike,
 } from '@gnolith/diamond';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
@@ -32,6 +32,7 @@ import {
 } from './errors.js';
 import { buildEntityQuads } from './rdf.js';
 import { withoutTrailingSlashes } from './iri.js';
+import { canonicalizeTaprootBaseIri } from './migrations.js';
 import { TAPROOT_RDF_VERSION } from './schema.js';
 import type {
   AliasMap,
@@ -169,7 +170,7 @@ export interface BulkImportOptions {
 }
 
 export class TaprootRepository {
-  readonly #db: D1DatabaseLike;
+  readonly #db: SqliteDatabaseLike;
   readonly #options: Required<
     Pick<
       TaprootOptions,
@@ -185,7 +186,7 @@ export class TaprootRepository {
   > &
     Pick<TaprootOptions, 'factory' | 'observe'>;
 
-  constructor(db: D1DatabaseLike, options: TaprootOptions) {
+  constructor(db: SqliteDatabaseLike, options: TaprootOptions) {
     if (
       options.mappingVersion !== undefined &&
       options.mappingVersion !== TAPROOT_RDF_VERSION
@@ -194,18 +195,10 @@ export class TaprootRepository {
         `RDF mapping version ${options.mappingVersion} is not supported`,
       );
     }
-    try {
-      const base = new URL(options.baseIri);
-      if (base.protocol !== 'http:' && base.protocol !== 'https:')
-        throw new TypeError();
-    } catch (cause) {
-      throw new InvalidEntityError('baseIri must be an absolute HTTP(S) IRI', {
-        cause,
-      });
-    }
+    const baseIri = canonicalizeTaprootBaseIri(options.baseIri);
     this.#db = db;
     this.#options = {
-      baseIri: options.baseIri,
+      baseIri,
       mappingVersion: options.mappingVersion ?? TAPROOT_RDF_VERSION,
       maxEntityBytes: options.maxEntityBytes ?? MAX_ENTITY_BYTES,
       maxBulkEntities: options.maxBulkEntities ?? 100,
@@ -1253,7 +1246,7 @@ export class TaprootRepository {
         redirectTo: stored.redirectTo,
       },
     );
-    const statements: D1PreparedStatementLike[] = [
+    const statements: SqlitePreparedStatementLike[] = [
       this.#db
         .prepare(`DELETE FROM taproot_terms WHERE entity_id = ?`)
         .bind(id),
@@ -1327,7 +1320,8 @@ export class TaprootRepository {
     const newQuads = this.#lifecycleQuads(entity, lifecycle);
     const marker = revisionQuad(entity, this.#options);
     const patch = this.#preparePatch({ forbid: [marker], insert: newQuads });
-    const statements: D1PreparedStatementLike[] = this.#namespaceStatements();
+    const statements: SqlitePreparedStatementLike[] =
+      this.#namespaceStatements();
     if (allocated) {
       const type = entity.type;
       const numeric = entityNumericId(entity.id);
@@ -1491,7 +1485,7 @@ export class TaprootRepository {
       require: [revisionQuad(stored.entity, this.#options)],
       insert: newQuads,
     });
-    const statements: D1PreparedStatementLike[] = [
+    const statements: SqlitePreparedStatementLike[] = [
       ...this.#namespaceStatements(),
       this.#db
         .prepare(
@@ -1592,7 +1586,7 @@ export class TaprootRepository {
   ) {
     const oldRows = oldQuads.map(ownershipRow);
     const newRows = newQuads.map(ownershipRow);
-    const statements: D1PreparedStatementLike[] = [
+    const statements: SqlitePreparedStatementLike[] = [
       this.#db
         .prepare(`DELETE FROM taproot_rdf_ownership WHERE entity_id = ?`)
         .bind(entityId),
@@ -1632,7 +1626,7 @@ export class TaprootRepository {
     return {
       statements,
       deleted: (
-        results: Awaited<ReturnType<D1DatabaseLike['batch']>>,
+        results: Awaited<ReturnType<SqliteDatabaseLike['batch']>>,
         offset: number,
       ) =>
         deleteIndex < 0
@@ -1749,7 +1743,7 @@ export class TaprootRepository {
     json: string,
     metadata: EditMetadata,
     context: WriteContext,
-  ): D1PreparedStatementLike {
+  ): SqlitePreparedStatementLike {
     return this.#db
       .prepare(
         `INSERT INTO taproot_entity_revisions(
@@ -1778,7 +1772,7 @@ export class TaprootRepository {
     entity: WikibaseEntity,
     metadata: EditMetadata,
     context: WriteContext,
-  ): D1PreparedStatementLike {
+  ): SqlitePreparedStatementLike {
     return this.#db
       .prepare(
         `INSERT INTO taproot_audit_events(
@@ -1884,7 +1878,7 @@ export class TaprootRepository {
     }
   }
 
-  #termsInsert(entity: WikibaseEntity): D1PreparedStatementLike {
+  #termsInsert(entity: WikibaseEntity): SqlitePreparedStatementLike {
     const rows = terms(entity);
     return this.#db
       .prepare(
@@ -1895,7 +1889,10 @@ export class TaprootRepository {
       .bind(JSON.stringify(rows));
   }
 
-  #assertion(condition: string, ...values: unknown[]): D1PreparedStatementLike {
+  #assertion(
+    condition: string,
+    ...values: unknown[]
+  ): SqlitePreparedStatementLike {
     return this.#db
       .prepare(
         `INSERT INTO taproot_assertions(assertion_key) SELECT NULL WHERE NOT (${condition})`,
@@ -1903,14 +1900,8 @@ export class TaprootRepository {
       .bind(...values);
   }
 
-  #namespaceStatements(): D1PreparedStatementLike[] {
+  #namespaceStatements(): SqlitePreparedStatementLike[] {
     return [
-      this.#db
-        .prepare(
-          `INSERT INTO taproot_metadata(metadata_key, metadata_value)
-           VALUES ('base_iri', ?) ON CONFLICT(metadata_key) DO NOTHING`,
-        )
-        .bind(withoutTrailingSlashes(this.#options.baseIri)),
       this.#assertion(
         `EXISTS (SELECT 1 FROM taproot_metadata
           WHERE metadata_key = 'base_iri' AND metadata_value = ?)`,

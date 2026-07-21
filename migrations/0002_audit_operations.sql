@@ -1,6 +1,7 @@
--- Structural half of the v1 -> v2 migration. initializeTaproot() must run
--- immediately afterward to SHA-256 backfill legacy revisions, create their
--- audit events, install immutability triggers, and verify version metadata.
+-- Historical 0.1 structural migration retained as package documentation.
+-- Taproot 0.2 hosts must use the exported migration/initializer APIs rather
+-- than applying this file directly; checksummed adoption and JavaScript
+-- backfills cannot be represented by this SQL file alone.
 ALTER TABLE taproot_entity_revisions ADD COLUMN attribution_json TEXT CHECK (attribution_json IS NULL OR json_valid(attribution_json));
 ALTER TABLE taproot_entity_revisions ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags_json));
 ALTER TABLE taproot_entity_revisions ADD COLUMN event_id TEXT;

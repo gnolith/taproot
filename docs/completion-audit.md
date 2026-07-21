@@ -26,7 +26,8 @@ npm ci
 npm run check
 ```
 
-Diamond `0.3.2` or later supplies the registry-published composable patch API.
+Diamond `0.4.0` supplies the composable patch API, neutral SQLite capability,
+and package-owned migration primitives.
 The packed-consumer gate installs Taproot and Diamond without repository
 siblings or local paths and exercises a fresh Workerd D1 database.
 

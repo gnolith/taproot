@@ -13,6 +13,10 @@ ownership, and Diamond quads roll back as one D1 batch.
 
 `test/interop.test.ts` runs the documented local D1 and Diamond interoperability
 example and queries its Taproot-generated graph through Diamond SPARQL.
+
+`test/persistence.test.ts` exercises Diamond's Node SQLite adapter in memory
+and on disk, including read-only planning, immutable identity, close/reopen,
+same-adapter enforcement, late-batch rollback, and concurrent writers.
 `consumer:check` packs the
 package, installs the tarball into a fresh temporary project with registry
 Diamond and Miniflare dependencies, initializes a new D1 database, writes an

@@ -520,7 +520,7 @@ function addFullValue(
 
 function namespaces(baseIri: string): Namespaces {
   const base = withoutTrailingSlashes(baseIri);
-  if (!/^https?:\/\//u.test(base))
+  if (!/^https?:\/\//iu.test(base))
     throw new TypeError('baseIri must be an absolute HTTP(S) IRI');
   return {
     entity: `${base}/entity/`,
