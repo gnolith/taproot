@@ -1,0 +1,33 @@
+{
+  "artifactVersion": 1,
+  "recordedAt": "2026-07-22T12:38:24.573Z",
+  "runtime": {
+    "node": "v24.14.0",
+    "sqliteAdapter": "@gnolith/diamond/node-sqlite"
+  },
+  "workload": {
+    "roots": 100000,
+    "documents": 100000,
+    "chunks": 1000000,
+    "claimJobs": {
+      "pending": 25000,
+      "leased": 25000,
+      "staged": 25000
+    }
+  },
+  "result": {
+    "roots": 100000,
+    "documents": 100000,
+    "chunks": 1000000,
+    "elapsedMs": 12887.452,
+    "databaseBytes": 677060608,
+    "queryPlans": {
+      "visible": "SEARCH h USING INDEX taproot_search_heads_eligibility_idx (corpus_id=? AND eligible=? AND root_kind=? AND root_id=?) | SEARCH d USING COVERING INDEX sqlite_autoindex_taproot_search_staged_documents_2 (stage_id=?)",
+      "antiJoin": "SEARCH r USING INDEX taproot_search_source_registry_lookup_idx (installation_id=?) | SEARCH h USING INDEX sqlite_autoindex_taproot_search_materialization_heads_1 (corpus_id=? AND root_kind=? AND root_id=?) LEFT-JOIN",
+      "claimPending": "SEARCH taproot_search_projection_jobs USING INDEX taproot_search_jobs_claim_pending_idx (installation_id=? AND state=? AND not_before<?)",
+      "claimExpiredLeased": "SEARCH taproot_search_projection_jobs USING INDEX taproot_search_jobs_claim_lease_idx (installation_id=? AND state=? AND lease_expires_at<?)",
+      "claimExpiredStaged": "SEARCH taproot_search_projection_jobs USING INDEX taproot_search_jobs_claim_lease_idx (installation_id=? AND state=? AND lease_expires_at<?)"
+    }
+  },
+  "sla": null
+}

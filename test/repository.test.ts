@@ -20,6 +20,7 @@ import {
   inspectTaprootSchema,
   taprootAuthorizationSchemaStatements,
   taprootSearchSourceEventSchemaStatements,
+  taprootSearchMaterializationSchemaStatements,
   type Reference,
   type Snak,
   type Statement,
@@ -49,6 +50,7 @@ async function dropAuthorizationSchema(db: D1DatabaseLike): Promise<void> {
   const objects = [
     ...taprootAuthorizationSchemaStatements,
     ...taprootSearchSourceEventSchemaStatements,
+    ...taprootSearchMaterializationSchemaStatements,
   ]
     .map((sql) =>
       /^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS ([a-z0-9_]+)/iu.exec(sql),
@@ -76,7 +78,8 @@ describe('TaprootRepository on Workerd D1', () => {
                AND migration_id IN (
                  '0003-canonical-statement-text',
                  '0004-canonical-authorization-policy',
-                 '0005-unified-search-source-events'
+                 '0005-unified-search-source-events',
+                 '0006-unified-search-materialization-lifecycle'
                )`,
           ),
           env.db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),
@@ -153,8 +156,9 @@ describe('TaprootRepository on Workerd D1', () => {
            WHERE namespace = '@gnolith/taproot'
              AND migration_id IN (
                '0003-canonical-statement-text',
-               '0004-canonical-authorization-policy',
-               '0005-unified-search-source-events'
+                 '0004-canonical-authorization-policy',
+                 '0005-unified-search-source-events',
+                 '0006-unified-search-materialization-lifecycle'
              )`,
         ),
         env.db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),

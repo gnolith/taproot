@@ -195,11 +195,17 @@ export interface DerivedSearchDocumentV1 {
   version: 1;
   projectionVersion: 'taproot-unified-search-projection-v1';
   id: string;
+  /** Stable within one installation/root/canonical reference across revisions. */
+  documentSlot: string;
   hash: string;
   kind: 'statement' | 'item';
   source: SearchProjectionSourceEventV1;
+  /** Event-producing aggregate root used for replace-all and deletion. */
+  rootReference: UnifiedSearchReferenceV1;
+  /** Canonical record to hydrate after candidate authorization. */
+  canonicalReference: UnifiedSearchReferenceV1;
   authorization: SearchAuthorizationEnvelopeValueV1;
-  partition: number;
+  filterMetadata: UnifiedSearchFiltersV1;
   text: string;
   segments: readonly SearchProjectionSegmentV1[];
 }
@@ -234,7 +240,10 @@ export interface SearchProjectionPlanV1 {
   source: SearchProjectionSourceEventV1;
   documents: readonly DerivedSearchDocumentV1[];
   chunks: readonly DerivedSearchChunkV1[];
-  removeDocumentIds: readonly string[];
+  /** The plan is the complete current document-slot set for this root. */
+  replaceAll: true;
+  /** Explicit slots removed by a delete plan; upserts derive removals by anti-join. */
+  removeDocumentSlots: readonly string[];
 }
 
 export type DerivedSearchDocument = DerivedSearchDocumentV1;
@@ -665,9 +674,31 @@ export async function projectStatementForUnifiedSearchV1(
     null,
     input.statement.text,
   );
-  const document = await buildDocument('statement', source, authorization, 0, [
-    projectionSegment,
-  ]);
+  const rootReference = {
+    kind: 'item' as const,
+    itemId,
+  };
+  const canonicalReference = {
+    kind: 'statement' as const,
+    itemId,
+    statementId: input.statement.id,
+  };
+  const document = await buildDocument(
+    'statement',
+    source,
+    authorization,
+    `statement:${input.statement.id}`,
+    rootReference,
+    canonicalReference,
+    {
+      languages: [],
+      sourceRevisions: [source.sourceRevision],
+      byKind: {
+        statement: { predicateIds: [input.statement.mainsnak.property] },
+      },
+    },
+    [projectionSegment],
+  );
   const chunks = await chunkDocument(
     document,
     normalizeChunkBytes(input.maxChunkBytes),
@@ -710,18 +741,29 @@ export async function projectItemForUnifiedSearchV1(
   if (JSON.stringify(expectedIds) !== JSON.stringify(providedIds))
     invalid('statementAuthorizations must exactly cover current statements');
 
-  const groups = new Map<
-    string,
-    {
-      authorization: SearchAuthorizationEnvelopeValueV1;
-      segments: SearchProjectionSegmentV1[];
-    }
-  >();
-  groups.set(itemAuthorization.fingerprint, {
-    authorization: itemAuthorization,
-    segments: itemMetadataSegments(input.item),
-  });
-
+  const documents: DerivedSearchDocumentV1[] = [];
+  const chunks: DerivedSearchChunkV1[] = [];
+  const maxChunkBytes = normalizeChunkBytes(input.maxChunkBytes);
+  const rootReference = { kind: 'item' as const, itemId: input.item.id };
+  const metadataSegments = itemMetadataSegments(input.item);
+  if (metadataSegments.length > 0) {
+    const document = await buildDocument(
+      'item',
+      source,
+      itemAuthorization,
+      'item',
+      rootReference,
+      rootReference,
+      {
+        languages: documentLanguages(metadataSegments),
+        sourceRevisions: [source.sourceRevision],
+        byKind: { item: { typeIds: itemTypeIds(input.item) } },
+      },
+      metadataSegments,
+    );
+    documents.push(document);
+    chunks.push(...(await chunkDocument(document, maxChunkBytes)));
+  }
   for (const statement of statements) {
     const statementAuthorization = authorizationFor(
       input.statementAuthorizations[statement.id],
@@ -740,37 +782,32 @@ export async function projectItemForUnifiedSearchV1(
       throw new MixedSearchProjectionScopeError(
         `Item ${input.item.id} contains mixed authorization scopes`,
       );
-    const group = groups.get(effective.fingerprint) ?? {
-      authorization: effective,
-      segments: [],
+    const canonicalReference = {
+      kind: 'statement' as const,
+      itemId: input.item.id,
+      statementId: statement.id,
     };
-    group.segments.push(
-      segment('statement', statement.id, null, statement.text),
-    );
-    groups.set(effective.fingerprint, group);
-  }
-
-  const orderedGroups = [...groups.values()]
-    .filter(({ segments }) => segments.length > 0)
-    .sort((left, right) =>
-      compare(left.authorization.fingerprint, right.authorization.fingerprint),
-    );
-  if (orderedGroups.length === 0)
-    invalid(`Item ${input.item.id} has no projectable text`);
-  const documents: DerivedSearchDocumentV1[] = [];
-  const chunks: DerivedSearchChunkV1[] = [];
-  const maxChunkBytes = normalizeChunkBytes(input.maxChunkBytes);
-  for (const [partition, group] of orderedGroups.entries()) {
     const document = await buildDocument(
-      'item',
+      'statement',
       source,
-      group.authorization,
-      partition,
-      group.segments,
+      effective,
+      `statement:${statement.id}`,
+      rootReference,
+      canonicalReference,
+      {
+        languages: [],
+        sourceRevisions: [source.sourceRevision],
+        byKind: {
+          statement: { predicateIds: [statement.mainsnak.property] },
+        },
+      },
+      [segment('statement', statement.id, null, statement.text)],
     );
     documents.push(document);
     chunks.push(...(await chunkDocument(document, maxChunkBytes)));
   }
+  if (documents.length === 0)
+    invalid(`Item ${input.item.id} has no projectable text`);
   return buildPlan(source, documents, chunks);
 }
 
@@ -1044,7 +1081,10 @@ async function buildDocument(
   kind: 'statement' | 'item',
   source: SearchProjectionSourceEventV1,
   authorization: SearchAuthorizationEnvelopeValueV1,
-  partition: number,
+  documentSlot: string,
+  rootReference: UnifiedSearchReferenceV1,
+  canonicalReference: UnifiedSearchReferenceV1,
+  filterMetadata: UnifiedSearchFiltersV1,
   rawSegments: readonly SearchProjectionSegmentV1[],
 ): Promise<DerivedSearchDocumentV1> {
   const segments: SearchProjectionSegmentV1[] = [];
@@ -1057,26 +1097,23 @@ async function buildDocument(
   }
   const identity = {
     projectionVersion: 'taproot-unified-search-projection-v1',
-    kind,
-    source: {
-      kind: source.kind,
-      sourceId: source.sourceId,
-      sourceRevision: source.sourceRevision,
-      sourceHash: source.sourceHash,
-      installationId: source.installationId,
-    },
-    authorizationFingerprint: authorization.fingerprint,
-    partition,
+    installationId: source.installationId,
+    documentSlot,
+    rootReference,
+    canonicalReference,
   };
   const id = await deriveSearchContractIdV1('document', identity);
   const payload = {
     version: 1 as const,
     projectionVersion: 'taproot-unified-search-projection-v1' as const,
     id,
+    documentSlot,
     kind,
     source,
+    rootReference,
+    canonicalReference,
     authorization,
-    partition,
+    filterMetadata,
     text,
     segments,
   };
@@ -1159,12 +1196,14 @@ async function buildPlan(
   documents: readonly DerivedSearchDocumentV1[],
   chunks: readonly DerivedSearchChunkV1[],
 ): Promise<SearchProjectionPlanV1> {
-  const removeDocumentIds: string[] = [];
+  const replaceAll = true as const;
+  const removeDocumentSlots: string[] = [];
   const id = await deriveSearchContractIdV1('plan', {
     source,
     documentIds: documents.map(({ id: documentId }) => documentId),
     chunkIds: chunks.map(({ id: chunkId }) => chunkId),
-    removeDocumentIds,
+    replaceAll,
+    removeDocumentSlots,
   });
   const payload = {
     version: 1 as const,
@@ -1172,9 +1211,20 @@ async function buildPlan(
     source,
     documents,
     chunks,
-    removeDocumentIds,
+    replaceAll,
+    removeDocumentSlots,
   };
   return { ...payload, hash: await canonicalSearchHashV1(payload) };
+}
+
+function documentLanguages(
+  segments: readonly SearchProjectionSegmentV1[],
+): string[] {
+  return [
+    ...new Set(
+      segments.flatMap(({ language }) => (language ? [language] : [])),
+    ),
+  ].sort(compare);
 }
 
 function canonicalJson(value: unknown): string {

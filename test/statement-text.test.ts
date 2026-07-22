@@ -11,6 +11,7 @@ import {
   legacyTaprootV1Statements,
   taprootAuthorizationSchemaStatements,
   taprootSearchSourceEventSchemaStatements,
+  taprootSearchMaterializationSchemaStatements,
   type EntityCommand,
   type SqliteDatabaseLike,
   type SqlitePreparedStatementLike,
@@ -418,7 +419,8 @@ async function downgradeStatementTextMigration(
          AND migration_id IN (
            '0003-canonical-statement-text',
            '0004-canonical-authorization-policy',
-           '0005-unified-search-source-events'
+           '0005-unified-search-source-events',
+           '0006-unified-search-materialization-lifecycle'
          )`,
     ),
     db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),
@@ -433,6 +435,7 @@ async function dropAuthorizationSchema(db: SqliteDatabaseLike): Promise<void> {
   const objects = [
     ...taprootAuthorizationSchemaStatements,
     ...taprootSearchSourceEventSchemaStatements,
+    ...taprootSearchMaterializationSchemaStatements,
   ]
     .map((sql) =>
       /^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS ([a-z0-9_]+)/iu.exec(sql),

@@ -2,11 +2,20 @@
 
 ## Unreleased
 
+- Added DDL-only migration 0006 and an opaque `search:admin`-guarded,
+  runtime-neutral materialization lifecycle with bounded durable jobs,
+  128-bit lease tokens and ABA fencing, invisible staged manifests, atomic
+  replace-all heads/tombstones, immediate stale-head invalidation, deterministic
+  retry/dead handling, redacted health, and resumable shadow rebuild activation.
+- Added complete persisted Item-root projection into stable Item and Statement
+  document slots with canonical references, CNF visibility/filter rows, traced
+  chunks, removal semantics, and identical native SQLite/Workerd D1 lifecycle
+  tests. Five non-Taproot producers remain explicitly blocked, and no public
+  query/ranking/snippet/cursor surface or complete-Site assembly is added.
 - Added DDL-only migration 0005 with an immutable, metadata-only unified-search
   source-event log and current registry, plus opaque domain-bound atomic event
-  guards and one root event per Taproot Item mutation. This does not add jobs,
-  leasing, materialization, rebuild, health, query execution, semantic search,
-  Seedbed assembly, or Site deployment; the authorization outbox is unchanged.
+  guards and one root event per Taproot Item mutation. The authorization outbox
+  is unchanged.
 - Added persisted Node SQLite and real Workerd D1 migration/concurrency/
   rollback/security coverage and a reproducible capped 100k ingest artifact.
 

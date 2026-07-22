@@ -363,6 +363,96 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
         authority.searchGeneration,
         payloadHash,
       ),
+    db
+      .prepare(
+        `UPDATE taproot_search_materialization_heads
+         SET eligible = 0, updated_at = ?
+         WHERE root_kind = ? AND root_id = ?
+           AND source_event_sequence < (
+             SELECT sequence FROM taproot_unified_search_source_events
+             WHERE event_id = ?
+           )
+           AND corpus_id IN (
+             SELECT active_corpus_id FROM taproot_search_installation_state
+             WHERE installation_id = ?
+             UNION
+             SELECT shadow_corpus_id FROM taproot_search_installation_state
+             WHERE installation_id = ? AND shadow_corpus_id IS NOT NULL
+           )`,
+      )
+      .bind(
+        authority.createdAt,
+        authority.sourceKind,
+        event.sourceId,
+        event.eventId,
+        authority.installationId,
+        authority.installationId,
+      ),
+    db
+      .prepare(
+        `UPDATE taproot_search_corpora
+         SET state = 'building', ready_at = NULL
+         WHERE corpus_id IN (
+           SELECT shadow_corpus_id FROM taproot_search_installation_state
+           WHERE installation_id = ? AND shadow_corpus_id IS NOT NULL
+         ) AND role = 'shadow' AND state = 'ready'`,
+      )
+      .bind(authority.installationId),
+    db
+      .prepare(
+        `INSERT INTO taproot_search_projection_jobs(
+           job_id, corpus_id, installation_id, source_event_id,
+           source_event_sequence, source_kind, source_id, operation,
+           root_revision, root_hash, authorization_revision,
+           search_generation, state, not_before, created_at, updated_at
+         )
+         SELECT c.corpus_id || ':' || e.event_id, c.corpus_id,
+           e.installation_id, e.event_id, e.sequence, e.source_kind,
+           e.source_id, e.operation, e.source_revision, e.source_hash,
+           e.authorization_revision, e.search_generation, 'pending',
+           e.created_at, e.created_at, e.created_at
+         FROM taproot_unified_search_source_events e
+         JOIN taproot_search_installation_state s
+           ON s.installation_id = e.installation_id
+         JOIN taproot_search_corpora c
+           ON c.corpus_id = s.active_corpus_id
+             OR c.corpus_id = s.shadow_corpus_id
+         WHERE e.event_id = ?
+         ON CONFLICT(corpus_id, source_event_id) DO NOTHING`,
+      )
+      .bind(event.eventId),
+    db
+      .prepare(
+        `INSERT INTO taproot_search_job_transitions(
+           transition_id, job_id, from_state, to_state, attempt, created_at
+         )
+         SELECT job_id || ':pending', job_id, NULL, 'pending', 0, created_at
+         FROM taproot_search_projection_jobs
+         WHERE source_event_id = ? AND installation_id = ?
+         ON CONFLICT(transition_id) DO NOTHING`,
+      )
+      .bind(event.eventId, authority.installationId),
+    db
+      .prepare(
+        `UPDATE taproot_search_kind_checkpoints
+         SET enqueued_sequence = MAX(enqueued_sequence, (
+           SELECT sequence FROM taproot_unified_search_source_events
+           WHERE event_id = ?
+         ))
+         WHERE source_kind = ? AND corpus_id IN (
+           SELECT active_corpus_id FROM taproot_search_installation_state
+           WHERE installation_id = ?
+           UNION
+           SELECT shadow_corpus_id FROM taproot_search_installation_state
+           WHERE installation_id = ? AND shadow_corpus_id IS NOT NULL
+         )`,
+      )
+      .bind(
+        event.eventId,
+        authority.sourceKind,
+        authority.installationId,
+        authority.installationId,
+      ),
   ] as const;
   return Object.freeze({
     event,

@@ -18,6 +18,10 @@ import {
 } from './search-source-events.js';
 import { canonicalizeTaprootBaseIri } from './migrations.js';
 import {
+  createSearchMaterializationRuntimeV1,
+  type SearchMaterializationAdminGuardV1,
+} from './search-materialization.js';
+import {
   KNOWLEDGE_WRITE_CAPABILITY,
   KNOWLEDGE_POLICY_CAPABILITY,
   normalizeAuthorizationContext,
@@ -233,6 +237,12 @@ export {
   normalizeUnifiedSearchSourceEventInputV1,
   unifiedSearchSourcePayloadHashV1,
 } from './search-source-events.js';
+export type {
+  SearchMaterializationAdminGuardV1,
+  SearchMaterializationHealthV1,
+  SearchMaterializationRunOptionsV1,
+  SearchMaterializationRunReceiptV1,
+} from './search-materialization.js';
 export type {
   InstallationSearchSourceBindingV1,
   InstallationSearchSourceEventReceiptV1,
@@ -793,6 +803,21 @@ export async function createInstallationSearchSourceGuardV1(
   });
   installationSearchSourceGuards.set(guard, binding);
   return guard;
+}
+
+/** Assembly-issued, opaque and bounded materialization runner/maintenance guard. */
+export async function createSearchMaterializationAdminGuardV1(
+  db: D1DatabaseLike,
+  options: TaprootWriteOptions,
+  hostCapability: TaprootHostWriteCapability,
+): Promise<SearchMaterializationAdminGuardV1> {
+  repository(db, options, hostCapability);
+  const state = await readInstallationAuthorizationState(db);
+  return createSearchMaterializationRuntimeV1({
+    db,
+    installationId: state.installationId,
+    clock: options.clock ?? (() => new Date()),
+  });
 }
 
 export const inspectTaprootAuthorizationReadiness = (

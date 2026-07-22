@@ -23,6 +23,16 @@ bounded payloads, and indexed lookup. The packed consumer repeats guard
 nonconstructibility and one atomic source event from the installed tarball.
 The reproducible capped 100k artifact records latency without imposing an SLA.
 
+`test/search-materialization.test.ts` runs the same black-box lifecycle against
+persisted native SQLite and real Workerd D1. It covers exact DDL-only 0006,
+32-way claims, expired/crashed attempts, ABA rejection, stable Item/Statement
+document identities, full CNF/filter/chunk persistence, replace-all removal,
+delete/restore eligibility, dual-fanout shadow rebuild and atomic activation,
+redacted blocked health, migration drift, and a true SQLite close/reopen.
+`npm run baseline:search-materialization` reproduces the checked 100k-root,
+one-million-chunk indexed-path artifact without imposing an SLA. The packed
+consumer exercises the guarded lifecycle from the installed tarball.
+
 The Workerd suite exercises successful edits, malformed and oversized input,
 optimistic conflicts, concurrent writers, migration, immutable history,
 projection repair, shared RDF values, and injected RDF failures. The injected

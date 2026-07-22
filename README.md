@@ -36,10 +36,11 @@ capability, and a process-local `node:sqlite` adapter.
   redirect resolution, integrity verification, deterministic repair, schema/RDF
   migrations, validation policies, and write observations.
 - A versioned unified-search contract with deterministic serialization and pure
-  authorization-preserving Statement/Item projection planning, plus an atomic
-  metadata-only source-event boundary for later materialization. It does not
-  execute search. See `docs/search-contract.md` and
-  `docs/search-source-events.md`.
+  authorization-preserving Statement/Item projection planning, an atomic
+  metadata-only source-event boundary, and a dormant guarded materialization
+  lifecycle with persisted jobs, invisible stages, replacement heads, and
+  shadow rebuilds. It does not execute search. See `docs/search-contract.md`,
+  `docs/search-source-events.md`, and `docs/search-materialization.md`.
 
 It does not own authentication, MCP, agents, tasks, UI, wiki articles, media
 bytes, or arbitrary SPARQL Update. Canonical entity JSON is authoritative;
@@ -110,6 +111,12 @@ SHA-256 backfills, and RDF reprojection.
 Migration 0005 is DDL-only and creates an empty immutable unified-search source
 event log plus current registry. It does not backfill canonical rows or start a
 worker. Item mutations emit one root event in their canonical transaction.
+
+Migration 0006 is also DDL-only and adds the dormant unified-search
+materialization lifecycle. An exact `search:admin` host may initialize and run
+bounded work, inspect redacted health, retry dead work, and manage a shadow
+rebuild. Taproot publishes no public search endpoint and remains blocked while
+the Task, Memory, Prompt, Resource, and Annotation producers are absent.
 
 ## Editing
 

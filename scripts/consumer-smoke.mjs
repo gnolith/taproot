@@ -68,6 +68,7 @@ writeFileSync(
       createInstallationAuthorizationGuard,
       createInstallationDomainMutationGuard,
       createInstallationSearchSourceGuardV1,
+      createSearchMaterializationAdminGuardV1,
       createTaprootHostWriteCapability,
       createSearchProjectionAuthorizationAuthorityV1,
       createTrustedSearchAuthorizationEnvelopeV1,
@@ -78,6 +79,7 @@ writeFileSync(
       PersistedEntityAuthorizationSource,
       projectItemForUnifiedSearchV1,
       projectStatementForUnifiedSearchV1,
+      SEARCH_ADMIN_CAPABILITY,
     } from '@gnolith/taproot';
     import { Miniflare } from 'miniflare';
 
@@ -107,6 +109,14 @@ writeFileSync(
       visibility: { version: 1, clauses: [] },
       statementRestrictions,
       expectedAuthorizationRevision,
+    });
+    const searchAdmin = (authorizationRevision) => ({
+      installationId,
+      principalId: 'packed-search-admin',
+      activeWorkspaceId: null,
+      workspaceIds: [],
+      capabilities: [SEARCH_ADMIN_CAPABILITY],
+      authorizationRevision,
     });
     let d1Guard;
     try {
@@ -291,6 +301,40 @@ writeFileSync(
         labels: { en: { language: 'en', value: 'packed local consumer' } },
         authorization: policy(1),
       });
+      const materialization = await createSearchMaterializationAdminGuardV1(
+        local, options, localWriteCapability,
+      );
+      await materialization.initialize(searchAdmin(2));
+      const materializationReceipt = await materialization.run(searchAdmin(2), {
+        maxJobs: 10,
+        maxRebuildRoots: 10,
+        maxChunkBytes: 64,
+        leaseMilliseconds: 30_000,
+      });
+      if (
+        materializationReceipt.completed !== 1 ||
+        materializationReceipt.deferred !== 1
+      ) throw new Error('packed materialization did not process Item and block Task');
+      const visible = await local.prepare(
+        \`SELECT d.document_slot, d.document_text
+           FROM taproot_search_installation_state s
+           JOIN taproot_search_materialization_heads h
+             ON h.corpus_id = s.active_corpus_id AND h.eligible = 1
+           JOIN taproot_search_staged_documents d
+             ON d.stage_id = h.current_stage_id
+           WHERE s.installation_id = ? AND h.root_kind = 'item'
+           ORDER BY d.document_slot\`,
+      ).bind(installationId).all();
+      if (
+        visible.results.length !== 1 ||
+        visible.results[0]?.document_slot !== 'item' ||
+        !String(visible.results[0]?.document_text).includes('packed local consumer')
+      ) throw new Error('packed materialization did not publish the Item document');
+      const materializationHealth = await materialization.health(searchAdmin(2));
+      if (
+        materializationHealth.status !== 'blocked' ||
+        JSON.stringify(materializationHealth).includes('packed local consumer')
+      ) throw new Error('packed materialization health was not blocked and redacted');
       const projectionAuthority = createSearchProjectionAuthorizationAuthorityV1(
         new PersistedEntityAuthorizationSource(local),
       );
