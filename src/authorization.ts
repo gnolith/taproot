@@ -19,6 +19,10 @@ import type {
   StoredEntity,
   TaprootOptions,
   EditMetadata,
+  VisibilityAtomV1,
+  VisibilityScopeV1,
+  CanonicalAuthorizationPolicyInput,
+  AuthorizationContext,
 } from './types.js';
 import type {
   ListAuditOptions,
@@ -27,37 +31,22 @@ import type {
 } from './repository.js';
 
 export const SEARCH_ADMIN_CAPABILITY = 'search:admin' as const;
-
-export interface AuthorizationContext {
-  installationId: string;
-  principalId: string;
-  activeWorkspaceId: string | null;
-  workspaceIds: readonly string[];
-  capabilities: readonly string[];
-  authorizationRevision: number;
-}
-
-export type VisibilityAtomV1 =
-  | { kind: 'public' }
-  | { kind: 'principal'; principalId: string }
-  | { kind: 'workspace'; workspaceId: string }
-  | { kind: 'capability'; capability: string };
-
-export interface VisibilityScopeV1 {
-  version: 1;
-  /** AND of clauses; each clause is an OR of its atoms. Empty means public. */
-  clauses: readonly (readonly VisibilityAtomV1[])[];
-}
+export const KNOWLEDGE_WRITE_CAPABILITY = 'knowledge:write' as const;
+export const KNOWLEDGE_POLICY_CAPABILITY = 'knowledge:policy' as const;
 
 export interface CanonicalAuthorizationRecord {
   installationId: string;
   authorizationRevision: number;
   visibility: VisibilityScopeV1;
+  workspaceId: string | null;
+  ownerPrincipalId: string;
+  sourceRevision: number;
 }
 
 export interface InstallationAuthorizationState {
   installationId: string;
   authorizationRevision: number;
+  searchGeneration: number;
 }
 
 /**
@@ -74,6 +63,11 @@ export interface EntityAuthorizationSource {
   getEntityRevisionAuthorization(
     entityId: EntityId,
     revision: number,
+  ): Promise<CanonicalAuthorizationRecord | null>;
+  /** Current effective statement scope (parent policy intersected with restrictions). */
+  getStatementAuthorization(
+    entityId: EntityId,
+    statementId: string,
   ): Promise<CanonicalAuthorizationRecord | null>;
 }
 
@@ -242,6 +236,53 @@ export function intersectVisibilityScopes(
   });
 }
 
+export function normalizeCanonicalAuthorizationPolicy(
+  value: CanonicalAuthorizationPolicyInput,
+): CanonicalAuthorizationPolicyInput {
+  if (!isRecord(value)) invalid('authorization policy must be an object');
+  exactKeys(value, [
+    'installationId',
+    'workspaceId',
+    'ownerPrincipalId',
+    'visibility',
+    'statementRestrictions',
+    'expectedAuthorizationRevision',
+  ]);
+  if (!isRecord(value.statementRestrictions))
+    invalid('statementRestrictions must be an object');
+  const statementRestrictions: Record<string, VisibilityScopeV1[]> = {};
+  for (const [statementId, scopes] of Object.entries(
+    value.statementRestrictions,
+  ).sort(([left], [right]) => compareCodeUnits(left, right))) {
+    identifier(statementId, 'statementId');
+    if (!Array.isArray(scopes))
+      invalid(`statementRestrictions.${statementId} must be an array`);
+    const normalizedScopes: VisibilityScopeV1[] = [];
+    for (let index = 0; index < scopes.length; index += 1) {
+      if (!Object.hasOwn(scopes, index))
+        invalid(`statementRestrictions.${statementId} must be dense`);
+      normalizedScopes.push(
+        normalizeVisibilityScope(scopes[index] as VisibilityScopeV1),
+      );
+    }
+    statementRestrictions[statementId] = normalizedScopes;
+  }
+  return {
+    installationId: identifier(value.installationId, 'installationId'),
+    workspaceId:
+      value.workspaceId === null
+        ? null
+        : identifier(value.workspaceId, 'workspaceId'),
+    ownerPrincipalId: identifier(value.ownerPrincipalId, 'ownerPrincipalId'),
+    visibility: normalizeVisibilityScope(value.visibility),
+    statementRestrictions,
+    expectedAuthorizationRevision: revision(
+      value.expectedAuthorizationRevision,
+      'expectedAuthorizationRevision',
+    ),
+  };
+}
+
 export function isVisibleTo(
   rawScope: VisibilityScopeV1,
   rawContext: AuthorizationContext,
@@ -296,15 +337,12 @@ export class AuthorizedTaprootReader {
     db: SqliteDatabaseLike,
     options: TaprootOptions,
     context: AuthorizationContext,
-    authorization: EntityAuthorizationSource,
     authorizedOptions: AuthorizedTaprootOptions,
   ) {
     this.#db = db;
     this.#repository = new TaprootRepository(db, options);
     this.#context = normalizeAuthorizationContext(context);
-    if (!authorization || typeof authorization !== 'object')
-      invalid('authorization source is required');
-    this.#authorization = authorization;
+    this.#authorization = new PersistedEntityAuthorizationSource(db);
     if (!isRecord(authorizedOptions))
       invalid('authorized options are required');
     exactKeys(authorizedOptions, ['cursorCodec']);
@@ -814,21 +852,30 @@ export class AuthorizedTaprootReader {
       .prepare(
         `SELECT
            COALESCE((SELECT MAX(rowid) FROM taproot_entity_revisions), 0) AS revision_generation,
-           COALESCE((SELECT MAX(rowid) FROM taproot_audit_events), 0) AS audit_generation`,
+           COALESCE((SELECT MAX(rowid) FROM taproot_audit_events), 0) AS audit_generation,
+           COALESCE((SELECT search_generation FROM taproot_installation_authorization
+                     WHERE singleton = 1), 0) AS search_generation`,
       )
-      .all<{ revision_generation: number; audit_generation: number }>();
+      .all<{
+        revision_generation: number;
+        audit_generation: number;
+        search_generation: number;
+      }>();
     const revisionGeneration = Number(
       result.results[0]?.revision_generation ?? 0,
     );
     const auditGeneration = Number(result.results[0]?.audit_generation ?? 0);
+    const searchGeneration = Number(result.results[0]?.search_generation ?? 0);
     if (
       !Number.isSafeInteger(revisionGeneration) ||
       revisionGeneration < 0 ||
       !Number.isSafeInteger(auditGeneration) ||
-      auditGeneration < 0
+      auditGeneration < 0 ||
+      !Number.isSafeInteger(searchGeneration) ||
+      searchGeneration < 1
     )
       throw new AuthorizationDeniedError('Authorization denied');
-    return `${revisionGeneration}:${auditGeneration}`;
+    return `${revisionGeneration}:${auditGeneration}:${searchGeneration}`;
   }
 
   async #assertGeneration(expected: string): Promise<void> {
@@ -991,33 +1038,160 @@ export class AuthorizedTaprootReader {
   }
 }
 
+/** Taproot-owned, fail-closed canonical policy source. */
+export class PersistedEntityAuthorizationSource implements EntityAuthorizationSource {
+  readonly #db: SqliteDatabaseLike;
+
+  constructor(db: SqliteDatabaseLike) {
+    this.#db = db;
+  }
+
+  async getInstallationAuthorizationState(): Promise<InstallationAuthorizationState> {
+    const result = await this.#db
+      .prepare(
+        `SELECT installation_id, authorization_revision, search_generation
+         FROM taproot_installation_authorization WHERE singleton = 1`,
+      )
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        search_generation: number;
+      }>();
+    const row = result.results[0];
+    if (!row) throw new AuthorizationDeniedError('Authorization denied');
+    return {
+      installationId: row.installation_id,
+      authorizationRevision: Number(row.authorization_revision),
+      searchGeneration: Number(row.search_generation),
+    };
+  }
+
+  async getEntityAuthorization(
+    entityId: EntityId,
+  ): Promise<CanonicalAuthorizationRecord | null> {
+    const result = await this.#db
+      .prepare(
+        `SELECT p.installation_id, p.authorization_revision,
+                p.effective_visibility_json AS visibility_json,
+                p.workspace_id, p.owner_principal_id, p.source_revision
+         FROM taproot_entity_authorization p
+         JOIN taproot_entities e ON e.entity_id = p.entity_id
+           AND e.revision = p.source_revision
+         WHERE p.entity_id = ? AND p.deleted_at IS NULL
+           AND e.deleted_at IS NULL`,
+      )
+      .bind(entityId)
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        visibility_json: string;
+        workspace_id: string | null;
+        owner_principal_id: string;
+        source_revision: number;
+      }>();
+    return authorizationRecordFromRow(result.results[0]);
+  }
+
+  async getEntityRevisionAuthorization(
+    entityId: EntityId,
+    revisionNumber: number,
+  ): Promise<CanonicalAuthorizationRecord | null> {
+    const result = await this.#db
+      .prepare(
+        `SELECT installation_id, authorization_revision,
+                effective_visibility_json AS visibility_json,
+                workspace_id, owner_principal_id, source_revision
+         FROM taproot_entity_authorization_revisions
+         WHERE entity_id = ? AND source_revision = ?`,
+      )
+      .bind(entityId, revisionNumber)
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        visibility_json: string;
+        workspace_id: string | null;
+        owner_principal_id: string;
+        source_revision: number;
+      }>();
+    return authorizationRecordFromRow(result.results[0]);
+  }
+
+  async getStatementAuthorization(
+    entityId: EntityId,
+    statementId: string,
+  ): Promise<CanonicalAuthorizationRecord | null> {
+    const result = await this.#db
+      .prepare(
+        `SELECT p.installation_id, s.authorization_revision,
+                s.effective_visibility_json AS visibility_json,
+                p.workspace_id, p.owner_principal_id, s.source_revision
+         FROM taproot_statement_authorization s
+         JOIN taproot_entity_authorization p ON p.entity_id = s.entity_id
+           AND p.source_revision = s.source_revision
+         WHERE s.entity_id = ? AND s.statement_id = ?
+           AND p.deleted_at IS NULL`,
+      )
+      .bind(entityId, statementId)
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        visibility_json: string;
+        workspace_id: string | null;
+        owner_principal_id: string;
+        source_revision: number;
+      }>();
+    return authorizationRecordFromRow(result.results[0]);
+  }
+}
+
+function authorizationRecordFromRow(
+  row:
+    | {
+        installation_id: string;
+        authorization_revision: number;
+        visibility_json: string;
+        workspace_id: string | null;
+        owner_principal_id: string;
+        source_revision: number;
+      }
+    | undefined,
+): CanonicalAuthorizationRecord | null {
+  if (!row) return null;
+  return {
+    installationId: row.installation_id,
+    authorizationRevision: Number(row.authorization_revision),
+    visibility: JSON.parse(row.visibility_json) as VisibilityScopeV1,
+    workspaceId: row.workspace_id,
+    ownerPrincipalId: row.owner_principal_id,
+    sourceRevision: Number(row.source_revision),
+  };
+}
+
 export function createAuthorizedTaproot(
   db: SqliteDatabaseLike,
   options: TaprootOptions,
   context: AuthorizationContext,
-  authorization: EntityAuthorizationSource,
   authorizedOptions: AuthorizedTaprootOptions,
 ): AuthorizedTaprootReader {
-  return new AuthorizedTaprootReader(
-    db,
-    options,
-    context,
-    authorization,
-    authorizedOptions,
-  );
+  return new AuthorizedTaprootReader(db, options, context, authorizedOptions);
 }
 
 function normalizeInstallationState(
   value: InstallationAuthorizationState,
 ): InstallationAuthorizationState {
   if (!isRecord(value)) invalid('authorization state must be an object');
-  exactKeys(value, ['installationId', 'authorizationRevision']);
+  exactKeys(value, [
+    'installationId',
+    'authorizationRevision',
+    'searchGeneration',
+  ]);
   return {
     installationId: identifier(value.installationId, 'installationId'),
     authorizationRevision: revision(
       value.authorizationRevision,
       'authorizationRevision',
     ),
+    searchGeneration: revision(value.searchGeneration, 'searchGeneration'),
   };
 }
 
@@ -1025,7 +1199,14 @@ function normalizeAuthorizationRecord(
   value: CanonicalAuthorizationRecord | null,
 ): CanonicalAuthorizationRecord {
   if (!isRecord(value)) invalid('authorization record must be an object');
-  exactKeys(value, ['installationId', 'authorizationRevision', 'visibility']);
+  exactKeys(value, [
+    'installationId',
+    'authorizationRevision',
+    'visibility',
+    'workspaceId',
+    'ownerPrincipalId',
+    'sourceRevision',
+  ]);
   return {
     installationId: identifier(value.installationId, 'installationId'),
     authorizationRevision: revision(
@@ -1033,6 +1214,12 @@ function normalizeAuthorizationRecord(
       'authorizationRevision',
     ),
     visibility: normalizeVisibilityScope(value.visibility),
+    workspaceId:
+      value.workspaceId === null
+        ? null
+        : identifier(value.workspaceId, 'workspaceId'),
+    ownerPrincipalId: identifier(value.ownerPrincipalId, 'ownerPrincipalId'),
+    sourceRevision: revision(value.sourceRevision, 'sourceRevision'),
   };
 }
 

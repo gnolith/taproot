@@ -15,9 +15,8 @@ are inspected before adoption. Unknown, partial, out-of-order, or
 checksum-drifted histories raise typed migration/schema errors.
 
 `AuthorizedTaprootReader` is the only application/search canonical read
-boundary. It requires a host-created `AuthorizationContext`, an
-`EntityAuthorizationSource`, and a host-issued cursor codec; none can be
-omitted. See
+boundary. It requires a host-created `AuthorizationContext` and host-issued
+cursor codec; persisted policy is package-owned and cannot be injected. See
 [`authorization.md`](authorization.md).
 
 ## Reads
@@ -41,10 +40,12 @@ and repair additionally require the exact `search:admin` capability.
 
 All updates require `expectedRevision`. Public write helpers return a minimal
 `MutationReceipt`, never canonical content, and require a
-`TaprootHostWriteCapability` created with a non-extractable HMAC-SHA-256 host
-key. The capability is process-local and bound to the exact database object and
-normalized base IRI; it cannot be serialized or reused across bindings or
-installations. Redirects must target a live entity of the same type and cannot
+`InstallationAuthorizationGuard`, a current `AuthorizationContext` with exact
+`knowledge:write`, and `CanonicalAuthorizationPolicyInput`. Policy changes
+also require exact `knowledge:policy`. The process-local guard is issued using
+a `TaprootHostWriteCapability` after authorization bootstrap and is bound to
+the exact database object and normalized base IRI. Neither token can be
+serialized or reused across bindings or installations. Redirects must target a live entity of the same type and cannot
 create a cycle. `resolveEntity` follows a bounded chain and reports every hop.
 
 `createStatement` and `createReference` build correctly shaped values. Import
@@ -72,8 +73,15 @@ Public `TaprootWriteOptions` support `requireAttribution`, `clock`, `createId`,
 and a caller-selected entity-size limit because those can observe preexisting
 canonical content during a mutation. Hosts perform domain validation over
 separately authorized input. Observers cannot fail or roll back committed
-writes. Host assembly must not expose the database binding or write capability
-to request, user, agent, or MCP code.
+writes. Host assembly must not expose the database binding, host capability,
+guard, or authorization context to request, user, agent, or MCP code.
+
+`bootstrapTaprootAuthorization` initializes a pristine database once.
+`createInstallationAuthorizationGuard` issues the normal-write guard.
+`inspectTaprootAuthorizationReadiness`,
+`planTaprootAuthorizationBackfill`, and
+`applyTaprootAuthorizationBackfill` are host-controlled, exact
+`search:admin` maintenance operations for bounded legacy migration.
 
 All domain failures extend `TaprootError` and expose a stable uppercase
 snake-case `code` in addition to their exported class for `instanceof` checks.

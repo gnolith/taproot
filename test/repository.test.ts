@@ -18,6 +18,7 @@ import {
   inspectTaprootPersistence,
   legacyTaprootV1Statements,
   inspectTaprootSchema,
+  taprootAuthorizationSchemaStatements,
   type Reference,
   type Snak,
   type Statement,
@@ -43,19 +44,37 @@ async function environment() {
   };
 }
 
+async function dropAuthorizationSchema(db: D1DatabaseLike): Promise<void> {
+  const objects = taprootAuthorizationSchemaStatements
+    .map((sql) =>
+      /^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS ([a-z0-9_]+)/iu.exec(sql),
+    )
+    .filter((match): match is RegExpExecArray => match !== null)
+    .reverse();
+  await db.batch(
+    objects.map((match) =>
+      db.prepare(`DROP ${match[1]!.toUpperCase()} IF EXISTS ${match[2]}`),
+    ),
+  );
+}
+
 describe('TaprootRepository on Workerd D1', () => {
   it.each(['current', 'historical'] as const)(
     'keyset-paginates D1 %s data and rejects a violation after page one',
     async (source) => {
       const env = await environment();
       try {
+        await dropAuthorizationSchema(env.db);
         await env.db.batch([
           env.db.prepare(
             `DELETE FROM _gnolith_migrations
              WHERE namespace = '@gnolith/taproot'
-               AND migration_id = '0003-canonical-statement-text'`,
+               AND migration_id IN (
+                 '0003-canonical-statement-text',
+                 '0004-canonical-authorization-policy'
+               )`,
           ),
-          env.db.prepare(`DELETE FROM taproot_migrations WHERE version = 3`),
+          env.db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),
           env.db.prepare(
             `UPDATE taproot_metadata SET metadata_value = '1'
              WHERE metadata_key = 'canonical_json_version'`,
@@ -122,13 +141,17 @@ describe('TaprootRepository on Workerd D1', () => {
         lastrevid: 1,
         modified: '2026-01-01T00:00:00.000Z',
       });
+      await dropAuthorizationSchema(env.db);
       await env.db.batch([
         env.db.prepare(
           `DELETE FROM _gnolith_migrations
            WHERE namespace = '@gnolith/taproot'
-             AND migration_id = '0003-canonical-statement-text'`,
+             AND migration_id IN (
+               '0003-canonical-statement-text',
+               '0004-canonical-authorization-policy'
+             )`,
         ),
-        env.db.prepare(`DELETE FROM taproot_migrations WHERE version = 3`),
+        env.db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),
         env.db.prepare(
           `UPDATE taproot_metadata SET metadata_value = '1'
            WHERE metadata_key = 'canonical_json_version'`,
@@ -939,16 +962,11 @@ describe('TaprootRepository on Workerd D1', () => {
       expect(await env.repository.inspectEntityIntegrity('Q1')).toMatchObject({
         valid: false,
       });
-      expect(
-        await env.repository.repairEntityProjection('Q1', {
+      await expect(
+        env.repository.repairEntityProjection('Q1', {
           attribution: { id: 'system:repair', kind: 'system' },
         }),
-      ).toMatchObject({ valid: true });
-      expect(
-        (await env.repository.listAuditEvents({ entityId: 'Q1' })).items.some(
-          ({ type }) => type === 'repair',
-        ),
-      ).toBe(true);
+      ).rejects.toBeInstanceOf(RevisionConflictError);
       const reverted = await env.repository.revertEntity('Q1', 1, {
         expectedRevision: edited.newRevision,
         statementTexts: {},

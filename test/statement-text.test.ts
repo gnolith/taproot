@@ -9,6 +9,7 @@ import {
   createStatement,
   initializeTaproot,
   legacyTaprootV1Statements,
+  taprootAuthorizationSchemaStatements,
   type EntityCommand,
   type SqliteDatabaseLike,
   type SqlitePreparedStatementLike,
@@ -408,18 +409,36 @@ describe('authored statement text on native SQLite', () => {
 async function downgradeStatementTextMigration(
   db: SqliteDatabaseLike,
 ): Promise<void> {
+  await dropAuthorizationSchema(db);
   await db.batch([
     db.prepare(
       `DELETE FROM _gnolith_migrations
        WHERE namespace = '@gnolith/taproot'
-         AND migration_id = '0003-canonical-statement-text'`,
+         AND migration_id IN (
+           '0003-canonical-statement-text',
+           '0004-canonical-authorization-policy'
+         )`,
     ),
-    db.prepare(`DELETE FROM taproot_migrations WHERE version = 3`),
+    db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),
     db.prepare(
       `UPDATE taproot_metadata SET metadata_value = '1'
        WHERE metadata_key = 'canonical_json_version'`,
     ),
   ]);
+}
+
+async function dropAuthorizationSchema(db: SqliteDatabaseLike): Promise<void> {
+  const objects = taprootAuthorizationSchemaStatements
+    .map((sql) =>
+      /^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS ([a-z0-9_]+)/iu.exec(sql),
+    )
+    .filter((match): match is RegExpExecArray => match !== null)
+    .reverse();
+  await db.batch(
+    objects.map((match) =>
+      db.prepare(`DROP ${match[1]!.toUpperCase()} IF EXISTS ${match[2]}`),
+    ),
+  );
 }
 
 async function insertPagedCorpus(

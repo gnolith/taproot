@@ -15,11 +15,18 @@
 - Public mutation helpers now return minimal receipts and reject validator/RDF
   factory callbacks and configurable entity-size probes, so write configuration
   cannot observe preexisting canonical content. They require a process-local
-  host capability bound to the exact database object and installation base IRI.
-  Raw repository internals are not package-exported.
+  opaque installation authorization guard bound to the exact database object
+  and installation base IRI. Normal writes require current `knowledge:write`;
+  policy changes require orthogonal `knowledge:policy`. Raw repository
+  internals are not package-exported.
 - Added host-created authorization contexts, canonical CNF visibility scopes,
   lossless scope intersection, portable fingerprints, explicit `search:admin`
   checks, and fail-closed pre/post-hydration canonical reads.
+- Added checksummed migration 4 with immutable installation authorization
+  state, current and per-revision entity/statement policy, atomic projection
+  outbox and counter advances, fail-closed legacy quarantine, and bounded
+  hash-attested `search:admin` backfill. Unique durable advance IDs prevent
+  same-target ABA races for canonical and cross-package ordered batches.
 
 - Added required, explicitly authored nonblank `Statement.text` to canonical
   JSON and to every logical statement mutation.

@@ -1,83 +1,70 @@
 # Authorization foundation
 
-Version 0.3 closes Taproot's public canonical-read surface for the Search
-Contract **B03, D03, H01, and H07**: identifier-only candidate prefiltering,
-authorization-bound cursors, and authorization checks at every exported
-canonical read boundary. Those contract IDs are not complete from this package
-alone: Taproot-owned canonical policy persistence and combined-system
-acceptance remain outstanding.
+Taproot 0.3 persists canonical Item/Property authorization and closes its
+public canonical-read surface for Search Contract B03, D03, H01, and H07.
+Combined-system candidate generation and hydration acceptance remain outside
+this package.
 
-Hosts create an `AuthorizationContext` from authenticated state. All fields are
-required: installation and principal identity, active and authorized workspace
-identity, explicit capabilities, and the installation-wide authorization
-revision. Taproot validates and normalizes the context; it never derives
-authority from a persona, prompt, agent name, attribution record, or generic
-`admin` label.
+Hosts create an `AuthorizationContext` only from authenticated state. It
+contains installation and principal identity, active and granted workspaces,
+explicit capabilities, and the installation-wide authorization revision.
+Taproot never derives authority from personas, prompts, agent names,
+attribution, or a generic `admin` label.
 
-`VisibilityScopeV1` is a canonical CNF value. Its clauses are ANDed and atoms
-inside a clause are ORed. The empty clause list is public. An empty individual
-clause is invalid. Normalization validates all fields, NFC-normalizes bounded
-identifiers, removes duplicates and true/public clauses, and sorts by Unicode
-code unit. Serialization and SHA-256 fingerprints are therefore portable.
-Intersecting scopes concatenates their clauses before normalization, so a
-Resource annotation can further restrict its target without losing either
-policy.
+`VisibilityScopeV1` is canonical CNF: clauses are ANDed and atoms within a
+clause are ORed. An empty clause list is public; an empty clause is invalid.
+Normalization validates and NFC-normalizes bounded identifiers, removes
+duplicates, and sorts by Unicode code unit. Intersection concatenates clauses,
+so a statement restriction can only narrow its parent Item.
 
-`AuthorizedTaprootReader` is the application/search canonical hydration
-boundary. Its context and `EntityAuthorizationSource` are mandatory. The
-source must return current installation state and canonical visibility state;
-missing state fails closed. Taproot checks installation identity, the exact
-installation authorization revision, and visibility before hydration, then
-loads and checks again. Policy changes during hydration fail with the same
-generic `AuthorizationDeniedError` as every other denial.
+## Persisted policy
 
-Historical hydration first authorizes the current canonical record. A missing,
-deleted, or currently inaccessible source denies access even when its requested
-historical revision was public. The historical revision policy is then
-intersected with current visibility, so old policy can only further restrict
-access and can never resurrect revoked authority.
+Migration 4 adds an immutable installation ID, one durable authorization
+revision, a search generation, current and immutable per-revision entity
+policy, exact per-statement restrictions, an immutable advance/admin audit, and
+a projection outbox. Entity JSON, revision, audit, terms, RDF, policy, outbox,
+authorization revision, and search generation commit atomically.
 
-`search:admin` is the only search-administration capability recognized by
-`requireSearchAdministration`. `admin`, `administrator`, `assistant`, and
-other personas do not imply it.
+Whole-Item hydration uses the intersection of the Item visibility and every
+statement restriction. A statement lookup uses the parent visibility
+intersected with that statement's restrictions. This intentionally denies
+whole-Item hydration when any statement would be hidden from the caller.
 
-## Public boundary in 0.3
+Legacy entities have no inferred visibility and fail closed. Backfill requires
+a bounded, explicit full-history manifest with exact content hashes and policy
+for every revision. Planning and application are audited; stale or incomplete
+plans fail without partially publishing policy.
 
-`TaprootRepository`, `createTaproot`, and the old raw read helpers are absent
-from the package export. Normal consumers cannot hydrate canonical entities,
-history, lists, term matches, audit payloads, exports, or integrity diagnostics
-without `AuthorizedTaprootReader`. Public writes require a runtime-branded host
-capability bound to the exact database object and normalized installation base
-IRI. Invalid, serialized, cross-database, and cross-installation capabilities
-fail before database access or observation. Write helpers return minimal
-receipts and reject validator/RDF-factory callbacks and configurable
-entity-size probes, preventing writes from becoming an implicit read channel.
-Package migrations and schema inspection remain host operations but do not
-return canonical content.
+## Reads
 
-The host assembly must keep both the database binding and write capability out
-of request, agent, MCP, and user-controlled code. Possession of the database
-binding is the authority needed to mint a capability in the same JavaScript
-realm; this is a host-process boundary, not per-entity authorization. The
-follow-up canonical-policy persistence work supplies the latter.
+`createAuthorizedTaproot` constructs its source from Taproot-owned persisted
+tables; consumers cannot inject another policy source. Taproot verifies exact
+installation and authorization revision plus visibility before hydration, then
+checks again afterward. Missing, stale, deleted, or inaccessible policy yields
+the same generic `AuthorizationDeniedError`.
 
-Authorized page cursors are AES-GCM encrypted/authenticated with a branded
-codec created from a durable, non-extractable host key. Taproot binds each
-cursor to operation, normalized query/filter, installation, principal,
-workspace grants, capabilities, authorization revision, and current canonical
-revision-and-audit generation. Cursor plaintext is fixed-size padded before
-encryption so token length does not reveal page position. A cursor is not
-usable after mutation, repair, revocation, with another query, or by another
-context. Failures are generic. Candidates are selected as identifiers,
-authorized, then hydrated; denied candidates are skipped while bounded scans
-continue to fill an authorized page.
+Historical hydration first authorizes the current record, then intersects the
+historical policy with current visibility. Old policy can narrow access but
+cannot resurrect revoked authority. AES-GCM cursors bind operation, query,
+installation, caller/grants, authorization revision, and search generation;
+tampered, stale, or cross-context tokens fail generically.
 
-This surface closure is not canonical policy persistence. Until Taproot's
-follow-up persistence issue lands, hosts have no package-owned authoritative
-policy store and the Search Contract IDs named above remain incomplete. Legacy
-canonical rows must fail closed; they must never be interpreted as public.
+## Writes and maintenance
 
-Taproot deliberately does not persist principals, memberships, or sessions.
-The owning host/domain supplies canonical authorization records through
-`EntityAuthorizationSource`; later lexical candidate selection must apply the
-same scope before loading text and use `AuthorizedTaprootReader` for hydration.
+Normal writes require an opaque `InstallationAuthorizationGuard`, a full
+current context, exact `knowledge:write`, current target visibility, and the
+expected canonical and authorization revisions. Policy changes additionally
+require exact `knowledge:policy`. `search:admin` is orthogonal: it permits only
+search readiness/backfill/maintenance and never implies corpus read, normal
+write, or policy mutation.
+
+Every successful advance stores a unique durable ID. The update and following
+assertion both bind that ID, preventing an ABA race in which two batches target
+the same next counters, including writes to different entities. The guard also
+provides DB-bound fence/advance statements for another package's ordered batch;
+it exposes counters, not policy JSON, and does not create a second revision.
+
+`TaprootHostWriteCapability` is limited to bootstrap, bounded legacy backfill,
+maintenance, and guard issuance. The database binding, host capability, guard,
+context, cursor key, and policy inputs must never come from request, MCP,
+prompt, or other user-controlled data.

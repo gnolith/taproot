@@ -11,9 +11,12 @@ canonical history or RDF query results, and whether untrusted JSON or SPARQL
 input is required. Do not include production data or credentials.
 
 Taproot records attribution claims but does not authenticate identities or
-authorize writes. It assumes mutation routes admit trusted callers. Canonical JSON,
-revision/audit immutability, size limits, optimistic revision guards, and
-read-only Diamond SPARQL are security boundaries; projection tables are not.
+persist principals, memberships, or sessions. It does persist canonical entity
+authorization policy and requires a host-created current context plus an
+opaque DB-bound guard for normal writes. Canonical JSON, authorization policy,
+revision/audit immutability, size limits, optimistic revision/authorization
+guards, and read-only Diamond SPARQL are security boundaries; rebuildable
+projection content is not authoritative.
 
 The threat model and host responsibilities are documented in
 `docs/threat-model.md`.

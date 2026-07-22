@@ -7,29 +7,33 @@ rebuildable projections and never become a competing statement model.
 
 Every write performs the same transaction:
 
-1. Validate the host write capability against the exact database binding and
-   installation before database access, then load the current entity and
-   enforce its expected revision.
+1. Validate the opaque installation guard, full authorization context, exact
+   `knowledge:write`, installation revision, current target visibility, and
+   canonical expected revision.
 2. Apply commands and validate the whole document, referenced Property
    datatypes, fixed size limits, attribution, and lifecycle rules. Public write
    configuration cannot install callbacks over preexisting canonical state.
 3. Serialize canonical JSON and compute its SHA-256 content/parent hashes.
 4. Build the complete RDF closure and search-term projection.
 5. Commit the current row, immutable revision, audit event, terms, RDF patch,
-   and RDF ownership rows in one D1 batch.
+   RDF ownership, current/historical authorization policy, statement
+   restrictions, projection outbox, and the shared authorization/search
+   counters in one D1 batch.
 
 RDF ownership is required because Wikibase full-value and reference nodes can
 be shared. It allows an entity edit to remove an old quad only when no other
 entity owns it. The table contains encoded quad keys only and is fully
 rebuildable from canonical JSON.
 
-The schema has no statement, qualifier, or reference tables. Those structures
-live solely inside canonical entity JSON. Diamond's `rdf_quads` is the query
+Structured statement, qualifier, and reference values live solely inside
+canonical entity JSON. Authorization has a separate statement-policy index but
+does not become a competing statement-content model. Diamond's `rdf_quads` is the query
 projection; `taproot_terms` is the search projection.
 
 Taproot owns Items, Properties, their values and lifecycle, revisions,
 attribution/audit history, deterministic projections, migration, integrity,
-and repair. It deliberately does not own authentication, authorization, MCP,
+and repair, including canonical entity authorization policy. It deliberately
+does not own authentication, principals, memberships, sessions, MCP,
 agents, UI, wiki article bodies, media storage, or arbitrary SPARQL Update.
 It also does not own Site assembly, provisioning, deployment, or acceptance.
 
