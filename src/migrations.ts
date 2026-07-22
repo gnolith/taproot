@@ -25,6 +25,7 @@ import {
   isExactPreSearchMaterializationTaprootSchema,
   isExactPreSearchSourceEventTaprootSchema,
   isExactPreExternalSearchProducerTaprootSchema,
+  isExactPreCompleteSearchTaprootSchema,
   isExactTaprootSchema,
   isExactTaprootUpgradeSchema,
   isRecognizedLegacyV1,
@@ -36,6 +37,7 @@ import {
   taprootSearchSourceEventSchemaStatements,
   taprootSearchMaterializationSchemaStatements,
   taprootExternalSearchProducerSchemaStatements,
+  taprootCompleteSearchSchemaStatements,
   taprootSchemaStatements,
   verifyTaprootPackageSeeds,
   verifyPersistedStatementText,
@@ -100,6 +102,10 @@ export const taprootMigrations = [
   {
     id: '0007-external-search-producers',
     statements: taprootExternalSearchProducerSchemaStatements,
+  },
+  {
+    id: '0008-complete-search-content-semantic',
+    statements: taprootCompleteSearchSchemaStatements,
   },
 ] as const satisfies readonly NamespacedMigration[];
 
@@ -285,13 +291,15 @@ export async function applyTaprootMigrations(
     applied.length < expected.length
   ) {
     const exactPredecessor =
-      applied.length === 6
-        ? await isExactPreExternalSearchProducerTaprootSchema(db)
-        : applied.length === 5
-          ? await isExactPreSearchMaterializationTaprootSchema(db)
-          : applied.length === 4
-            ? await isExactPreSearchSourceEventTaprootSchema(db)
-            : await isExactPreAuthorizationTaprootSchema(db);
+      applied.length === 7
+        ? await isExactPreCompleteSearchTaprootSchema(db)
+        : applied.length === 6
+          ? await isExactPreExternalSearchProducerTaprootSchema(db)
+          : applied.length === 5
+            ? await isExactPreSearchMaterializationTaprootSchema(db)
+            : applied.length === 4
+              ? await isExactPreSearchSourceEventTaprootSchema(db)
+              : await isExactPreAuthorizationTaprootSchema(db);
     if (!exactPredecessor)
       throw new TaprootMigrationStateError(
         'Pending Taproot migrations require the exact prior package catalog',
@@ -304,7 +312,8 @@ export async function applyTaprootMigrations(
           migration.id !== '0004-canonical-authorization-policy' &&
           migration.id !== '0005-unified-search-source-events' &&
           migration.id !== '0006-unified-search-materialization-lifecycle' &&
-          migration.id !== '0007-external-search-producers',
+          migration.id !== '0007-external-search-producers' &&
+          migration.id !== '0008-complete-search-content-semantic',
       )
     )
       throw new TaprootMigrationStateError(
@@ -595,6 +604,7 @@ async function finalizeRecovery(
       : taprootExternalSearchProducerSchemaStatements
           .slice(-2)
           .map((sql) => db.prepare(sql))),
+    ...taprootCompleteSearchSchemaStatements.map((sql) => db.prepare(sql)),
     ...identityStatements(db, identity),
     db.prepare(
       `INSERT INTO taproot_metadata(metadata_key, metadata_value)
@@ -604,7 +614,7 @@ async function finalizeRecovery(
     db.prepare(
       `INSERT INTO taproot_assertions(assertion_key)
        SELECT NULL WHERE
-         (SELECT COUNT(*) FROM taproot_migrations) != 7
+         (SELECT COUNT(*) FROM taproot_migrations) != 8
          OR NOT EXISTS (
            SELECT 1 FROM taproot_migrations
            WHERE version = 1 AND name = 'initial'
@@ -632,6 +642,10 @@ async function finalizeRecovery(
          OR NOT EXISTS (
            SELECT 1 FROM taproot_migrations
            WHERE version = 7 AND name = 'external-search-producers'
+         )
+         OR NOT EXISTS (
+           SELECT 1 FROM taproot_migrations
+           WHERE version = 8 AND name = 'complete-search-content-semantic'
          )`,
     ),
     db.prepare(

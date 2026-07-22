@@ -33,6 +33,7 @@ import {
   taprootSearchMaterializationSchemaStatements,
   taprootSearchSourceEventSchemaStatements,
   taprootExternalSearchProducerSchemaStatements,
+  taprootCompleteSearchSchemaStatements,
   type AuthorizationContext,
   type CanonicalAuthorizationPolicyInput,
   type TaprootHostWriteCapability,
@@ -91,6 +92,10 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
             status: 'pending',
           },
           { id: '0007-external-search-producers', status: 'pending' },
+          {
+            id: '0008-complete-search-content-semantic',
+            status: 'pending',
+          },
         ]);
         await applyTaprootMigrations(env.db, options);
         expect((await inspectTaprootSchema(env.db)).valid).toBe(true);
@@ -298,13 +303,7 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
         expect(health).toMatchObject({
           version: 1,
           status: 'blocked',
-          blockedProducerKinds: [
-            'task',
-            'memory',
-            'prompt',
-            'resource',
-            'annotation',
-          ],
+          blockedProducerKinds: ['task', 'memory', 'prompt'],
           pendingJobs: 0,
           deadJobs: 0,
           staleHeads: 0,
@@ -1099,6 +1098,7 @@ async function count(db: D1DatabaseLike, table: string): Promise<number> {
 }
 
 async function downgradeTo0005(db: D1DatabaseLike): Promise<void> {
+  await dropSchemaObjects(db, taprootCompleteSearchSchemaStatements);
   await dropSchemaObjects(db, taprootExternalSearchProducerSchemaStatements);
   await dropSchemaObjects(db, taprootSearchMaterializationSchemaStatements);
   await dropSchemaObjects(db, taprootSearchSourceEventSchemaStatements);
@@ -1113,6 +1113,7 @@ async function downgradeTo0005(db: D1DatabaseLike): Promise<void> {
          AND migration_id IN (
            '0006-unified-search-materialization-lifecycle',
            '0007-external-search-producers'
+           ,'0008-complete-search-content-semantic'
          )`,
     ),
   ]);
@@ -1124,7 +1125,7 @@ async function dropSchemaObjects(
 ): Promise<void> {
   const objects = statements
     .map((sql) =>
-      /^CREATE (TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
+      /^CREATE (?:UNIQUE )?(TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
         sql,
       ),
     )

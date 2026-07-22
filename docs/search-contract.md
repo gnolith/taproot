@@ -1,18 +1,16 @@
 # Unified search contract V1
 
-Taproot exposes a versioned, runtime-neutral contract and pure projection
-planning for future unified search. V1 recognizes exactly these canonical
+Taproot exposes a versioned, runtime-neutral contract, projection planning,
+and an executable authorized search service. V1 recognizes exactly these canonical
 kinds, in this order:
 
 `statement`, `item`, `task`, `memory`, `prompt`, `resource`, `annotation`.
 
-Omitting `kinds` normalizes to all seven for contract negotiation only. It does
-not claim that all seven projectors or an executable search service exist.
-Taproot's public pure projector entry points remain limited to `statement` and
-`item`; the other five entry points fail with
-`UnsupportedSearchProjectionError`. Separately, migration 0007 provides a
-host-sealed data-only producer boundary for Workshop Task and Memory
-materialization. Prompt, Resource, and Annotation are not enabled.
+Omitting `kinds` searches all seven. Taproot owns native Statement, Item,
+Resource, and Annotation production. Workshop supplies Task, Memory, and Prompt
+through the migration-0007 host-sealed data-only producer boundary. The legacy
+pure Task/Memory/Prompt projector placeholders still fail explicitly because
+cross-domain production requires an assembly-issued producer guard.
 
 ## Request and response boundary
 
@@ -28,16 +26,14 @@ closed:
 - Resource: `mediaTypes`;
 - Memory, Prompt, and Annotation: common filters only.
 
-Task and Resource filters are recognized structurally even though those
-projectors are deferred. This is vocabulary stability, not implementation
-support. V1 does not accept source IDs or Item IDs as filters.
+V1 does not accept source IDs or Item IDs as filters.
 
 Strict normalizers also define typed references, match offsets without match
 text, result pages, a bounded public error vocabulary, source events, and
 cursor bindings. A cursor binding covers the normalized query/kinds/filters,
 installation, normalized principal/workspace/capability context,
-authorization revision, and search generation. Taproot does not issue a
-unified-search cursor in this slice.
+authorization revision, and search generation. `createAuthorizedSearchServiceV1`
+issues opaque bound cursors and rejects stale, tampered, or cross-query reuse.
 
 ## Canonical projection values
 
@@ -73,12 +69,14 @@ following field's trace, so even a separator-only chunk retains a source.
 Crossing the explicit chunk-count bound fails instead of silently dropping
 text.
 
-## Explicit nonclaims
+## Runtime boundary
 
-The pure projection contract does not implement search execution, candidate
-retrieval, ranking, snippets, cursor issuance, hydration, or provider adapters.
-The package's separate migrations 0005 through 0007 persist source events, a
-dormant guarded materialization lifecycle as documented in
+Migration 0008 adds canonical Resource/Annotation storage and durable semantic
+configuration, generation, work, usage, exclusion, and vector state. The public
+search operation performs authorization before exposure, deterministic lexical
+ranking and snippets, optional ready-generation semantic fusion, and a second
+current-policy/revision check during hydration. Migrations 0005 through 0008
+persist source events and the guarded materialization lifecycle documented in
 [search-source-events.md](search-source-events.md) and
 [search-materialization.md](search-materialization.md). Existing
 `searchEntities`, `SearchOptions`, `SearchResult`, RDF mapping, and SPARQL

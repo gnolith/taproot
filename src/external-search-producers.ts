@@ -37,7 +37,7 @@ const BLOCKED_SQL = /(?:^|[^a-z0-9_])(?:taproot_|_gnolith_)/iu;
 
 export interface ExternalSearchDomainMutationBindingV1 {
   domain: string;
-  sourceKind: 'task' | 'memory';
+  sourceKind: 'task' | 'memory' | 'prompt';
   capability: string;
   changeClasses: readonly string[];
 }
@@ -80,7 +80,7 @@ export interface ExternalSearchCanonicalMutationReceiptV1 {
 
 export interface ExternalSearchProducerDescriptorV1 {
   version: 1;
-  sourceKind: 'task' | 'memory';
+  sourceKind: 'task' | 'memory' | 'prompt';
   owningDomain: 'workshop';
   producerFingerprint: string;
   contractVersion: string;
@@ -180,7 +180,7 @@ interface CoordinatorBinding {
   db: D1DatabaseLike;
   installationId: string;
   domain: string;
-  sourceKind: 'task' | 'memory';
+  sourceKind: 'task' | 'memory' | 'prompt';
   capability: string;
   changeClasses: readonly string[];
   clock: () => Date;
@@ -621,8 +621,14 @@ function prepareDomainSql(
 function normalizeBinding(
   raw: Omit<CoordinatorBinding, 'generation'>,
 ): CoordinatorBinding {
-  if (raw.sourceKind !== 'task' && raw.sourceKind !== 'memory')
-    denied('only Task and Memory external mutation coordinators are enabled');
+  if (
+    raw.sourceKind !== 'task' &&
+    raw.sourceKind !== 'memory' &&
+    raw.sourceKind !== 'prompt'
+  )
+    denied(
+      'only Task, Memory, and Prompt external mutation coordinators are enabled',
+    );
   const domain = token(raw.domain, 'domain', 64);
   if (domain !== 'workshop') denied('external source kind owner is invalid');
   const capability = token(raw.capability, 'capability', 128);
@@ -656,7 +662,11 @@ function normalizeProducerDescriptor(
     'version',
   ]);
   if (raw.version !== 1) denied('external producer version is invalid');
-  if (raw.sourceKind !== 'task' && raw.sourceKind !== 'memory')
+  if (
+    raw.sourceKind !== 'task' &&
+    raw.sourceKind !== 'memory' &&
+    raw.sourceKind !== 'prompt'
+  )
     denied('external producer kind is not enabled');
   if (raw.owningDomain !== 'workshop')
     denied('external producer owner is invalid');
@@ -1227,7 +1237,7 @@ async function normalizeExternalAuthorization(
 }
 
 async function buildExternalDocument(
-  sourceKind: 'task' | 'memory',
+  sourceKind: 'task' | 'memory' | 'prompt',
   source: SearchProjectionSourceEventV1,
   authorization: SearchAuthorizationEnvelopeValueV1,
   raw: ExternalSearchProjectionDocumentInputV1,
@@ -1252,7 +1262,9 @@ async function buildExternalDocument(
   const rootReference = normalizeExternalReference(
     sourceKind === 'task'
       ? { kind: 'task', taskId: source.sourceId }
-      : { kind: 'memory', memoryId: source.sourceId },
+      : sourceKind === 'memory'
+        ? { kind: 'memory', memoryId: source.sourceId }
+        : { kind: 'prompt', promptId: source.sourceId },
     sourceKind,
   );
   const filterMetadata = normalizeUnifiedSearchFiltersV1(raw.filterMetadata, [
@@ -1291,7 +1303,7 @@ async function buildExternalDocument(
 
 function normalizeExternalReference(
   raw: UnifiedSearchReferenceV1,
-  expectedKind: 'task' | 'memory',
+  expectedKind: 'task' | 'memory' | 'prompt',
 ): UnifiedSearchReferenceV1 {
   if (expectedKind === 'task') {
     exactKeys(raw, ['kind', 'taskId']);
@@ -1299,10 +1311,16 @@ function normalizeExternalReference(
       denied('external canonical reference kind mismatch');
     return { kind: 'task', taskId: token(raw.taskId, 'taskId', 256) };
   }
-  exactKeys(raw, ['kind', 'memoryId']);
-  if (raw.kind !== 'memory')
+  if (expectedKind === 'memory') {
+    exactKeys(raw, ['kind', 'memoryId']);
+    if (raw.kind !== 'memory')
+      denied('external canonical reference kind mismatch');
+    return { kind: 'memory', memoryId: token(raw.memoryId, 'memoryId', 256) };
+  }
+  exactKeys(raw, ['kind', 'promptId']);
+  if (raw.kind !== 'prompt')
     denied('external canonical reference kind mismatch');
-  return { kind: 'memory', memoryId: token(raw.memoryId, 'memoryId', 256) };
+  return { kind: 'prompt', promptId: token(raw.promptId, 'promptId', 256) };
 }
 
 function normalizeExternalSegment(

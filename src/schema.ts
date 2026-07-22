@@ -9,7 +9,7 @@ import { buildEntityQuads } from './rdf.js';
 import type { EntityId, WikibaseEntity } from './types.js';
 import { SchemaMismatchError } from './errors.js';
 
-export const TAPROOT_SCHEMA_VERSION = '6';
+export const TAPROOT_SCHEMA_VERSION = '7';
 export const TAPROOT_JSON_VERSION = '2';
 export const TAPROOT_RDF_VERSION = '2';
 
@@ -17,6 +17,7 @@ const PRE_AUTHORIZATION_SCHEMA_VERSION = '2';
 const PRE_SEARCH_SOURCE_SCHEMA_VERSION = '3';
 const PRE_SEARCH_MATERIALIZATION_SCHEMA_VERSION = '4';
 const PRE_EXTERNAL_SEARCH_PRODUCER_SCHEMA_VERSION = '5';
+const PRE_COMPLETE_SEARCH_SCHEMA_VERSION = '6';
 
 const preAuthorizationTaprootSchemaStatements = [
   `CREATE TABLE IF NOT EXISTS taproot_entities (
@@ -800,7 +801,7 @@ export const taprootExternalSearchProducerSchemaStatements = [
   `UPDATE taproot_search_projection_jobs
      SET source_policy_revision = authorization_revision,
          producer_fingerprint = CASE
-           WHEN source_kind IN ('statement', 'item')
+           WHEN source_kind IN ('statement', 'item', 'resource', 'annotation')
              THEN 'taproot-builtin-projection-v1'
            ELSE NULL END`,
   `ALTER TABLE taproot_search_stages
@@ -811,7 +812,7 @@ export const taprootExternalSearchProducerSchemaStatements = [
   `UPDATE taproot_search_stages
      SET source_policy_revision = authorization_revision,
          producer_fingerprint = CASE
-           WHEN root_kind IN ('statement', 'item')
+           WHEN root_kind IN ('statement', 'item', 'resource', 'annotation')
              THEN 'taproot-builtin-projection-v1'
            ELSE NULL END`,
   `ALTER TABLE taproot_search_materialization_heads
@@ -822,7 +823,7 @@ export const taprootExternalSearchProducerSchemaStatements = [
   `UPDATE taproot_search_materialization_heads
      SET source_policy_revision = authorization_revision,
          producer_fingerprint = CASE
-           WHEN root_kind IN ('statement', 'item')
+           WHEN root_kind IN ('statement', 'item', 'resource', 'annotation')
              THEN 'taproot-builtin-projection-v1'
            ELSE NULL END`,
   `ALTER TABLE taproot_search_installation_state
@@ -834,7 +835,7 @@ export const taprootExternalSearchProducerSchemaStatements = [
     cursor_generation INTEGER NOT NULL DEFAULT 1 CHECK (cursor_generation >= 1),
     lifecycle_generation INTEGER NOT NULL DEFAULT 1 CHECK (lifecycle_generation >= 1),
     health_code TEXT NOT NULL CHECK (health_code IN ('blocked-producers', 'building', 'ready', 'degraded')),
-    blocked_producer_count INTEGER NOT NULL DEFAULT 5 CHECK (blocked_producer_count BETWEEN 0 AND 7),
+    blocked_producer_count INTEGER NOT NULL DEFAULT 3 CHECK (blocked_producer_count BETWEEN 0 AND 7),
     last_error_code TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -1019,7 +1020,7 @@ export const taprootExternalSearchProducerSchemaStatements = [
           'taproot-unified-search-projection-v1',
           'taproot-search-authorization-v1', 1, updated_at
    FROM taproot_installation_authorization
-   CROSS JOIN (SELECT 'statement' AS kind UNION ALL SELECT 'item')`,
+   CROSS JOIN (SELECT 'statement' AS kind UNION ALL SELECT 'item' UNION ALL SELECT 'resource' UNION ALL SELECT 'annotation')`,
   ...(
     [
       'statement',
@@ -1035,7 +1036,7 @@ export const taprootExternalSearchProducerSchemaStatements = [
        installation_id, source_kind, producer_fingerprint, state,
        manifest_revision, updated_at)
      SELECT installation_id, '${kind}',
-       ${kind === 'statement' || kind === 'item' ? "'taproot-builtin-projection-v1', 'ready'" : "NULL, 'blocked'"},
+       ${kind === 'statement' || kind === 'item' || kind === 'resource' || kind === 'annotation' ? "'taproot-builtin-projection-v1', 'ready'" : "NULL, 'blocked'"},
        1, updated_at FROM taproot_installation_authorization`,
   ),
   ...(
@@ -1054,7 +1055,7 @@ export const taprootExternalSearchProducerSchemaStatements = [
        contract_version, projection_version, authorization_contract_version,
        state, updated_at)
      SELECT corpus_id, installation_id, '${kind}',
-       ${kind === 'statement' || kind === 'item' ? "'taproot-builtin-projection-v1', 'taproot-external-search-producer-v1', 'taproot-unified-search-projection-v1', 'taproot-search-authorization-v1', 'ready'" : "NULL, NULL, NULL, NULL, 'blocked'"},
+       ${kind === 'statement' || kind === 'item' || kind === 'resource' || kind === 'annotation' ? "'taproot-builtin-projection-v1', 'taproot-external-search-producer-v1', 'taproot-unified-search-projection-v1', 'taproot-search-authorization-v1', 'ready'" : "NULL, NULL, NULL, NULL, 'blocked'"},
        created_at FROM taproot_search_corpora`,
   ),
   `CREATE TRIGGER taproot_search_source_events_no_update
@@ -1134,10 +1135,198 @@ export const taprootExternalSearchProducerSchemaStatements = [
     )
     BEGIN SELECT RAISE(ABORT, 'taproot search projection job source is invalid'); END`,
   `INSERT INTO taproot_metadata(metadata_key, metadata_value)
-    VALUES ('schema_version', '${TAPROOT_SCHEMA_VERSION}')
+    VALUES ('schema_version', '${PRE_COMPLETE_SEARCH_SCHEMA_VERSION}')
     ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
   `INSERT INTO taproot_migrations(version, name)
     VALUES (7, 'external-search-producers')
+    ON CONFLICT(version) DO NOTHING`,
+] as const;
+
+/** Canonical content plus lexical/semantic administration state (migration 0008). */
+export const taprootCompleteSearchSchemaStatements = [
+  `CREATE TABLE IF NOT EXISTS taproot_resources (
+    record_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    visibility_json TEXT NOT NULL CHECK (json_valid(visibility_json)),
+    deleted_at TEXT,
+    created_at TEXT NOT NULL,
+    modified_at TEXT NOT NULL
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_annotations (
+    record_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    visibility_json TEXT NOT NULL CHECK (json_valid(visibility_json)),
+    deleted_at TEXT,
+    created_at TEXT NOT NULL,
+    modified_at TEXT NOT NULL
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_content_revisions (
+    record_kind TEXT NOT NULL CHECK (record_kind IN ('resource', 'annotation')),
+    record_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (record_kind, record_id, revision)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_content_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    audit_id TEXT NOT NULL UNIQUE,
+    installation_id TEXT NOT NULL,
+    record_kind TEXT NOT NULL CHECK (record_kind IN ('resource', 'annotation')),
+    record_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    event_type TEXT NOT NULL CHECK (event_type IN ('create', 'update', 'delete', 'restore', 'import')),
+    principal_id TEXT NOT NULL,
+    attribution_json TEXT NOT NULL CHECK (json_valid(attribution_json)),
+    record_hash TEXT NOT NULL,
+    previous_hash TEXT,
+    created_at TEXT NOT NULL
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_semantic_configurations (
+    configuration_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    provider_kind TEXT NOT NULL CHECK (provider_kind IN ('openai-compatible', 'ollama-compatible')),
+    provider_url TEXT NOT NULL,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL CHECK (dimensions > 0),
+    metric TEXT NOT NULL CHECK (metric IN ('cosine', 'dot', 'euclid')),
+    vector_kind TEXT NOT NULL CHECK (vector_kind IN ('sqlite', 'qdrant')),
+    vector_url TEXT,
+    fingerprint TEXT NOT NULL,
+    selected INTEGER NOT NULL DEFAULT 0 CHECK (selected IN (0, 1)),
+    state TEXT NOT NULL CHECK (state IN ('unvalidated', 'validating', 'ready', 'building', 'failed', 'retired', 'deleting')),
+    circuit_open INTEGER NOT NULL DEFAULT 0 CHECK (circuit_open IN (0, 1)),
+    warning_emitted INTEGER NOT NULL DEFAULT 0 CHECK (warning_emitted IN (0, 1)),
+    active_generation INTEGER NOT NULL DEFAULT 1 CHECK (active_generation >= 1),
+    ready_generation INTEGER,
+    failure_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (installation_id, name),
+    CHECK (ready_generation IS NULL OR ready_generation <= active_generation)
+  ) STRICT`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS taproot_semantic_selected_idx
+    ON taproot_semantic_configurations(installation_id) WHERE selected = 1`,
+  `CREATE TABLE IF NOT EXISTS taproot_embedding_generations (
+    configuration_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    state TEXT NOT NULL CHECK (state IN ('planned', 'building', 'ready', 'failed', 'retired')),
+    eligible_count INTEGER NOT NULL DEFAULT 0 CHECK (eligible_count >= 0),
+    embedded_count INTEGER NOT NULL DEFAULT 0 CHECK (embedded_count >= 0),
+    excluded_count INTEGER NOT NULL DEFAULT 0 CHECK (excluded_count >= 0),
+    failed_count INTEGER NOT NULL DEFAULT 0 CHECK (failed_count >= 0),
+    checkpoint TEXT,
+    created_at TEXT NOT NULL,
+    ready_at TEXT,
+    PRIMARY KEY (configuration_id, generation),
+    FOREIGN KEY (configuration_id) REFERENCES taproot_semantic_configurations(configuration_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_embedding_vectors (
+    configuration_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    installation_id TEXT NOT NULL,
+    derived_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('item', 'task', 'memory', 'prompt', 'resource', 'annotation')),
+    source_id TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    chunk_id TEXT,
+    content_hash TEXT NOT NULL,
+    authorization_json TEXT NOT NULL CHECK (json_valid(authorization_json)),
+    selector_json TEXT CHECK (selector_json IS NULL OR json_valid(selector_json)),
+    vector_json TEXT NOT NULL CHECK (json_valid(vector_json)),
+    dimensions INTEGER NOT NULL CHECK (dimensions > 0),
+    metric TEXT NOT NULL CHECK (metric IN ('cosine', 'dot', 'euclid')),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (configuration_id, generation, derived_id)
+  ) STRICT`,
+  `CREATE INDEX IF NOT EXISTS taproot_embedding_source_idx
+    ON taproot_embedding_vectors(installation_id, configuration_id, generation, kind, source_id, source_revision)`,
+  `CREATE TABLE IF NOT EXISTS taproot_embedding_plans (
+    plan_id TEXT PRIMARY KEY,
+    configuration_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('estimated', 'approved', 'running', 'paused', 'stopped', 'complete', 'failed')),
+    estimate_json TEXT NOT NULL CHECK (json_valid(estimate_json)),
+    policy_json TEXT NOT NULL CHECK (json_valid(policy_json)),
+    principal_id TEXT NOT NULL,
+    approved_by TEXT,
+    created_at TEXT NOT NULL,
+    approved_at TEXT,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (configuration_id) REFERENCES taproot_semantic_configurations(configuration_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_embedding_work (
+    plan_id TEXT NOT NULL,
+    derived_id TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'leased', 'complete', 'failed', 'excluded', 'superseded')),
+    attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt BETWEEN 0 AND 3),
+    token_count INTEGER NOT NULL DEFAULT 0 CHECK (token_count >= 0),
+    failure_code TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plan_id, derived_id),
+    FOREIGN KEY (plan_id) REFERENCES taproot_embedding_plans(plan_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_embedding_usage (
+    usage_id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    batch_key TEXT NOT NULL,
+    day_key TEXT NOT NULL,
+    month_key TEXT NOT NULL,
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens >= 0),
+    actual_tokens INTEGER CHECK (actual_tokens IS NULL OR actual_tokens >= 0),
+    reserved_cost_microunits INTEGER,
+    actual_cost_microunits INTEGER,
+    created_at TEXT NOT NULL,
+    UNIQUE (plan_id, batch_key),
+    FOREIGN KEY (plan_id) REFERENCES taproot_embedding_plans(plan_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_embedding_exclusions (
+    configuration_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    derived_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (configuration_id, generation, derived_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_semantic_admin_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    audit_id TEXT NOT NULL UNIQUE,
+    installation_id TEXT NOT NULL,
+    configuration_id TEXT,
+    plan_id TEXT,
+    action TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    details_json TEXT NOT NULL CHECK (json_valid(details_json)),
+    created_at TEXT NOT NULL
+  ) STRICT`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_content_audit_no_update
+    BEFORE UPDATE ON taproot_content_audit
+    BEGIN SELECT RAISE(ABORT, 'taproot content audit is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_content_audit_no_delete
+    BEFORE DELETE ON taproot_content_audit
+    BEGIN SELECT RAISE(ABORT, 'taproot content audit is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_semantic_admin_audit_no_update
+    BEFORE UPDATE ON taproot_semantic_admin_audit
+    BEGIN SELECT RAISE(ABORT, 'taproot semantic audit is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_semantic_admin_audit_no_delete
+    BEFORE DELETE ON taproot_semantic_admin_audit
+    BEGIN SELECT RAISE(ABORT, 'taproot semantic audit is immutable'); END`,
+  `INSERT INTO taproot_metadata(metadata_key, metadata_value)
+    VALUES ('schema_version', '${TAPROOT_SCHEMA_VERSION}')
+    ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
+  `INSERT INTO taproot_migrations(version, name)
+    VALUES (8, 'complete-search-content-semantic')
     ON CONFLICT(version) DO NOTHING`,
 ] as const;
 
@@ -1256,7 +1445,7 @@ const finalExternalProducerCreatedCatalogStatements =
     return match !== null && !match[1]!.endsWith('_0006');
   });
 
-const taprootCurrentCatalogStatements = [
+const taprootPreCompleteSearchCatalogStatements = [
   ...preExternalSearchProducerTaprootSchemaStatements.filter((sql) => {
     const match =
       /^\s*CREATE\s+(?:TABLE|INDEX|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z0-9_]+)/iu.exec(
@@ -1267,17 +1456,23 @@ const taprootCurrentCatalogStatements = [
   ...finalExternalProducerAlteredCatalogStatements,
   ...finalExternalProducerCreatedCatalogStatements,
   `INSERT INTO taproot_metadata(metadata_key, metadata_value)
-    VALUES ('schema_version', '${TAPROOT_SCHEMA_VERSION}')
+    VALUES ('schema_version', '${PRE_COMPLETE_SEARCH_SCHEMA_VERSION}')
     ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
   `INSERT INTO taproot_migrations(version, name)
     VALUES (7, 'external-search-producers')
     ON CONFLICT(version) DO NOTHING`,
 ] as const;
 
+const taprootCurrentCatalogStatements = [
+  ...taprootPreCompleteSearchCatalogStatements,
+  ...taprootCompleteSearchSchemaStatements,
+] as const;
+
 /** Ordered executable schema used for fresh initialization and recovery. */
 export const taprootSchemaStatements = [
   ...preExternalSearchProducerTaprootSchemaStatements,
   ...taprootExternalSearchProducerSchemaStatements,
+  ...taprootCompleteSearchSchemaStatements,
 ] as const;
 
 /** Exact package-created schema before authored statement text became required. */
@@ -1900,15 +2095,16 @@ export async function verifyTaprootPackageSeeds(
           OR (version = 4 AND name = 'canonical-authorization-policy')
           OR (version = 5 AND name = 'unified-search-source-events')
           OR (version = 6 AND name = 'unified-search-materialization-lifecycle')
-          OR (version = 7 AND name = 'external-search-producers')`,
+          OR (version = 7 AND name = 'external-search-producers')
+          OR (version = 8 AND name = 'complete-search-content-semantic')`,
     )
     .all<{ count: number }>();
   const migrationSeedTotal = await db
     .prepare(`SELECT COUNT(*) AS count FROM taproot_migrations`)
     .all<{ count: number }>();
   if (
-    Number(migrationSeeds.results[0]?.count ?? 0) !== 7 ||
-    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 7
+    Number(migrationSeeds.results[0]?.count ?? 0) !== 8 ||
+    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 8
   )
     throw new SchemaMismatchError(
       'Taproot package migration seeds are incomplete',
@@ -2220,6 +2416,35 @@ export async function isExactTaprootSchema(
   return matchesExactCatalog(db, taprootCurrentCatalogStatements);
 }
 
+/** @internal Redacted structural diagnostics used by migration tests. */
+export async function inspectTaprootExactCatalogDifferences(
+  db: SqliteDatabaseLike,
+): Promise<{
+  expected: number;
+  actual: number;
+  missing: string[];
+  extra: string[];
+  changed: string[];
+}> {
+  const expected = expectedCatalog(taprootCurrentCatalogStatements);
+  const catalog = await readTaprootCatalog(db);
+  const actual = new Map(
+    catalog.map((entry) => [`${entry.type}:${entry.name}`, entry.sql]),
+  );
+  return {
+    expected: expected.size,
+    actual: actual.size,
+    missing: [...expected.keys()].filter((key) => !actual.has(key)),
+    extra: [...actual.keys()].filter((key) => !expected.has(key)),
+    changed: [...expected]
+      .filter(
+        ([key, sql]) =>
+          actual.has(key) && normalizeCatalogSql(actual.get(key) ?? '') !== sql,
+      )
+      .map(([key]) => key),
+  };
+}
+
 /** Exact migration-0004 predecessor catalog accepted by migration 0005. */
 export async function isExactPreSearchSourceEventTaprootSchema(
   db: SqliteDatabaseLike,
@@ -2245,6 +2470,13 @@ export async function isExactPreExternalSearchProducerTaprootSchema(
     db,
     preExternalSearchProducerTaprootSchemaStatements,
   );
+}
+
+/** Exact migration-0007 predecessor catalog accepted by migration 0008. */
+export async function isExactPreCompleteSearchTaprootSchema(
+  db: SqliteDatabaseLike,
+): Promise<boolean> {
+  return matchesExactCatalog(db, taprootPreCompleteSearchCatalogStatements);
 }
 
 /** Exact package catalog immediately before canonical authorization migration 0004. */
@@ -2274,27 +2506,10 @@ async function matchesExactCatalog(
   db: SqliteDatabaseLike,
   statements: readonly string[],
 ): Promise<boolean> {
-  const expected = new Map<string, string>();
-  for (const sql of statements) {
-    const match =
-      /^\s*CREATE\s+(TABLE|INDEX|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z0-9_]+)/iu.exec(
-        sql,
-      );
-    if (!match?.[1] || !match[2]) continue;
-    expected.set(
-      `${match[1].toLowerCase()}:${match[2]}`,
-      normalizeCatalogSql(sql),
-    );
-  }
-  const catalog = await db
-    .prepare(
-      `SELECT type, name, sql FROM sqlite_schema
-       WHERE name LIKE 'taproot_%' AND type IN ('table', 'index', 'trigger')
-       ORDER BY type, name`,
-    )
-    .all<{ type: string; name: string; sql: string | null }>();
-  if (catalog.results.length !== expected.size) return false;
-  for (const entry of catalog.results) {
+  const expected = expectedCatalog(statements);
+  const catalog = await readTaprootCatalog(db);
+  if (catalog.length !== expected.size) return false;
+  for (const entry of catalog) {
     const expectedSql = expected.get(`${entry.type}:${entry.name}`);
     if (
       expectedSql === undefined ||
@@ -2306,12 +2521,39 @@ async function matchesExactCatalog(
   return true;
 }
 
+function expectedCatalog(statements: readonly string[]): Map<string, string> {
+  const expected = new Map<string, string>();
+  for (const sql of statements) {
+    const match =
+      /^\s*CREATE\s+(?:(UNIQUE)\s+)?(TABLE|INDEX|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z0-9_]+)/iu.exec(
+        sql,
+      );
+    if (match?.[2] && match[3])
+      expected.set(
+        `${match[2].toLowerCase()}:${match[3]}`,
+        normalizeCatalogSql(sql),
+      );
+  }
+  return expected;
+}
+
+async function readTaprootCatalog(
+  db: SqliteDatabaseLike,
+): Promise<Array<{ type: string; name: string; sql: string | null }>> {
+  const catalog = await db
+    .prepare(
+      `SELECT type, name, sql FROM sqlite_schema WHERE name LIKE 'taproot_%' AND type IN ('table', 'index', 'trigger') ORDER BY type, name`,
+    )
+    .all<{ type: string; name: string; sql: string | null }>();
+  return catalog.results;
+}
+
 function catalogObjectNames(
   statements: readonly string[],
   kind: 'TABLE' | 'INDEX' | 'TRIGGER',
 ): string[] {
   const pattern = new RegExp(
-    `^\\s*CREATE\\s+${kind}\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?([a-z0-9_]+)`,
+    `^\\s*CREATE\\s+(?:UNIQUE\\s+)?${kind}\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?([a-z0-9_]+)`,
     'iu',
   );
   return statements.flatMap((sql) => {

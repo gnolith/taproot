@@ -281,6 +281,26 @@ export interface ItemProjectionInputV1 {
   maxChunkBytes?: number;
 }
 
+export interface ResourceProjectionInputV1 {
+  source: SearchProjectionSourceEventV1;
+  resourceId: string;
+  title?: string;
+  text: string;
+  language?: string;
+  mediaType: string;
+  authorization: TrustedSearchAuthorizationEnvelopeV1;
+  maxChunkBytes?: number;
+}
+
+export interface AnnotationProjectionInputV1 {
+  source: SearchProjectionSourceEventV1;
+  annotationId: string;
+  text: string;
+  language?: string;
+  authorization: TrustedSearchAuthorizationEnvelopeV1;
+  maxChunkBytes?: number;
+}
+
 const encoder = new TextEncoder();
 const kindOrder = new Map<string, number>(
   UNIFIED_SEARCH_KINDS.map((kind, index) => [kind, index]),
@@ -844,12 +864,86 @@ export function projectPromptForUnifiedSearchV1(): never {
   return unsupportedProjection('prompt');
 }
 
-export function projectResourceForUnifiedSearchV1(): never {
-  return unsupportedProjection('resource');
+export async function projectResourceForUnifiedSearchV1(
+  input: ResourceProjectionInputV1,
+): Promise<SearchProjectionPlanV1> {
+  const source = normalizeSearchProjectionSourceEventV1(input.source);
+  if (source.operation !== 'upsert' || source.kind !== 'resource')
+    invalid('resource projection requires a Resource upsert source event');
+  const resourceId = identifier(input.resourceId, 'resourceId');
+  if (source.sourceId !== resourceId)
+    invalid('resource source id does not match the Resource');
+  const authorization = authorizationFor(
+    input.authorization,
+    source,
+    'resource',
+    resourceId,
+  );
+  const segments: SearchProjectionSegmentV1[] = [];
+  if (input.title !== undefined)
+    segments.push(
+      segment('title', resourceId, input.language ?? null, input.title),
+    );
+  segments.push(
+    segment('content', resourceId, input.language ?? null, input.text),
+  );
+  const reference = { kind: 'resource' as const, resourceId };
+  const document = await buildDocument(
+    'resource',
+    source,
+    authorization,
+    'resource',
+    reference,
+    reference,
+    {
+      languages: input.language ? [input.language] : [],
+      sourceRevisions: [source.sourceRevision],
+      byKind: { resource: { mediaTypes: [input.mediaType] } },
+    },
+    segments,
+  );
+  return buildPlan(
+    source,
+    [document],
+    await chunkDocument(document, normalizeChunkBytes(input.maxChunkBytes)),
+  );
 }
 
-export function projectAnnotationForUnifiedSearchV1(): never {
-  return unsupportedProjection('annotation');
+export async function projectAnnotationForUnifiedSearchV1(
+  input: AnnotationProjectionInputV1,
+): Promise<SearchProjectionPlanV1> {
+  const source = normalizeSearchProjectionSourceEventV1(input.source);
+  if (source.operation !== 'upsert' || source.kind !== 'annotation')
+    invalid('annotation projection requires an Annotation upsert source event');
+  const annotationId = identifier(input.annotationId, 'annotationId');
+  if (source.sourceId !== annotationId)
+    invalid('annotation source id does not match the Annotation');
+  const authorization = authorizationFor(
+    input.authorization,
+    source,
+    'annotation',
+    annotationId,
+  );
+  const reference = { kind: 'annotation' as const, annotationId };
+  const document = await buildDocument(
+    'annotation',
+    source,
+    authorization,
+    'annotation',
+    reference,
+    reference,
+    {
+      languages: input.language ? [input.language] : [],
+      sourceRevisions: [source.sourceRevision],
+      byKind: {},
+    },
+    [segment('content', annotationId, input.language ?? null, input.text)],
+  );
+  return buildPlan(
+    source,
+    [document],
+    await chunkDocument(document, normalizeChunkBytes(input.maxChunkBytes)),
+  );
 }
 
 function unsupportedProjection(kind: UnifiedSearchKind): never {
@@ -1101,7 +1195,7 @@ function segment(
 }
 
 async function buildDocument(
-  kind: 'statement' | 'item',
+  kind: UnifiedSearchKind,
   source: SearchProjectionSourceEventV1,
   authorization: SearchAuthorizationEnvelopeValueV1,
   documentSlot: string,

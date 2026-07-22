@@ -46,6 +46,10 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
             status: 'applied',
           },
           { id: '0007-external-search-producers', status: 'pending' },
+          {
+            id: '0008-complete-search-content-semantic',
+            status: 'pending',
+          },
         ]);
 
         await applyTaprootMigrations(first.db, options);

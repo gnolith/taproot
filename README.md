@@ -1,6 +1,6 @@
 # Taproot
 
-**The portable SQLite and D1, Wikibase-compatible knowledge layer for Gnolith.**
+**The portable SQLite/D1 canonical knowledge, content, and hybrid-search layer for Gnolith.**
 
 Taproot gives a D1-backed consumer one authoritative Wikibase-shaped Item/Property
 document, tamper-evident revision and attribution history, typed and batched
@@ -12,7 +12,7 @@ editing commands, term search, repairable projections, and a deterministic RDF p
 
 ## Status
 
-Version `0.3.0` supports Node 22 and 24 and depends exactly on Diamond `0.4.0`,
+Version `0.4.0` supports Node 22 and 24 and depends exactly on Diamond `0.4.0`,
 which exposes transaction-composable RDF patches, a runtime-neutral SQLite
 capability, and a process-local `node:sqlite` adapter.
 
@@ -35,16 +35,24 @@ capability, and a process-local `node:sqlite` adapter.
 - Cursor reads, bounded import/upsert and NDJSON export, multi-command edits,
   redirect resolution, integrity verification, deterministic repair, schema/RDF
   migrations, validation policies, and write observations.
-- A versioned unified-search contract with deterministic serialization and pure
-  authorization-preserving Statement/Item projection planning, an atomic
-  metadata-only source-event boundary, and a dormant guarded materialization
-  lifecycle with persisted jobs, invisible stages, replacement heads, and
-  shadow rebuilds. It does not execute search. See `docs/search-contract.md`,
-  `docs/search-source-events.md`, and `docs/search-materialization.md`.
+- Canonical Resources linked to distinct Items and Web-Annotation-aligned
+  Annotations with independent revisions, authorization, attribution,
+  hydration, import/export, bounded inline text, and injected blob/file/URL
+  payload capabilities.
+- One authorized public relevance `search` operation over Statement, Item,
+  Task, Memory, Prompt, Resource, and Annotation projections. Persisted native
+  SQLite and Workerd D1 share strict kind/filter/cursor/snippet/hydration
+  behavior; hidden chunks remain derived and independently ranked.
+- Optional semantic augmentation behind that same operation, with separate
+  OpenAI/Ollama-compatible embedding and SQLite/Qdrant vector ports, retained
+  configurations, complete-generation readiness, bounded circuits/reconnect,
+  and durable `search:admin` plans, schedules, budgets, usage, exclusions, and
+  audit.
 
-It does not own authentication, MCP, agents, tasks, UI, wiki articles, media
-bytes, or arbitrary SPARQL Update. Canonical entity JSON is authoritative;
-there is no relational statement store.
+It does not own authentication, MCP, agents, tasks, UI, media bytes, answer
+generation, context selection, infrastructure orchestration, or arbitrary
+SPARQL Update. Canonical domain JSON is authoritative; RDF, lexical documents,
+chunks, and vectors are replaceable projections.
 
 ## Setup
 
@@ -104,7 +112,7 @@ policy from a request, MCP argument, prompt, or query.
 
 Use Taproot's `planTaprootMigrations`, `applyTaprootMigrations`, and
 `initializeTaproot` APIs for schema changes. The numbered SQL files document
-the historical 0.1 layout and are not an operator migration interface in 0.3.
+the package migration catalog and are not an operator migration interface.
 The package APIs own checksums, conservative adoption, application-level
 SHA-256 backfills, and RDF reprojection.
 
@@ -119,13 +127,18 @@ rebuild.
 
 Migration 0007 preserves existing staged rows while adding immutable producer
 manifests, adoption checkpoints, and generation-pinned fingerprints. Host
-assembly can register data-only Workshop Task and Memory callbacks through a
+assembly can register data-only Workshop Task, Memory, and Prompt callbacks through a
 DB/installation/kind-sealed boundary. Taproot alone derives source hashes,
 authorization envelopes, document/chunk IDs, and atomic mutation events. A
 missing or mismatched process-local producer blocks health without claiming or
-incrementing its jobs. Prompt, Resource, and Annotation remain blocked.
-Taproot publishes no public search endpoint and does not assemble or deploy a
-complete Site.
+incrementing its jobs. Taproot supplies its own Statement, Item, Resource, and
+Annotation producers.
+
+Migration 0008 adds canonical Resource/Annotation state and retained semantic
+configuration, generation, vector, approved-plan, schedule, budget, usage,
+exclusion, and immutable admin-audit catalogs. Secrets remain runtime-injected
+and never enter persistence or snapshots. Taproot does not assemble or deploy
+a complete Site.
 
 ## Editing
 
@@ -208,8 +221,10 @@ recheck in the owning host.
 
 Canonical entity JSON defaults to 1.8 MB, below D1's 2 MB bound-value limit.
 Diamond enforces a 1.9 MB aggregate encoded quad-patch limit; Taproot reports
-that as `QuadPatchTooLargeError`. Store PDFs, images, audio, OCR, transcripts,
-and article bodies externally and represent them as knowledge Items.
+that as `QuadPatchTooLargeError`. Store large PDFs, images, and audio through
+an injected Resource payload capability. Durable OCR, transcripts,
+translations, captions, and excerpts are Resources with linked Items and
+Annotations; small supplemental annotation text may remain inline.
 
 Bulk imports default to create-only, can opt into `upsert`, are capped at 100
 entities by default, and commit one entity atomically at a time. Authorized

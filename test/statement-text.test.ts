@@ -13,6 +13,7 @@ import {
   taprootSearchSourceEventSchemaStatements,
   taprootSearchMaterializationSchemaStatements,
   taprootExternalSearchProducerSchemaStatements,
+  taprootCompleteSearchSchemaStatements,
   type EntityCommand,
   type SqliteDatabaseLike,
   type SqlitePreparedStatementLike,
@@ -423,6 +424,7 @@ async function downgradeStatementTextMigration(
            '0005-unified-search-source-events',
            '0006-unified-search-materialization-lifecycle',
            '0007-external-search-producers'
+           ,'0008-complete-search-content-semantic'
          )`,
     ),
     db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),
@@ -439,9 +441,10 @@ async function dropAuthorizationSchema(db: SqliteDatabaseLike): Promise<void> {
     ...taprootSearchSourceEventSchemaStatements,
     ...taprootSearchMaterializationSchemaStatements,
     ...taprootExternalSearchProducerSchemaStatements,
+    ...taprootCompleteSearchSchemaStatements,
   ]
     .map((sql) =>
-      /^CREATE (TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
+      /^CREATE (?:UNIQUE )?(TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
         sql,
       ),
     )

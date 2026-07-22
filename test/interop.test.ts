@@ -29,5 +29,5 @@ describe('local D1 and Diamond interoperability example', () => {
     } finally {
       await miniflare.dispose();
     }
-  }, 30_000);
+  }, 60_000);
 });

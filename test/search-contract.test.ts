@@ -20,11 +20,9 @@ import {
   normalizeUnifiedSearchPageV1,
   normalizeUnifiedSearchRequestV1,
   normalizeUnifiedSearchResultV1,
-  projectAnnotationForUnifiedSearchV1,
   projectItemForUnifiedSearchV1,
   projectMemoryForUnifiedSearchV1,
   projectPromptForUnifiedSearchV1,
-  projectResourceForUnifiedSearchV1,
   projectStatementForUnifiedSearchV1,
   projectTaskForUnifiedSearchV1,
   type AuthorizationContext,
@@ -581,13 +579,11 @@ describe('pure Taproot Statement and Item projection planning', () => {
     ).rejects.toBeInstanceOf(MixedSearchProjectionScopeError);
   });
 
-  it('recognizes deferred kinds structurally but every deferred projector fails unsupported', () => {
+  it('recognizes Workshop-owned deferred kinds structurally but their pure projectors remain external', () => {
     const deferred: Array<() => never> = [
       projectTaskForUnifiedSearchV1,
       projectMemoryForUnifiedSearchV1,
       projectPromptForUnifiedSearchV1,
-      projectResourceForUnifiedSearchV1,
-      projectAnnotationForUnifiedSearchV1,
     ];
     for (const projector of deferred)
       expect(projector).toThrow(UnsupportedSearchProjectionError);

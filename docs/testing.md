@@ -10,7 +10,7 @@ filter matrix, strict limits and public shapes, Unicode/null/order canonical
 vectors, cursor bindings, opaque projection authority, logical Statement
 projection, Item no-omission splitting, mixed-scope partition/rejection,
 hostile widening prevention, chunk trace/noncanonicality, and explicit
-unsupported errors for deferred projectors. The packed consumer repeats the
+cross-domain projector guardrails. The packed consumer repeats the
 public serialization, pure projection, and forged-authority checks from the
 installed tarball.
 
@@ -37,9 +37,34 @@ consumer exercises the guarded lifecycle from the installed tarball.
 persisted engines, preserves the full staged document/visibility/filter/chunk
 graph, enforces exactly seven staged kinds, and reopens the database.
 `test/external-search-producers.test.ts` qualifies the fieldless mutation
-handle, same-batch Workshop mutation+event, data-only Task materialization,
+handle, same-batch Workshop mutation+event, and data-only external materialization,
 redacted adoption failures, resumable cursor reconstruction, and rejection of
 forged, replayed, cross-kind, or stale-process handles.
+
+`test/content-search.test.ts` is shared public-search conformance on persisted
+native SQLite and real Workerd D1. It proves distinct Item/Resource/Annotation
+identity, injected external payload hydration and integrity, bounded independent
+chunks, omitted/all and narrowed kinds, strict limits and cursor binding,
+canonical hydration, immediate stale-revision invalidation, and durable
+semantic-plan intake of content changed after estimation.
+
+`test/snapshot.test.ts` restores canonical JSON, RDF quads/ownership, content,
+authorization, and compatible derived search state into a freshly migrated
+database while proving credential-shaped columns are absent.
+
+`test/semantic-search.test.ts` runs deterministic OpenAI/Ollama-compatible HTTP
+fakes, persisted/reopened exact SQLite vector conformance, authorization and
+installation isolation, durable approval/state transitions, selected-generation
+readiness, three-attempt circuits, redacted warning-once behavior, and healthy
+lexical fallback. `npm run test:qdrant` pulls pinned
+`qdrant/qdrant:v1.15.4` and runs real validate/probe/upsert/authorized-query/
+isolation/delete conformance. `npm run baseline:hybrid-search` records
+reproducible indexing, query, storage, memory, vector, batch, and token evidence
+without asserting an unsupported SLA.
+
+The machine-checked 89-row ownership map is
+`docs/taproot-requirement-test-matrix.json`; `test/requirement-matrix.test.ts`
+rejects missing, duplicate, or dangling evidence entries.
 
 The Workerd suite exercises successful edits, malformed and oversized input,
 optimistic conflicts, concurrent writers, migration, immutable history,

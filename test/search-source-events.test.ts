@@ -33,6 +33,7 @@ import {
   softDeleteEntity,
   taprootSearchMaterializationSchemaStatements,
   taprootExternalSearchProducerSchemaStatements,
+  taprootCompleteSearchSchemaStatements,
   type AuthorizationContext,
   type CanonicalAuthorizationPolicyInput,
   type TaprootHostWriteCapability,
@@ -94,6 +95,10 @@ describe('unified-search source-event migration 0005', () => {
         status: 'pending',
       },
       { id: '0007-external-search-producers', status: 'pending' },
+      {
+        id: '0008-complete-search-content-semantic',
+        status: 'pending',
+      },
     ]);
     await applyTaprootMigrations(db, options);
     expect((await inspectTaprootSchema(db)).valid).toBe(true);
@@ -967,6 +972,7 @@ async function migrationCount(db: D1DatabaseLike, id: string): Promise<number> {
 }
 
 async function downgradeTo0004(db: D1DatabaseLike): Promise<void> {
+  await dropCompleteSearchSchema(db);
   await dropExternalSearchProducerSchema(db);
   await dropSearchMaterializationSchema(db);
   await db.batch([
@@ -980,6 +986,7 @@ async function downgradeTo0004(db: D1DatabaseLike): Promise<void> {
            '0005-unified-search-source-events',
            '0006-unified-search-materialization-lifecycle',
            '0007-external-search-producers'
+           ,'0008-complete-search-content-semantic'
          )`,
     ),
     db.prepare(
@@ -995,6 +1002,22 @@ async function dropExternalSearchProducerSchema(
   const objects = taprootExternalSearchProducerSchemaStatements
     .map((sql) =>
       /^CREATE (TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
+        sql,
+      ),
+    )
+    .filter((match): match is RegExpExecArray => match !== null)
+    .reverse();
+  await db.batch(
+    objects.map((match) =>
+      db.prepare(`DROP ${match[1]!.toUpperCase()} IF EXISTS ${match[2]}`),
+    ),
+  );
+}
+
+async function dropCompleteSearchSchema(db: D1DatabaseLike): Promise<void> {
+  const objects = taprootCompleteSearchSchemaStatements
+    .map((sql) =>
+      /^CREATE (?:UNIQUE )?(TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
         sql,
       ),
     )

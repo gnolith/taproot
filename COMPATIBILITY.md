@@ -1,6 +1,6 @@
 # Wikibase compatibility target
 
-Taproot 0.3.x requires `@gnolith/diamond` 0.4.0 exactly. Existing Cloudflare D1
+Taproot 0.4.x requires `@gnolith/diamond` 0.4.0 exactly. Existing Cloudflare D1
 objects remain compatible with the exported `D1DatabaseLike` surface. New
 embedders may use the equivalent `SqliteDatabaseLike`; both require one
 adapter/connection with ordered atomic batch semantics.
@@ -23,8 +23,10 @@ Intentional differences:
   not emit MediaWiki page metadata.
 - Redirect and soft-delete state live beside canonical JSON and project only
   lifecycle RDF; deleted content remains available in immutable revisions.
-- Search is a deterministic D1 term projection using case-insensitive
-  substring matching. FTS5 is not required.
+- Unified search uses deterministic portable lexical ranking over committed
+  materialized documents and can augment it with a complete selected semantic
+  generation. FTS5 and a hosted vector service are not required; SQLite exact
+  vectors are the portable baseline.
 - Taproot stores attribution claims but does not authenticate them. Normal
   canonical reads require a host-created authorization context and use
   Taproot's persisted canonical policy. Authentication, principals,

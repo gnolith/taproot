@@ -2,13 +2,25 @@
 
 ## Unreleased
 
+## 0.4.0
+
+- Added migration 0008 and the 0.4 public surface: canonical Resource and
+  Web-Annotation-aligned records, injected portable payload hydration, native
+  Resource/Annotation projection, authorized seven-kind lexical search,
+  deterministic chunk results/cursors/hydration, configurable semantic fusion,
+  durable embedding plans and budgets, SQLite and Qdrant vector adapters,
+  OpenAI/Ollama-compatible embedding adapters, and installation snapshot/restore.
+- Added shared native SQLite/Workerd content-search conformance, deterministic
+  adapter tests, pinned real-Qdrant lifecycle CI, hybrid performance evidence,
+  snapshot round trips, and a machine-checked 89-requirement evidence map.
+
 - Added migration 0007 with immutable external-producer manifests, durable
   resumable adoption/audit state, generation-pinned fingerprints, distinct
   source-policy and live-authorization fences, and a host-sealed data-only
   Workshop Task/Memory boundary. Missing or mismatched process runtimes remain
   dynamically blocked without consuming attempts. Existing 0006 staged graphs
-  are preserved on native SQLite and Workerd D1; Prompt, Resource, and
-  Annotation remain blocked and no public search or Site deployment is added.
+  are preserved on native SQLite and Workerd D1. Site deployment remains out of
+  package scope.
 
 - Added DDL-only migration 0006 and an opaque `search:admin`-guarded,
   runtime-neutral materialization lifecycle with bounded durable jobs,

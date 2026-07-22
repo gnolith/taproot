@@ -20,6 +20,7 @@ import { canonicalizeTaprootBaseIri } from './migrations.js';
 import {
   createSearchMaterializationRuntimeV1,
   type SearchMaterializationAdminGuardV1,
+  type SearchMaterializationContentOptionsV1,
 } from './search-materialization.js';
 import {
   createExternalSearchDomainMutationCoordinatorInternalV1,
@@ -237,11 +238,15 @@ export function createTaprootHostWriteCapability(
 }
 
 export * from './canonical.js';
+export * from './content-domain.js';
 export * from './authorization.js';
 export * from './errors.js';
 export * from './migrations.js';
 export * from './rdf.js';
 export * from './search-contract.js';
+export * from './search-service.js';
+export * from './semantic-search.js';
+export * from './snapshot.js';
 export {
   UNIFIED_SEARCH_SOURCE_KINDS_V1,
   normalizeInstallationSearchSourceBindingV1,
@@ -902,6 +907,7 @@ export async function createSearchMaterializationAdminGuardV1(
   db: D1DatabaseLike,
   options: TaprootWriteOptions,
   hostCapability: TaprootHostWriteCapability,
+  contentOptions: SearchMaterializationContentOptionsV1 = {},
 ): Promise<SearchMaterializationAdminGuardV1> {
   repository(db, options, hostCapability);
   const state = await readInstallationAuthorizationState(db);
@@ -909,6 +915,7 @@ export async function createSearchMaterializationAdminGuardV1(
     db,
     installationId: state.installationId,
     clock: options.clock ?? (() => new Date()),
+    ...contentOptions,
   });
 }
 

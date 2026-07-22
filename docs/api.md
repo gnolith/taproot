@@ -1,15 +1,29 @@
 # API guide
 
-The additive unified-search V1 types, strict normalizers, deterministic
-serialization utilities, and pure Statement/Item projectors are documented in
-[search-contract.md](search-contract.md). They do not replace the legacy
-term-search types or SPARQL surface and do not execute a search.
+The unified-search types, strict normalizers, deterministic serialization
+utilities, and projection planners are documented in
+[search-contract.md](search-contract.md). `createAuthorizedSearchServiceV1`
+exposes the single relevance `search` operation plus owner hydration. Omitted
+kinds cover all seven kinds; explicit kinds narrow; invalid kinds, limits, and
+cursor bindings fail closed. SPARQL remains a separate exact structured path.
 
 The metadata-only persistence boundary is documented in
 [search-source-events.md](search-source-events.md). It records authoritative
 source changes. The separately guarded dormant lifecycle in
 [search-materialization.md](search-materialization.md) materializes Taproot
-Item roots but still does not expose a query surface.
+Item, Resource, Annotation, and registered Workshop roots.
+
+`TaprootContentRepositoryV1` owns canonical Resource and Annotation CRUD,
+revision reads, authorization, payload hydration, snapshots, and W3C Web
+Annotation import/export. Resource payload bytes remain host-provided through
+`PortableResourcePayloadStoreV1`.
+
+`createSemanticSearchAdminV1` requires exact `search:admin` for configuration,
+selection, reconnect, estimate, approval, run/resume, pause, stop, retry,
+exclusion, retirement, deletion, and status. Provider secrets are closure-only
+runtime inputs. `createOpenAICompatibleEmbeddingProviderV1`,
+`createOllamaCompatibleEmbeddingProviderV1`, `createSqliteVectorIndexV1`, and
+`createQdrantVectorIndexV1` are independent replaceable ports.
 
 `createSearchMaterializationAdminGuardV1` requires the host-only Taproot write
 capability and returns only bounded `initialize`, `run`, redacted `health`,

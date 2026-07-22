@@ -16,6 +16,8 @@ import {
   createSearchProjectionAuthorizationAuthorityV1,
   createTrustedSearchAuthorizationEnvelopeV1,
   projectItemForUnifiedSearchV1,
+  projectResourceForUnifiedSearchV1,
+  projectAnnotationForUnifiedSearchV1,
   type DerivedSearchDocumentV1,
   type SearchProjectionPlanV1,
   type SearchProjectionSourceEventV1,
@@ -31,11 +33,18 @@ import {
   buildExternalSearchProjectionPlanInternalV1,
   lookupExternalSearchProducerRuntimeInternalV1,
 } from './external-search-producers.js';
+import type { PortableResourcePayloadStoreV1 } from './content-domain.js';
 
 const MAX_RUN_JOBS = 100;
 const MAX_REBUILD_ROOTS = 100;
 const MAX_SQL_BATCH = 50;
 const MAX_ATTEMPTS = 5;
+const BUILTIN_SEARCH_KINDS = [
+  'statement',
+  'item',
+  'resource',
+  'annotation',
+] as const;
 
 export interface SearchMaterializationRunOptionsV1 {
   maxJobs: number;
@@ -90,6 +99,13 @@ interface RuntimeOptions {
   db: D1DatabaseLike;
   installationId: string;
   clock: () => Date;
+  payloadStore?: PortableResourcePayloadStoreV1;
+  maxExternalPayloadBytes?: number;
+}
+
+export interface SearchMaterializationContentOptionsV1 {
+  payloadStore?: PortableResourcePayloadStoreV1;
+  maxExternalPayloadBytes?: number;
 }
 
 interface JobRow {
@@ -147,11 +163,22 @@ class SearchMaterializationRuntime {
   readonly #db: D1DatabaseLike;
   readonly #installationId: string;
   readonly #clock: () => Date;
+  readonly #payloadStore: PortableResourcePayloadStoreV1 | undefined;
+  readonly #maxExternalPayloadBytes: number;
 
   constructor(options: RuntimeOptions) {
     this.#db = options.db;
     this.#installationId = options.installationId;
     this.#clock = options.clock;
+    this.#payloadStore = options.payloadStore;
+    this.#maxExternalPayloadBytes =
+      options.maxExternalPayloadBytes ?? 8 * 1024 * 1024;
+    if (
+      !Number.isSafeInteger(this.#maxExternalPayloadBytes) ||
+      this.#maxExternalPayloadBytes < 65_536 ||
+      this.#maxExternalPayloadBytes > 64 * 1024 * 1024
+    )
+      throw new Error('maxExternalPayloadBytes is invalid');
   }
 
   async initialize(rawContext: AuthorizationContext): Promise<void> {
@@ -170,7 +197,7 @@ class SearchMaterializationRuntime {
     });
     const sourceHighWatermark = await this.#sourceHighWatermark();
     const statements: SqlitePreparedStatementLike[] = [
-      ...(['statement', 'item'] as const).map((kind) =>
+      ...BUILTIN_SEARCH_KINDS.map((kind) =>
         this.#db
           .prepare(
             `INSERT INTO taproot_unified_search_producer_manifests(
@@ -198,10 +225,16 @@ class SearchMaterializationRuntime {
           .bind(
             this.#installationId,
             kind,
-            kind === 'statement' || kind === 'item'
+            BUILTIN_SEARCH_KINDS.includes(
+              kind as (typeof BUILTIN_SEARCH_KINDS)[number],
+            )
               ? 'taproot-builtin-projection-v1'
               : null,
-            kind === 'statement' || kind === 'item' ? 'ready' : 'blocked',
+            BUILTIN_SEARCH_KINDS.includes(
+              kind as (typeof BUILTIN_SEARCH_KINDS)[number],
+            )
+              ? 'ready'
+              : 'blocked',
             now,
           ),
       ),
@@ -227,7 +260,7 @@ class SearchMaterializationRuntime {
              installation_id, active_corpus_id, cursor_generation,
              lifecycle_generation, health_code, blocked_producer_count,
              created_at, updated_at
-           ) VALUES (?, ?, 1, 1, 'blocked-producers', 5, ?, ?)`,
+           ) VALUES (?, ?, 1, 1, 'blocked-producers', 3, ?, ?)`,
         )
         .bind(this.#installationId, corpusId, now, now),
       ...UNIFIED_SEARCH_KINDS.map((kind) =>
@@ -819,7 +852,9 @@ class SearchMaterializationRuntime {
 
   #producerAvailable(job: JobRow): boolean {
     if (
-      (job.source_kind === 'item' || job.source_kind === 'statement') &&
+      BUILTIN_SEARCH_KINDS.includes(
+        job.source_kind as (typeof BUILTIN_SEARCH_KINDS)[number],
+      ) &&
       job.producer_fingerprint === 'taproot-builtin-projection-v1'
     )
       return true;
@@ -853,7 +888,9 @@ class SearchMaterializationRuntime {
       const row = byKind.get(kind);
       if (!row || row.state !== 'ready') return true;
       if (
-        (kind === 'item' || kind === 'statement') &&
+        BUILTIN_SEARCH_KINDS.includes(
+          kind as (typeof BUILTIN_SEARCH_KINDS)[number],
+        ) &&
         row.producer_fingerprint === 'taproot-builtin-projection-v1'
       )
         return false;
@@ -886,7 +923,10 @@ class SearchMaterializationRuntime {
         ? await emptyPlan(claim.job, this.#installationId)
         : claim.job.source_kind === 'item'
           ? await this.#loadAndProjectItem(claim.job, maxChunkBytes)
-          : await this.#loadAndProjectExternal(claim.job, maxChunkBytes);
+          : claim.job.source_kind === 'resource' ||
+              claim.job.source_kind === 'annotation'
+            ? await this.#loadAndProjectContent(claim.job, maxChunkBytes)
+            : await this.#loadAndProjectExternal(claim.job, maxChunkBytes);
     if (!plan) {
       await this.#completeSuperseded(claim, 'canonical-state-stale');
       return 'superseded';
@@ -1040,6 +1080,152 @@ class SearchMaterializationRuntime {
       mixedScope: 'partition',
       maxChunkBytes,
     });
+  }
+
+  async #loadAndProjectContent(
+    job: JobRow,
+    maxChunkBytes: number,
+  ): Promise<SearchProjectionPlanV1 | null> {
+    if (job.source_kind !== 'resource' && job.source_kind !== 'annotation')
+      return null;
+    const table =
+      job.source_kind === 'resource'
+        ? 'taproot_resources'
+        : 'taproot_annotations';
+    const result = await this.#db
+      .prepare(
+        `SELECT record_json, revision, policy_revision, visibility_json, deleted_at FROM ${table} WHERE record_id = ? AND installation_id = ?`,
+      )
+      .bind(job.source_id, this.#installationId)
+      .all<{
+        record_json: string;
+        revision: number;
+        policy_revision: number;
+        visibility_json: string;
+        deleted_at: string | null;
+      }>();
+    const row = result.results[0];
+    if (
+      !row ||
+      row.deleted_at !== null ||
+      String(row.revision) !== job.root_revision ||
+      Number(row.policy_revision) !== job.source_policy_revision ||
+      (await canonicalSearchHashV1(JSON.parse(row.record_json))) !==
+        job.root_hash
+    )
+      return null;
+    const record = JSON.parse(row.record_json) as {
+      id: string;
+      title?: string;
+      payload?: {
+        kind: string;
+        text?: string;
+        location?: string;
+        storage?: 'blob' | 'file' | 'url';
+        byteLength?: number;
+      };
+      integrity?: { algorithm: string; digest: string; byteLength: number };
+      mediaType?: string;
+      language?: string;
+      body?: { kind: string; text?: string; resourceId?: string };
+      authorization: { workspaceId: string | null; ownerPrincipalId: string };
+    };
+    let text =
+      job.source_kind === 'resource'
+        ? record.payload?.kind === 'inline-text'
+          ? record.payload.text
+          : (record.title ?? record.payload?.location)
+        : record.body?.kind === 'text'
+          ? record.body.text
+          : undefined;
+    if (
+      job.source_kind === 'resource' &&
+      record.payload?.kind === 'location' &&
+      this.#payloadStore &&
+      isTextualMediaType(record.mediaType ?? 'application/octet-stream')
+    ) {
+      const bytes = await this.#payloadStore.load(
+        record.payload as Parameters<PortableResourcePayloadStoreV1['load']>[0],
+      );
+      if (bytes.byteLength > this.#maxExternalPayloadBytes)
+        throw new Error(
+          'external resource payload exceeds materialization bound',
+        );
+      if (
+        !record.integrity ||
+        record.integrity.algorithm !== 'sha256' ||
+        record.integrity.byteLength !== bytes.byteLength ||
+        (await sha256Bytes(bytes)) !== record.integrity.digest
+      )
+        throw new Error('external resource payload integrity mismatch');
+      text = [
+        record.title,
+        new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
+    if (job.source_kind === 'annotation' && !text && record.body?.resourceId) {
+      const body = await this.#db
+        .prepare(
+          `SELECT record_json FROM taproot_resources WHERE record_id = ? AND installation_id = ? AND deleted_at IS NULL`,
+        )
+        .bind(record.body.resourceId, this.#installationId)
+        .all<{ record_json: string }>();
+      const resource = body.results[0]
+        ? (JSON.parse(body.results[0].record_json) as {
+            payload?: { kind: string; text?: string };
+            title?: string;
+          })
+        : undefined;
+      text =
+        resource?.payload?.kind === 'inline-text'
+          ? resource.payload.text
+          : resource?.title;
+    }
+    if (!text) return null;
+    const source = projectionSource(job, this.#installationId);
+    const authority = createSearchProjectionAuthorizationAuthorityV1(
+      new PersistedEntityAuthorizationSource(this.#db),
+    );
+    const authorization = await createTrustedSearchAuthorizationEnvelopeV1(
+      authority,
+      {
+        version: 1,
+        sourceKind: job.source_kind,
+        sourceId: job.source_id,
+        sourceRevision: job.root_revision,
+        installationId: this.#installationId,
+        workspaceId: record.authorization.workspaceId,
+        ownerPrincipalId: record.authorization.ownerPrincipalId,
+        sourcePolicyRevision: job.source_policy_revision,
+        authorizationRevision: job.authorization_revision,
+        visibility: JSON.parse(row.visibility_json) as VisibilityScopeV1,
+      },
+    );
+    return job.source_kind === 'resource'
+      ? projectResourceForUnifiedSearchV1({
+          source,
+          resourceId: job.source_id,
+          ...(record.title === undefined ? {} : { title: record.title }),
+          text,
+          ...(record.language === undefined
+            ? {}
+            : { language: record.language }),
+          mediaType: record.mediaType ?? 'application/octet-stream',
+          authorization,
+          maxChunkBytes,
+        })
+      : projectAnnotationForUnifiedSearchV1({
+          source,
+          annotationId: job.source_id,
+          text,
+          ...(record.language === undefined
+            ? {}
+            : { language: record.language }),
+          authorization,
+          maxChunkBytes,
+        });
   }
 
   async #persistInvisibleStage(
@@ -1931,6 +2117,25 @@ async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
+}
+
+async function sha256Bytes(value: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(value));
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function isTextualMediaType(value: string): boolean {
+  const mediaType = value.toLowerCase().split(';', 1)[0]!.trim();
+  return (
+    mediaType.startsWith('text/') ||
+    mediaType === 'application/json' ||
+    mediaType.endsWith('+json') ||
+    mediaType === 'application/xml' ||
+    mediaType.endsWith('+xml') ||
+    mediaType === 'application/javascript'
+  );
 }
 
 function allStatements(item: Item) {
