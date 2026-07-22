@@ -1763,9 +1763,11 @@ export class TaprootRepository {
           'Generated audit event id already exists',
           { cause: mapped },
         );
-      if (allocated && isAssertionError(mapped))
+      if (isAssertionError(mapped))
         throw new RevisionConflictError(
-          `ID allocation for ${entity.id} was stale`,
+          allocated
+            ? `ID allocation for ${entity.id} was stale`
+            : `Authorization state changed while creating ${entity.id}`,
           { cause: mapped },
         );
       throw mapped;

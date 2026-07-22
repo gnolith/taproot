@@ -1223,13 +1223,31 @@ export async function inspectTaprootSchema(
   ];
   const triggerRows = await db
     .prepare(
-      `SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'taproot_%'`,
+      `SELECT name, sql FROM sqlite_schema
+       WHERE type = 'trigger' AND name LIKE 'taproot_%'`,
     )
-    .all<{ name: string }>();
+    .all<{ name: string; sql: string | null }>();
   const presentTriggers = new Set(triggerRows.results.map(({ name }) => name));
   const missingTriggers = requiredTriggers.filter(
     (name) => !presentTriggers.has(name),
   );
+  for (const trigger of requiredTriggers) {
+    const actualSql = triggerRows.results.find(
+      ({ name }) => name === trigger,
+    )?.sql;
+    if (actualSql == null) continue;
+    const expectedSql = taprootSchemaStatements.find((sql) =>
+      new RegExp(
+        `^\\s*CREATE\\s+TRIGGER\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${trigger}\\b`,
+        'iu',
+      ).test(sql),
+    );
+    if (
+      expectedSql === undefined ||
+      normalizeCatalogSql(actualSql) !== normalizeCatalogSql(expectedSql)
+    )
+      errors.push(`${trigger} definition does not match the package catalog`);
+  }
   errors.push(
     ...missingColumns.map(
       (name) => `taproot_entity_revisions.${name} is missing`,

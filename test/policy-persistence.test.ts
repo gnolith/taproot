@@ -9,6 +9,7 @@ import {
   AuthorizationDeniedError,
   InvalidAuthorizationError,
   InvalidEntityError,
+  RevisionConflictError,
   PersistedEntityAuthorizationSource,
   SEARCH_ADMIN_CAPABILITY,
   KNOWLEDGE_WRITE_CAPABILITY,
@@ -32,6 +33,7 @@ import {
   applyTaprootAuthorizationBackfill,
   setLabel,
   redirectEntity,
+  replaceEntity,
   restoreEntity,
   revertEntity,
   softDeleteEntity,
@@ -169,6 +171,9 @@ for (const runtime of environments) {
         expect(
           attempts.filter(({ status }) => status === 'rejected'),
         ).toHaveLength(1);
+        const rejection = attempts.find(({ status }) => status === 'rejected');
+        if (rejection?.status === 'rejected')
+          expect(rejection.reason).toBeInstanceOf(RevisionConflictError);
         const counts = await environment.db
           .prepare(
             `SELECT
@@ -680,10 +685,34 @@ for (const runtime of environments) {
           claims: { P1: [statement] },
           authorization: policy(2, publicScope, { [statement.id]: [] }),
         });
+        await createItem(environment.db, options, guard, writeContext(3), {
+          id: 'Q2',
+          authorization: policy(3, workspaceScope),
+        });
         const admin: AuthorizationContext = {
-          ...context(3, 'principal-1', ['workspace-1']),
+          ...context(4, 'principal-1', ['workspace-1']),
           capabilities: [SEARCH_ADMIN_CAPABILITY],
         };
+        await environment.db
+          .prepare(
+            `UPDATE taproot_entity_authorization
+             SET visibility_json = '{"version":1,"clauses":[]}',
+                 effective_visibility_json = '{"version":1,"clauses":[]}'
+             WHERE entity_id = 'Q2'`,
+          )
+          .run();
+        const source = new PersistedEntityAuthorizationSource(environment.db);
+        await expect(source.getEntityAuthorization('Q2')).resolves.toBeNull();
+        const widened = await inspectTaprootAuthorizationReadiness(
+          environment.db,
+          options,
+          environment.capability,
+          admin,
+        );
+        expect(widened.ready).toBe(false);
+        expect(widened.counts.currentHistoryParityMismatches).toBeGreaterThan(
+          0,
+        );
         await environment.db
           .prepare(
             `UPDATE taproot_statement_authorization
@@ -693,9 +722,7 @@ for (const runtime of environments) {
           )
           .run();
         await expect(
-          new PersistedEntityAuthorizationSource(
-            environment.db,
-          ).getStatementAuthorization('Q1', statement.id),
+          source.getStatementAuthorization('Q1', statement.id),
         ).resolves.toBeNull();
         const readiness = await inspectTaprootAuthorizationReadiness(
           environment.db,
@@ -836,6 +863,37 @@ for (const runtime of environments) {
 
         await environment.db.batch([
           environment.db.prepare(
+            `DROP TRIGGER taproot_entity_authorization_revisions_no_replace`,
+          ),
+          environment.db.prepare(
+            `CREATE TRIGGER taproot_entity_authorization_revisions_no_replace
+             BEFORE INSERT ON taproot_entity_authorization_revisions
+             WHEN 0 BEGIN SELECT 1; END`,
+          ),
+        ]);
+        const weakTrigger = await inspectTaprootSchema(environment.db);
+        expect(weakTrigger.valid).toBe(false);
+        expect(weakTrigger.errors).toContain(
+          'taproot_entity_authorization_revisions_no_replace definition does not match the package catalog',
+        );
+        await environment.db.batch([
+          environment.db.prepare(
+            `DROP TRIGGER taproot_entity_authorization_revisions_no_replace`,
+          ),
+          environment.db.prepare(
+            `CREATE TRIGGER taproot_entity_authorization_revisions_no_replace
+             BEFORE INSERT ON taproot_entity_authorization_revisions
+             WHEN EXISTS (
+               SELECT 1 FROM taproot_entity_authorization_revisions
+               WHERE (entity_id = NEW.entity_id AND source_revision = NEW.source_revision)
+                  OR event_id = NEW.event_id
+             )
+             BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions cannot be replaced'); END`,
+          ),
+        ]);
+
+        await environment.db.batch([
+          environment.db.prepare(
             `DROP INDEX taproot_statement_authorization_candidate_idx`,
           ),
           environment.db.prepare(`DROP TABLE taproot_statement_authorization`),
@@ -935,6 +993,50 @@ for (const runtime of environments) {
             )
           ).getEntity('Q1'),
         ).rejects.toBeInstanceOf(AuthorizationDeniedError);
+        await replaceEntity(
+          environment.db,
+          options,
+          guard,
+          writeContext(4, true),
+          'Q1',
+          importedItem('Q1'),
+          {
+            expectedRevision: 2,
+            statementTexts: {},
+            authorization: policy(4, workspaceScope),
+          },
+        );
+        await environment.db.batch([
+          environment.db.prepare(
+            `DROP TRIGGER taproot_entity_authorization_revisions_no_update`,
+          ),
+          environment.db.prepare(
+            `UPDATE taproot_entity_authorization_revisions
+             SET effective_visibility_json = '{"version":1,"clauses":[]}'
+             WHERE entity_id = 'Q1' AND source_revision = 2`,
+          ),
+          environment.db.prepare(
+            `CREATE TRIGGER taproot_entity_authorization_revisions_no_update
+             BEFORE UPDATE ON taproot_entity_authorization_revisions
+             BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions are immutable'); END`,
+          ),
+        ]);
+        await expect(
+          source.getEntityRevisionAuthorization('Q1', 2),
+        ).resolves.toBeNull();
+        const corruptedHistory = await inspectTaprootAuthorizationReadiness(
+          environment.db,
+          options,
+          environment.capability,
+          {
+            ...context(5, 'principal-1', ['workspace-1']),
+            capabilities: [SEARCH_ADMIN_CAPABILITY],
+          },
+        );
+        expect(corruptedHistory.ready).toBe(false);
+        expect(corruptedHistory.counts.entityPolicyMismatches).toBeGreaterThan(
+          0,
+        );
       } finally {
         await environment.close();
       }

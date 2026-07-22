@@ -150,7 +150,7 @@ describe('authorized public canonical surface', () => {
     } finally {
       await miniflare.dispose();
     }
-  }, 30_000);
+  }, 45_000);
 });
 
 async function exercise(

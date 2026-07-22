@@ -1,5 +1,9 @@
 # Operations
 
+Migration compatibility is defined from released Taproot catalogs only.
+Databases created by unmerged draft branches or intermediate pull-request
+heads are development artifacts and are not supported upgrade predecessors.
+
 ## Initialize and migrate
 
 Run `initializeTaproot(db, { baseIri })` before using a new database. The

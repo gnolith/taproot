@@ -1076,6 +1076,18 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
                 p.visibility_json AS declared_visibility_json,
                 p.workspace_id, p.owner_principal_id, p.source_revision
          FROM taproot_entity_authorization p
+         JOIN taproot_entity_authorization_revisions history
+           ON history.entity_id = p.entity_id
+          AND history.source_revision = p.source_revision
+          AND history.installation_id IS p.installation_id
+          AND history.workspace_id IS p.workspace_id
+          AND history.owner_principal_id IS p.owner_principal_id
+          AND history.visibility_json IS p.visibility_json
+          AND history.effective_visibility_json IS p.effective_visibility_json
+          AND history.authorization_revision IS p.authorization_revision
+          AND history.deleted_at IS p.deleted_at
+          AND history.event_id IS p.event_id
+          AND history.created_at IS p.updated_at
          JOIN taproot_entities e ON e.entity_id = p.entity_id
            AND e.revision = p.source_revision
          JOIN taproot_installation_authorization state ON state.singleton = 1
@@ -1103,11 +1115,20 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
     if (!declared || !effective) return null;
     const statements = await this.#db
       .prepare(
-        `SELECT restrictions_json, effective_visibility_json,
-                authorization_revision
+        `SELECT taproot_statement_authorization.restrictions_json,
+                taproot_statement_authorization.effective_visibility_json,
+                taproot_statement_authorization.authorization_revision
          FROM taproot_statement_authorization
-         WHERE entity_id = ? AND source_revision = ?
-         ORDER BY statement_id`,
+         JOIN taproot_statement_authorization_revisions history
+           ON history.entity_id = taproot_statement_authorization.entity_id
+          AND history.source_revision = taproot_statement_authorization.source_revision
+          AND history.statement_id = taproot_statement_authorization.statement_id
+          AND history.restrictions_json IS taproot_statement_authorization.restrictions_json
+          AND history.effective_visibility_json IS taproot_statement_authorization.effective_visibility_json
+          AND history.authorization_revision IS taproot_statement_authorization.authorization_revision
+         WHERE taproot_statement_authorization.entity_id = ?
+           AND taproot_statement_authorization.source_revision = ?
+         ORDER BY taproot_statement_authorization.statement_id`,
       )
       .bind(entityId, row.source_revision)
       .all<{
@@ -1156,37 +1177,26 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
     entityId: EntityId,
     revisionNumber: number,
   ): Promise<CanonicalAuthorizationRecord | null> {
+    const current = await this.getEntityAuthorization(entityId);
+    if (!current) return null;
     const result = await this.#db
       .prepare(
-        `SELECT current.installation_id,
-                MAX(current.authorization_revision, history.authorization_revision)
-                  AS authorization_revision,
-                current.effective_visibility_json AS current_visibility_json,
-                current.visibility_json AS current_declared_visibility_json,
+        `SELECT history.installation_id, history.authorization_revision,
                 history.effective_visibility_json AS historical_visibility_json,
                 history.visibility_json AS historical_declared_visibility_json,
                 history.workspace_id, history.owner_principal_id,
                 history.source_revision
          FROM taproot_entity_authorization_revisions history
-         JOIN taproot_entity_authorization current
-           ON current.entity_id = history.entity_id
-          AND current.installation_id = history.installation_id
-         JOIN taproot_entities entity
-           ON entity.entity_id = current.entity_id
-          AND entity.revision = current.source_revision
          JOIN taproot_installation_authorization state ON state.singleton = 1
-           AND state.installation_id = current.installation_id
-           AND current.authorization_revision BETWEEN 1 AND state.authorization_revision
+           AND state.installation_id = history.installation_id
            AND history.authorization_revision BETWEEN 1 AND state.authorization_revision
          WHERE history.entity_id = ? AND history.source_revision = ?
-           AND current.deleted_at IS NULL AND entity.deleted_at IS NULL`,
+           AND history.deleted_at IS NULL`,
       )
       .bind(entityId, revisionNumber)
       .all<{
         installation_id: string;
         authorization_revision: number;
-        current_visibility_json: string;
-        current_declared_visibility_json: string;
         historical_visibility_json: string;
         historical_declared_visibility_json: string;
         workspace_id: string | null;
@@ -1194,21 +1204,108 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
         source_revision: number;
       }>();
     const row = result.results[0];
+    if (!row || row.installation_id !== current.installationId) return null;
+    const declared = parseCanonicalVisibilityScope(
+      row.historical_declared_visibility_json,
+    );
+    const effective = parseCanonicalVisibilityScope(
+      row.historical_visibility_json,
+    );
+    if (!declared || !effective) return null;
+    const coverage = await this.#db
+      .prepare(
+        `WITH expected(statement_id) AS (
+           SELECT json_extract(statement.value, '$.id')
+           FROM taproot_entity_revisions revision,
+             json_each(revision.entity_json, '$.claims') claim,
+             json_each(claim.value) statement
+           WHERE revision.entity_id = ? AND revision.revision = ?
+         )
+         SELECT
+           (SELECT COUNT(*) FROM expected) AS expected_count,
+           (SELECT COUNT(*) FROM taproot_statement_authorization_revisions policy
+             WHERE policy.entity_id = ? AND policy.source_revision = ?) AS actual_count,
+           (SELECT COUNT(*) FROM expected WHERE NOT EXISTS (
+             SELECT 1 FROM taproot_statement_authorization_revisions policy
+             WHERE policy.entity_id = ? AND policy.source_revision = ?
+               AND policy.statement_id = expected.statement_id
+           )) AS missing_count`,
+      )
+      .bind(
+        entityId,
+        revisionNumber,
+        entityId,
+        revisionNumber,
+        entityId,
+        revisionNumber,
+      )
+      .all<{
+        expected_count: number;
+        actual_count: number;
+        missing_count: number;
+      }>();
+    const coverageRow = coverage.results[0];
     if (
-      !row ||
-      !parseCanonicalVisibilityScope(row.current_visibility_json) ||
-      !parseCanonicalVisibilityScope(row.current_declared_visibility_json) ||
-      !parseCanonicalVisibilityScope(row.historical_visibility_json) ||
-      !parseCanonicalVisibilityScope(row.historical_declared_visibility_json)
+      !coverageRow ||
+      Number(coverageRow.expected_count) !== Number(coverageRow.actual_count) ||
+      Number(coverageRow.missing_count) !== 0
+    )
+      return null;
+    const statements = await this.#db
+      .prepare(
+        `SELECT restrictions_json, effective_visibility_json,
+                authorization_revision
+         FROM taproot_statement_authorization_revisions
+         WHERE entity_id = ? AND source_revision = ?
+         ORDER BY statement_id`,
+      )
+      .bind(entityId, revisionNumber)
+      .all<{
+        restrictions_json: string;
+        effective_visibility_json: string;
+        authorization_revision: number;
+      }>();
+    let expectedEffective = declared;
+    for (const statement of statements.results) {
+      const restrictions = parseCanonicalVisibilityRestrictions(
+        statement.restrictions_json,
+      );
+      const statementEffective = parseCanonicalVisibilityScope(
+        statement.effective_visibility_json,
+      );
+      if (
+        !restrictions ||
+        !statementEffective ||
+        Number(statement.authorization_revision) !==
+          Number(row.authorization_revision)
+      )
+        return null;
+      const expectedStatement = intersectVisibilityScopes(
+        declared,
+        ...restrictions,
+      );
+      if (
+        serializeVisibilityScope(statementEffective) !==
+        serializeVisibilityScope(expectedStatement)
+      )
+        return null;
+      expectedEffective = intersectVisibilityScopes(
+        expectedEffective,
+        expectedStatement,
+      );
+    }
+    if (
+      serializeVisibilityScope(effective) !==
+      serializeVisibilityScope(expectedEffective)
     )
       return null;
     return {
       installationId: row.installation_id,
-      authorizationRevision: Number(row.authorization_revision),
-      visibility: intersectVisibilityScopes(
-        JSON.parse(row.current_visibility_json) as VisibilityScopeV1,
-        JSON.parse(row.historical_visibility_json) as VisibilityScopeV1,
+      authorizationRevision: Math.max(
+        current.authorizationRevision,
+        Number(row.authorization_revision),
       ),
+      visibility: intersectVisibilityScopes(current.visibility, effective),
       workspaceId: row.workspace_id,
       ownerPrincipalId: row.owner_principal_id,
       sourceRevision: Number(row.source_revision),
@@ -1228,8 +1325,27 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
                 p.authorization_revision AS parent_authorization_revision,
                 p.workspace_id, p.owner_principal_id, s.source_revision
          FROM taproot_statement_authorization s
+         JOIN taproot_statement_authorization_revisions history
+           ON history.entity_id = s.entity_id
+          AND history.source_revision = s.source_revision
+          AND history.statement_id = s.statement_id
+          AND history.restrictions_json IS s.restrictions_json
+          AND history.effective_visibility_json IS s.effective_visibility_json
+          AND history.authorization_revision IS s.authorization_revision
          JOIN taproot_entity_authorization p ON p.entity_id = s.entity_id
             AND p.source_revision = s.source_revision
+         JOIN taproot_entity_authorization_revisions parent_history
+           ON parent_history.entity_id = p.entity_id
+          AND parent_history.source_revision = p.source_revision
+          AND parent_history.installation_id IS p.installation_id
+          AND parent_history.workspace_id IS p.workspace_id
+          AND parent_history.owner_principal_id IS p.owner_principal_id
+          AND parent_history.visibility_json IS p.visibility_json
+          AND parent_history.effective_visibility_json IS p.effective_visibility_json
+          AND parent_history.authorization_revision IS p.authorization_revision
+          AND parent_history.deleted_at IS p.deleted_at
+          AND parent_history.event_id IS p.event_id
+          AND parent_history.created_at IS p.updated_at
          JOIN taproot_entities e ON e.entity_id = s.entity_id
             AND e.revision = s.source_revision
          JOIN taproot_installation_authorization state ON state.singleton = 1

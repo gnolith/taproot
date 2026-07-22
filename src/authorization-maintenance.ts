@@ -55,6 +55,7 @@ export interface AuthorizationReadinessInspection {
     revisionPolicyMismatches: number;
     entityPolicyMismatches: number;
     statementPolicyMismatches: number;
+    currentHistoryParityMismatches: number;
   };
   ready: boolean;
   issues: AuthorizationReadinessIssue[];
@@ -201,12 +202,38 @@ export async function inspectAuthorizationReadiness(
            SELECT 1 FROM expected_history e
            WHERE e.entity_id = p.entity_id AND e.revision = p.source_revision
              AND e.statement_id = p.statement_id
-         )) AS statement_policy_mismatches`,
+         )) AS statement_policy_mismatches,
+         (SELECT COUNT(*) FROM taproot_entity_authorization current
+          WHERE NOT EXISTS (
+            SELECT 1 FROM taproot_entity_authorization_revisions history
+            WHERE history.entity_id = current.entity_id
+              AND history.source_revision = current.source_revision
+              AND history.installation_id IS current.installation_id
+              AND history.workspace_id IS current.workspace_id
+              AND history.owner_principal_id IS current.owner_principal_id
+              AND history.visibility_json IS current.visibility_json
+              AND history.effective_visibility_json IS current.effective_visibility_json
+              AND history.authorization_revision IS current.authorization_revision
+              AND history.deleted_at IS current.deleted_at
+              AND history.event_id IS current.event_id
+              AND history.created_at IS current.updated_at
+          )) +
+         (SELECT COUNT(*) FROM taproot_statement_authorization current
+          WHERE NOT EXISTS (
+            SELECT 1 FROM taproot_statement_authorization_revisions history
+            WHERE history.entity_id = current.entity_id
+              AND history.source_revision = current.source_revision
+              AND history.statement_id = current.statement_id
+              AND history.restrictions_json IS current.restrictions_json
+              AND history.effective_visibility_json IS current.effective_visibility_json
+              AND history.authorization_revision IS current.authorization_revision
+          )) AS current_history_parity_mismatches`,
     )
     .bind(context.installationId, context.authorizationRevision)
     .all<{
       revision_policy_mismatches: number;
       statement_policy_mismatches: number;
+      current_history_parity_mismatches: number;
     }>();
   const integrityCount = integrity.results[0]!;
   const payloadMismatches = await policyPayloadMismatchCounts(db, state);
@@ -244,13 +271,17 @@ export async function inspectAuthorizationReadiness(
       statementPolicyMismatches:
         Number(integrityCount.statement_policy_mismatches) +
         payloadMismatches.statement,
+      currentHistoryParityMismatches: Number(
+        integrityCount.current_history_parity_mismatches,
+      ),
     },
     ready:
       Number(count.quarantined_entities) === 0 &&
       Number(integrityCount.revision_policy_mismatches) === 0 &&
       payloadMismatches.entity === 0 &&
       Number(integrityCount.statement_policy_mismatches) === 0 &&
-      payloadMismatches.statement === 0,
+      payloadMismatches.statement === 0 &&
+      Number(integrityCount.current_history_parity_mismatches) === 0,
     issues,
     cursor:
       page.results.length > limit
@@ -958,6 +989,47 @@ async function readinessCodes(
     codes.push('entity-policy-mismatch');
   if (
     payloadMismatch.statement > 0 &&
+    !codes.includes('statement-policy-mismatch')
+  )
+    codes.push('statement-policy-mismatch');
+  const parity = await db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM taproot_entity_authorization current
+          WHERE current.entity_id = ? AND NOT EXISTS (
+            SELECT 1 FROM taproot_entity_authorization_revisions history
+            WHERE history.entity_id = current.entity_id
+              AND history.source_revision = current.source_revision
+              AND history.installation_id IS current.installation_id
+              AND history.workspace_id IS current.workspace_id
+              AND history.owner_principal_id IS current.owner_principal_id
+              AND history.visibility_json IS current.visibility_json
+              AND history.effective_visibility_json IS current.effective_visibility_json
+              AND history.authorization_revision IS current.authorization_revision
+              AND history.deleted_at IS current.deleted_at
+              AND history.event_id IS current.event_id
+              AND history.created_at IS current.updated_at
+          )) AS entity_count,
+         (SELECT COUNT(*) FROM taproot_statement_authorization current
+          WHERE current.entity_id = ? AND NOT EXISTS (
+            SELECT 1 FROM taproot_statement_authorization_revisions history
+            WHERE history.entity_id = current.entity_id
+              AND history.source_revision = current.source_revision
+              AND history.statement_id = current.statement_id
+              AND history.restrictions_json IS current.restrictions_json
+              AND history.effective_visibility_json IS current.effective_visibility_json
+              AND history.authorization_revision IS current.authorization_revision
+          )) AS statement_count`,
+    )
+    .bind(entityId, entityId)
+    .all<{ entity_count: number; statement_count: number }>();
+  if (
+    Number(parity.results[0]?.entity_count ?? 0) > 0 &&
+    !codes.includes('entity-policy-mismatch')
+  )
+    codes.push('entity-policy-mismatch');
+  if (
+    Number(parity.results[0]?.statement_count ?? 0) > 0 &&
     !codes.includes('statement-policy-mismatch')
   )
     codes.push('statement-policy-mismatch');

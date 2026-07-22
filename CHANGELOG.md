@@ -40,6 +40,10 @@
   without borrowing Knowledge authority or advancing counters; Knowledge
   advances require orthogonal policy authority and bind the prior durable
   advance ID.
+- Authorization readiness and persisted sources now require exact parity
+  between mutable current policy and its immutable matching revision, and
+  recompute historical statement coverage/effective visibility before use.
+  Operational inspection also validates exact trigger definitions.
 
 - Added required, explicitly authored nonblank `Statement.text` to canonical
   JSON and to every logical statement mutation.
