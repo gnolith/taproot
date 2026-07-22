@@ -6,6 +6,7 @@ import {
   intersectVisibilityScopes,
   normalizeAuthorizationContext,
   normalizeCanonicalAuthorizationPolicy,
+  normalizeVisibilityScope,
   requireSearchAdministration,
   serializeVisibilityScope,
 } from './authorization.js';
@@ -31,6 +32,7 @@ export type AuthorizationReadinessCode =
   | 'current-revision-mismatch'
   | 'cross-installation-policy'
   | 'authorization-revision-invalid'
+  | 'entity-policy-mismatch'
   | 'missing-revision-policy'
   | 'statement-policy-mismatch';
 
@@ -51,6 +53,7 @@ export interface AuthorizationReadinessInspection {
     revisionPolicies: number;
     quarantinedEntities: number;
     revisionPolicyMismatches: number;
+    entityPolicyMismatches: number;
     statementPolicyMismatches: number;
   };
   ready: boolean;
@@ -140,7 +143,7 @@ export async function inspectAuthorizationReadiness(
            SELECT 1 FROM taproot_entity_authorization p
            WHERE p.entity_id = e.entity_id AND p.source_revision = e.revision
              AND p.installation_id = ?
-             AND p.authorization_revision <= ?
+             AND p.authorization_revision BETWEEN 1 AND ?
          )) AS quarantined_entities`,
     )
     .bind(context.installationId, context.authorizationRevision)
@@ -206,6 +209,7 @@ export async function inspectAuthorizationReadiness(
       statement_policy_mismatches: number;
     }>();
   const integrityCount = integrity.results[0]!;
+  const payloadMismatches = await policyPayloadMismatchCounts(db, state);
   const page = await db
     .prepare(
       `SELECT entity_id, revision FROM taproot_entities
@@ -236,20 +240,177 @@ export async function inspectAuthorizationReadiness(
       revisionPolicyMismatches: Number(
         integrityCount.revision_policy_mismatches,
       ),
-      statementPolicyMismatches: Number(
-        integrityCount.statement_policy_mismatches,
-      ),
+      entityPolicyMismatches: payloadMismatches.entity,
+      statementPolicyMismatches:
+        Number(integrityCount.statement_policy_mismatches) +
+        payloadMismatches.statement,
     },
     ready:
       Number(count.quarantined_entities) === 0 &&
       Number(integrityCount.revision_policy_mismatches) === 0 &&
-      Number(integrityCount.statement_policy_mismatches) === 0,
+      payloadMismatches.entity === 0 &&
+      Number(integrityCount.statement_policy_mismatches) === 0 &&
+      payloadMismatches.statement === 0,
     issues,
     cursor:
       page.results.length > limit
         ? (page.results[limit - 1]?.entity_id ?? null)
         : null,
   };
+}
+
+async function policyPayloadMismatchCounts(
+  db: SqliteDatabaseLike,
+  state: InstallationRow,
+  onlyEntityId?: EntityId,
+): Promise<{ entity: number; statement: number }> {
+  const entityRows = await db
+    .prepare(
+      `SELECT 'current' AS row_kind, entity_id, source_revision,
+              installation_id, authorization_revision,
+              visibility_json, effective_visibility_json
+       FROM taproot_entity_authorization
+       UNION ALL
+       SELECT 'history' AS row_kind, entity_id, source_revision,
+              installation_id, authorization_revision,
+              visibility_json, effective_visibility_json
+       FROM taproot_entity_authorization_revisions`,
+    )
+    .all<{
+      row_kind: 'current' | 'history';
+      entity_id: EntityId;
+      source_revision: number;
+      installation_id: string;
+      authorization_revision: number;
+      visibility_json: string;
+      effective_visibility_json: string;
+    }>();
+  const entities = new Map<
+    string,
+    {
+      declared: VisibilityScopeV1 | null;
+      effective: VisibilityScopeV1 | null;
+      expected: VisibilityScopeV1 | null;
+      invalid: boolean;
+    }
+  >();
+  for (const row of entityRows.results) {
+    if (onlyEntityId !== undefined && row.entity_id !== onlyEntityId) continue;
+    const key = `${row.row_kind}:${row.entity_id}:${row.source_revision}`;
+    try {
+      const declared = normalizeVisibilityScope(
+        JSON.parse(row.visibility_json) as VisibilityScopeV1,
+      );
+      const effective = normalizeVisibilityScope(
+        JSON.parse(row.effective_visibility_json) as VisibilityScopeV1,
+      );
+      const invalid =
+        row.installation_id !== state.installation_id ||
+        Number(row.authorization_revision) < 1 ||
+        Number(row.authorization_revision) >
+          Number(state.authorization_revision) ||
+        serializeVisibilityScope(declared) !== row.visibility_json ||
+        serializeVisibilityScope(effective) !== row.effective_visibility_json;
+      entities.set(key, {
+        declared,
+        effective,
+        expected: declared,
+        invalid,
+      });
+    } catch {
+      entities.set(key, {
+        declared: null,
+        effective: null,
+        expected: null,
+        invalid: true,
+      });
+    }
+  }
+
+  const statementRows = await db
+    .prepare(
+      `SELECT 'current' AS row_kind, s.entity_id, s.source_revision,
+              s.authorization_revision, s.restrictions_json,
+              s.effective_visibility_json,
+              p.authorization_revision AS parent_authorization_revision,
+              p.visibility_json AS parent_visibility_json
+       FROM taproot_statement_authorization s
+       JOIN taproot_entity_authorization p
+         ON p.entity_id = s.entity_id AND p.source_revision = s.source_revision
+       UNION ALL
+       SELECT 'history' AS row_kind, s.entity_id, s.source_revision,
+              s.authorization_revision, s.restrictions_json,
+              s.effective_visibility_json,
+              p.authorization_revision AS parent_authorization_revision,
+              p.visibility_json AS parent_visibility_json
+       FROM taproot_statement_authorization_revisions s
+       JOIN taproot_entity_authorization_revisions p
+         ON p.entity_id = s.entity_id AND p.source_revision = s.source_revision`,
+    )
+    .all<{
+      row_kind: 'current' | 'history';
+      entity_id: EntityId;
+      source_revision: number;
+      authorization_revision: number;
+      restrictions_json: string;
+      effective_visibility_json: string;
+      parent_authorization_revision: number;
+      parent_visibility_json: string;
+    }>();
+  let statement = 0;
+  for (const row of statementRows.results) {
+    if (onlyEntityId !== undefined && row.entity_id !== onlyEntityId) continue;
+    try {
+      const parent = normalizeVisibilityScope(
+        JSON.parse(row.parent_visibility_json) as VisibilityScopeV1,
+      );
+      const rawRestrictions = JSON.parse(row.restrictions_json) as unknown;
+      if (!Array.isArray(rawRestrictions)) throw new Error('invalid');
+      const restrictions = rawRestrictions.map((scope) =>
+        normalizeVisibilityScope(scope as VisibilityScopeV1),
+      );
+      const effective = normalizeVisibilityScope(
+        JSON.parse(row.effective_visibility_json) as VisibilityScopeV1,
+      );
+      const expectedStatement = intersectVisibilityScopes(
+        parent,
+        ...restrictions,
+      );
+      const invalid =
+        Number(row.authorization_revision) < 1 ||
+        Number(row.authorization_revision) >
+          Number(state.authorization_revision) ||
+        Number(row.authorization_revision) !==
+          Number(row.parent_authorization_revision) ||
+        JSON.stringify(restrictions) !== row.restrictions_json ||
+        serializeVisibilityScope(effective) !== row.effective_visibility_json ||
+        serializeVisibilityScope(effective) !==
+          serializeVisibilityScope(expectedStatement);
+      if (invalid) statement += 1;
+      const entityPolicy = entities.get(
+        `${row.row_kind}:${row.entity_id}:${row.source_revision}`,
+      );
+      if (entityPolicy?.expected)
+        entityPolicy.expected = intersectVisibilityScopes(
+          entityPolicy.expected,
+          expectedStatement,
+        );
+    } catch {
+      statement += 1;
+    }
+  }
+  let entity = 0;
+  for (const policy of entities.values()) {
+    if (
+      policy.invalid ||
+      !policy.effective ||
+      !policy.expected ||
+      serializeVisibilityScope(policy.effective) !==
+        serializeVisibilityScope(policy.expected)
+    )
+      entity += 1;
+  }
+  return { entity, statement };
 }
 
 export async function planAuthorizationBackfill(
@@ -512,7 +673,8 @@ export async function applyAuthorizationBackfill(
         `UPDATE taproot_installation_authorization
          SET authorization_revision = ?, search_generation = ?, last_advance_id = ?, updated_at = ?
          WHERE singleton = 1 AND installation_id = ?
-           AND authorization_revision = ? AND search_generation = ?`,
+           AND authorization_revision = ? AND search_generation = ?
+           AND last_advance_id = ?`,
       )
       .bind(
         newAuthorizationRevision,
@@ -522,6 +684,7 @@ export async function applyAuthorizationBackfill(
         context.installationId,
         context.authorizationRevision,
         state.search_generation,
+        state.last_advance_id,
       ),
     assertion(
       db,
@@ -785,6 +948,18 @@ async function readinessCodes(
     .bind(entityId, entityId, entityId, entityId)
     .all<{ count: number }>();
   if (Number(statementMismatch.results[0]?.count ?? 0) !== 0)
+    codes.push('statement-policy-mismatch');
+  const payloadMismatch = await policyPayloadMismatchCounts(
+    db,
+    state,
+    entityId,
+  );
+  if (payloadMismatch.entity > 0 && !codes.includes('entity-policy-mismatch'))
+    codes.push('entity-policy-mismatch');
+  if (
+    payloadMismatch.statement > 0 &&
+    !codes.includes('statement-policy-mismatch')
+  )
     codes.push('statement-policy-mismatch');
   return codes;
 }

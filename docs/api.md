@@ -85,6 +85,11 @@ guard, or authorization context to request, user, agent, or MCP code.
 The guard can also execute an ordered cross-package database batch behind an
 exact-revision fence or an inseparable authorization advance. It never returns
 raw fence or advance statements to the caller.
+`createInstallationDomainMutationGuard` issues a separate fence-only opaque
+guard bound at host assembly to one exact non-Knowledge domain and capability.
+Its batches return only the domain-statement results plus the fenced counters;
+they do not advance either counter. Knowledge advances require both
+`knowledge:write` and `knowledge:policy`.
 `inspectTaprootAuthorizationReadiness`,
 `planTaprootAuthorizationBackfill`, and
 `applyTaprootAuthorizationBackfill` are host-controlled, exact

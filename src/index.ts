@@ -7,6 +7,7 @@ import { InvalidAuthorizationError } from './errors.js';
 import { canonicalizeTaprootBaseIri } from './migrations.js';
 import {
   KNOWLEDGE_WRITE_CAPABILITY,
+  KNOWLEDGE_POLICY_CAPABILITY,
   normalizeAuthorizationContext,
   type InstallationAuthorizationState,
 } from './authorization.js';
@@ -113,7 +114,7 @@ export interface InstallationAuthorizationGuard {
   ): Promise<readonly SqliteResultLike[]>;
   batchWithAuthorizationAdvance(
     context: AuthorizationContext,
-    audit: { advanceId: string; domain: string; reason: string },
+    audit: { advanceId: string; reason: string },
     statements: readonly SqlitePreparedStatementLike[],
   ): Promise<{
     authorizationRevision: number;
@@ -122,16 +123,44 @@ export interface InstallationAuthorizationGuard {
   }>;
 }
 
+export interface InstallationDomainMutationGuard {
+  readonly kind: 'taproot-installation-domain-mutation-guard-v1';
+  readCurrentState(): Promise<InstallationAuthorizationState>;
+  batchWithExpectedRevision(
+    context: AuthorizationContext,
+    statements: readonly SqlitePreparedStatementLike[],
+  ): Promise<{
+    authorizationRevision: number;
+    searchGeneration: number;
+    results: readonly SqliteResultLike[];
+  }>;
+}
+
+export interface InstallationDomainMutationBinding {
+  domain: string;
+  capability: string;
+}
+
 interface InstallationGuardBinding {
   db: D1DatabaseLike;
   baseIri: string;
   installationId: string;
   clock: () => Date;
+  domain: string;
 }
 
 const installationAuthorizationGuards = new WeakMap<
   object,
   InstallationGuardBinding
+>();
+
+interface DomainGuardBinding extends InstallationGuardBinding {
+  capability: string;
+}
+
+const installationDomainMutationGuards = new WeakMap<
+  object,
+  DomainGuardBinding
 >();
 
 interface InternalInstallationAuthorizationState extends InstallationAuthorizationState {
@@ -273,49 +302,59 @@ async function readGuardState(
 async function prepareGuardFence(
   binding: InstallationGuardBinding,
   rawContext: AuthorizationContext,
-): Promise<SqlitePreparedStatementLike> {
+  requiredCapabilities: readonly string[],
+): Promise<{
+  state: InternalInstallationAuthorizationState;
+  statement: SqlitePreparedStatementLike;
+}> {
   const context = normalizeAuthorizationContext(rawContext);
   const state = await readGuardState(binding);
   if (
     context.installationId !== state.installationId ||
     context.authorizationRevision !== state.authorizationRevision ||
-    !context.capabilities.includes(KNOWLEDGE_WRITE_CAPABILITY)
+    !requiredCapabilities.every((required) =>
+      context.capabilities.includes(required),
+    )
   )
     throw new InvalidAuthorizationError('installation authorization denied');
-  return binding.db
-    .prepare(
-      `INSERT INTO taproot_assertions(assertion_key)
+  return {
+    state,
+    statement: binding.db
+      .prepare(
+        `INSERT INTO taproot_assertions(assertion_key)
        SELECT NULL WHERE NOT EXISTS (
          SELECT 1 FROM taproot_installation_authorization
           WHERE singleton = 1 AND installation_id = ?
             AND authorization_revision = ? AND search_generation = ?
             AND last_advance_id = ?
        )`,
-    )
-    .bind(
-      state.installationId,
-      state.authorizationRevision,
-      state.searchGeneration,
-      state.lastAdvanceId,
-    );
+      )
+      .bind(
+        state.installationId,
+        state.authorizationRevision,
+        state.searchGeneration,
+        state.lastAdvanceId,
+      ),
+  };
 }
 
 async function prepareGuardAdvance(
   binding: InstallationGuardBinding,
   rawContext: AuthorizationContext,
-  audit: { advanceId: string; domain: string; reason: string },
+  audit: { advanceId: string; reason: string },
 ) {
   const context = normalizeAuthorizationContext(rawContext);
   const state = await readGuardState(binding);
   if (
     context.installationId !== state.installationId ||
     context.authorizationRevision !== state.authorizationRevision ||
-    !context.capabilities.includes(KNOWLEDGE_WRITE_CAPABILITY)
+    !context.capabilities.includes(KNOWLEDGE_WRITE_CAPABILITY) ||
+    !context.capabilities.includes(KNOWLEDGE_POLICY_CAPABILITY)
   )
     throw new InvalidAuthorizationError('installation authorization denied');
   for (const [field, value, maximum] of [
     ['advanceId', audit.advanceId, 128],
-    ['domain', audit.domain, 64],
+    ['domain', binding.domain, 64],
     ['reason', audit.reason, 512],
   ] as const) {
     if (
@@ -339,7 +378,8 @@ async function prepareGuardAdvance(
         `UPDATE taproot_installation_authorization
          SET authorization_revision = ?, search_generation = ?, last_advance_id = ?, updated_at = ?
          WHERE singleton = 1 AND installation_id = ?
-           AND authorization_revision = ? AND search_generation = ?`,
+           AND authorization_revision = ? AND search_generation = ?
+           AND last_advance_id = ?`,
       )
       .bind(
         authorizationRevision,
@@ -349,6 +389,7 @@ async function prepareGuardAdvance(
         state.installationId,
         state.authorizationRevision,
         state.searchGeneration,
+        state.lastAdvanceId,
       ),
     binding.db
       .prepare(
@@ -379,13 +420,48 @@ async function prepareGuardAdvance(
         state.authorizationRevision,
         authorizationRevision,
         searchGeneration,
-        audit.domain,
+        binding.domain,
         context.principalId,
         audit.reason,
         createdAt,
       ),
   ]);
   return { authorizationRevision, searchGeneration, statements };
+}
+
+function normalizeDomainGuardBinding(
+  raw: InstallationDomainMutationBinding,
+): InstallationDomainMutationBinding {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+    throw new InvalidAuthorizationError('domain guard binding is invalid');
+  const keys = Object.keys(raw).sort();
+  if (JSON.stringify(keys) !== JSON.stringify(['capability', 'domain']))
+    throw new InvalidAuthorizationError('domain guard binding is invalid');
+  for (const [field, value, maximum] of [
+    ['domain', raw.domain, 64],
+    ['capability', raw.capability, 128],
+  ] as const) {
+    if (
+      typeof value !== 'string' ||
+      value !== value.normalize('NFC') ||
+      value !== value.trim() ||
+      value.length < 1 ||
+      value.length > maximum ||
+      [...value].some((character) => {
+        const code = character.charCodeAt(0);
+        return code <= 0x1f || code === 0x7f;
+      })
+    )
+      throw new InvalidAuthorizationError(`${field} is invalid`);
+  }
+  if (
+    raw.capability === KNOWLEDGE_WRITE_CAPABILITY ||
+    raw.capability === KNOWLEDGE_POLICY_CAPABILITY
+  )
+    throw new InvalidAuthorizationError(
+      'knowledge capabilities require the knowledge authorization guard',
+    );
+  return Object.freeze({ domain: raw.domain, capability: raw.capability });
 }
 
 function validateGuardDomainStatements(
@@ -437,6 +513,7 @@ export async function createInstallationAuthorizationGuard(
     baseIri: canonicalizeTaprootBaseIri(options.baseIri),
     installationId: state.installationId,
     clock: options.clock ?? (() => new Date()),
+    domain: 'knowledge',
   };
   const guard: InstallationAuthorizationGuard = Object.freeze({
     kind: 'taproot-installation-authorization-guard-v1' as const,
@@ -446,14 +523,14 @@ export async function createInstallationAuthorizationGuard(
       statements: readonly SqlitePreparedStatementLike[],
     ) => {
       validateGuardDomainStatements(statements);
-      return binding.db.batch([
-        ...statements,
-        await prepareGuardFence(binding, context),
+      const fence = await prepareGuardFence(binding, context, [
+        KNOWLEDGE_WRITE_CAPABILITY,
       ]);
+      return binding.db.batch([...statements, fence.statement]);
     },
     batchWithAuthorizationAdvance: async (
       context: AuthorizationContext,
-      audit: { advanceId: string; domain: string; reason: string },
+      audit: { advanceId: string; reason: string },
       domainStatements: readonly SqlitePreparedStatementLike[],
     ) => {
       validateGuardDomainStatements(domainStatements);
@@ -470,6 +547,47 @@ export async function createInstallationAuthorizationGuard(
     },
   });
   installationAuthorizationGuards.set(guard, binding);
+  return guard;
+}
+
+/** Assembly issues a fence-only guard bound to one exact non-Knowledge domain. */
+export async function createInstallationDomainMutationGuard(
+  db: D1DatabaseLike,
+  options: TaprootWriteOptions,
+  hostCapability: TaprootHostWriteCapability,
+  rawBinding: InstallationDomainMutationBinding,
+): Promise<InstallationDomainMutationGuard> {
+  repository(db, options, hostCapability);
+  const requested = normalizeDomainGuardBinding(rawBinding);
+  const state = await readInstallationAuthorizationState(db);
+  const binding: DomainGuardBinding = {
+    db,
+    baseIri: canonicalizeTaprootBaseIri(options.baseIri),
+    installationId: state.installationId,
+    clock: options.clock ?? (() => new Date()),
+    domain: requested.domain,
+    capability: requested.capability,
+  };
+  const guard: InstallationDomainMutationGuard = Object.freeze({
+    kind: 'taproot-installation-domain-mutation-guard-v1' as const,
+    readCurrentState: () => readGuardState(binding),
+    batchWithExpectedRevision: async (
+      context: AuthorizationContext,
+      statements: readonly SqlitePreparedStatementLike[],
+    ) => {
+      validateGuardDomainStatements(statements);
+      const fence = await prepareGuardFence(binding, context, [
+        binding.capability,
+      ]);
+      const results = await binding.db.batch([...statements, fence.statement]);
+      return {
+        authorizationRevision: fence.state.authorizationRevision,
+        searchGeneration: fence.state.searchGeneration,
+        results: results.slice(0, statements.length),
+      };
+    },
+  });
+  installationDomainMutationGuards.set(guard, binding);
   return guard;
 }
 

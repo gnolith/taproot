@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
-import type { D1DatabaseLike } from '@gnolith/diamond';
+import type { D1DatabaseLike, D1PreparedStatementLike } from '@gnolith/diamond';
 import { Miniflare } from 'miniflare';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -23,6 +23,7 @@ import {
   createStatement,
   createTaprootHostWriteCapability,
   createInstallationAuthorizationGuard,
+  createInstallationDomainMutationGuard,
   importEntities,
   initializeTaproot,
   inspectTaprootSchema,
@@ -339,6 +340,72 @@ for (const runtime of environments) {
       }
     }, 30_000);
 
+    it('denies inaccessible bulk upserts before canonical hydration', async () => {
+      const environment = await runtime.create();
+      try {
+        await bootstrapTaprootAuthorization(
+          environment.db,
+          options,
+          environment.capability,
+          installationId,
+        );
+        const guard = await createInstallationAuthorizationGuard(
+          environment.db,
+          options,
+          environment.capability,
+        );
+        await createItem(environment.db, options, guard, writeContext(1), {
+          id: 'Q1',
+          authorization: policy(1, workspaceScope),
+        });
+        await environment.db
+          .prepare(
+            `UPDATE taproot_entities SET entity_json = '{}'
+             WHERE entity_id = 'Q1'`,
+          )
+          .run();
+        const outsider: AuthorizationContext = {
+          ...context(2, 'principal-outside', []),
+          capabilities: [KNOWLEDGE_WRITE_CAPABILITY],
+        };
+        const deniedExisting = await importEntities(
+          environment.db,
+          options,
+          guard,
+          outsider,
+          [importedItem('Q1')],
+          {
+            mode: 'upsert',
+            authorizations: { Q1: policy(2, workspaceScope) },
+          },
+        );
+        const deniedMissing = await importEntities(
+          environment.db,
+          options,
+          guard,
+          outsider,
+          [importedItem('Q2')],
+          {
+            mode: 'upsert',
+            authorizations: { Q2: policy(2, workspaceScope) },
+          },
+        );
+        for (const denied of [deniedExisting, deniedMissing]) {
+          expect(denied.succeeded).toEqual([]);
+          expect(denied.failed[0]?.error).toBeInstanceOf(
+            AuthorizationDeniedError,
+          );
+          expect(denied.failed[0]?.error.message).toBe('Authorization denied');
+        }
+        expect(await guard.readCurrentState()).toMatchObject({
+          authorizationRevision: 2,
+          searchGeneration: 2,
+        });
+      } finally {
+        await environment.close();
+      }
+    }, 30_000);
+
     it('preauthorizes mutations and every redirect target before canonical hydration', async () => {
       const environment = await runtime.create();
       try {
@@ -620,7 +687,8 @@ for (const runtime of environments) {
         await environment.db
           .prepare(
             `UPDATE taproot_statement_authorization
-             SET source_revision = source_revision - 1
+             SET authorization_revision = authorization_revision - 1,
+                 effective_visibility_json = '{"version":1,"clauses":[]}'
              WHERE entity_id = 'Q1' AND statement_id = 'Q1$fact'`,
           )
           .run();
@@ -640,6 +708,28 @@ for (const runtime of environments) {
         expect(readiness.issues[0]?.entityId).toBe('Q1');
         expect(readiness.issues[0]?.codes).toContain(
           'statement-policy-mismatch',
+        );
+        await environment.db
+          .prepare(
+            `UPDATE taproot_entity_authorization
+             SET authorization_revision = 0 WHERE entity_id = 'Q1'`,
+          )
+          .run();
+        await expect(
+          new PersistedEntityAuthorizationSource(
+            environment.db,
+          ).getEntityAuthorization('Q1'),
+        ).resolves.toBeNull();
+        const invalidRevision = await inspectTaprootAuthorizationReadiness(
+          environment.db,
+          options,
+          environment.capability,
+          admin,
+        );
+        expect(invalidRevision.ready).toBe(false);
+        expect(invalidRevision.counts.quarantinedEntities).toBeGreaterThan(0);
+        expect(invalidRevision.counts.entityPolicyMismatches).toBeGreaterThan(
+          0,
         );
       } finally {
         await environment.close();
@@ -673,26 +763,99 @@ for (const runtime of environments) {
           .all<{ installation_id: string }>();
         expect(identity.results[0]?.installation_id).toBe(installationId);
 
+        const guard = await createInstallationAuthorizationGuard(
+          environment.db,
+          options,
+          environment.capability,
+        );
+        await createItem(environment.db, options, guard, writeContext(1), {
+          id: 'Q1',
+          authorization: policy(1, publicScope),
+        });
+        await expect(
+          environment.db
+            .prepare(
+              `INSERT OR REPLACE INTO taproot_entity_revisions(
+                 entity_id, revision, entity_json, actor, attribution_json,
+                 edit_summary, tags_json, event_id, content_hash, parent_hash,
+                 deleted_at, redirect_to, created_at
+               )
+               SELECT entity_id, revision, entity_json, actor, attribution_json,
+                      'tampered', tags_json, event_id, 'tampered-hash', parent_hash,
+                      deleted_at, redirect_to, created_at
+               FROM taproot_entity_revisions
+               WHERE entity_id = 'Q1' AND revision = 1`,
+            )
+            .run(),
+        ).rejects.toBeInstanceOf(Error);
+        await expect(
+          environment.db
+            .prepare(
+              `INSERT OR REPLACE INTO taproot_audit_events
+               SELECT event_id, entity_id, revision, event_type,
+                      attribution_json, 'tampered', tags_json, request_id,
+                      'tampered-hash', parent_hash, details_json, created_at
+               FROM taproot_audit_events WHERE entity_id = 'Q1'`,
+            )
+            .run(),
+        ).rejects.toBeInstanceOf(Error);
+        const q1Event = await environment.db
+          .prepare(
+            `SELECT event_id FROM taproot_entity_authorization_revisions
+             WHERE entity_id = 'Q1' AND source_revision = 1`,
+          )
+          .all<{ event_id: string }>();
+        await environment.db.batch([
+          environment.db.prepare(
+            `INSERT INTO taproot_entities(
+               entity_id, entity_type, revision, entity_json
+             ) VALUES ('Q999', 'item', 1,
+               '{"id":"Q999","type":"item","labels":{},"descriptions":{},"aliases":{},"claims":{},"sitelinks":{},"lastrevid":1,"modified":"2026-07-21T00:00:00.000Z"}')`,
+          ),
+          environment.db.prepare(
+            `INSERT INTO taproot_entity_revisions(
+               entity_id, revision, entity_json, event_id, content_hash, tags_json
+             ) SELECT entity_id, revision, entity_json, 'q999-event', 'q999-hash', '[]'
+               FROM taproot_entities WHERE entity_id = 'Q999'`,
+          ),
+        ]);
+        await expect(
+          environment.db
+            .prepare(
+              `INSERT OR REPLACE INTO taproot_entity_authorization_revisions(
+                 entity_id, source_revision, installation_id, workspace_id,
+                 owner_principal_id, visibility_json, effective_visibility_json,
+                 authorization_revision, event_id, created_at
+               ) VALUES ('Q999', 1, ?, NULL, 'principal-1',
+                 '{"version":1,"clauses":[]}', '{"version":1,"clauses":[]}',
+                 2, ?, 'now')`,
+            )
+            .bind(installationId, q1Event.results[0]!.event_id)
+            .run(),
+        ).rejects.toBeInstanceOf(Error);
+
         await environment.db.batch([
           environment.db.prepare(
             `DROP INDEX taproot_statement_authorization_candidate_idx`,
           ),
           environment.db.prepare(`DROP TABLE taproot_statement_authorization`),
           environment.db.prepare(
-            `CREATE TABLE taproot_statement_authorization(only_column TEXT) STRICT`,
+            `CREATE TABLE taproot_statement_authorization(
+               entity_id TEXT, statement_id TEXT, source_revision TEXT,
+               restrictions_json TEXT, effective_visibility_json TEXT,
+               authorization_revision TEXT
+             ) STRICT`,
           ),
           environment.db.prepare(
             `CREATE INDEX taproot_statement_authorization_candidate_idx
-             ON taproot_statement_authorization(only_column)`,
+             ON taproot_statement_authorization(entity_id, source_revision, statement_id)`,
           ),
         ]);
         const schema = await inspectTaprootSchema(environment.db);
         expect(schema.valid).toBe(false);
-        expect(schema.errors).toEqual([
-          expect.stringContaining(
-            'taproot_statement_authorization columns are',
-          ),
-        ]);
+        expect(schema.errors).toContain(
+          'taproot_statement_authorization definition does not match the package catalog',
+        );
       } finally {
         await environment.close();
       }
@@ -909,7 +1072,7 @@ for (const runtime of environments) {
       }
     }, 30_000);
 
-    it('fences and advances Workshop-owned writes in the same rollback-safe ordered batch', async () => {
+    it('keeps knowledge advances policy-authorized and rollback-safe', async () => {
       const environment = await runtime.create();
       try {
         await bootstrapTaprootAuthorization(
@@ -933,9 +1096,21 @@ for (const runtime of environments) {
         await expect(
           guard.batchWithAuthorizationAdvance(
             writeContext(1),
+            { advanceId: 'write-only-denied', reason: 'policy change' },
+            [
+              environment.db
+                .prepare(
+                  `INSERT INTO workshop_guard_probe(id, value) VALUES (?, ?)`,
+                )
+                .bind('write-only-denied', 'not committed'),
+            ],
+          ),
+        ).rejects.toBeInstanceOf(InvalidAuthorizationError);
+        await expect(
+          guard.batchWithAuthorizationAdvance(
+            writeContext(1, true),
             {
               advanceId: 'advance-rollback',
-              domain: 'workshop',
               reason: 'task policy create',
             },
             [
@@ -957,10 +1132,9 @@ for (const runtime of environments) {
 
         const outcomes = await Promise.allSettled([
           guard.batchWithAuthorizationAdvance(
-            writeContext(1),
+            writeContext(1, true),
             {
               advanceId: 'advance-left',
-              domain: 'workshop',
               reason: 'task policy create',
             },
             [
@@ -972,10 +1146,9 @@ for (const runtime of environments) {
             ],
           ),
           guard.batchWithAuthorizationAdvance(
-            writeContext(1),
+            writeContext(1, true),
             {
               advanceId: 'advance-right',
-              domain: 'workshop',
               reason: 'task policy create',
             },
             [
@@ -1002,6 +1175,206 @@ for (const runtime of environments) {
           domain_rows: 1,
           audits: 1,
           revision: 2,
+        });
+      } finally {
+        await environment.close();
+      }
+    }, 30_000);
+
+    it('fences exact Task and Memory capabilities without counter advances', async () => {
+      const environment = await runtime.create();
+      try {
+        await bootstrapTaprootAuthorization(
+          environment.db,
+          options,
+          environment.capability,
+          installationId,
+        );
+        const taskGuard = await createInstallationDomainMutationGuard(
+          environment.db,
+          options,
+          environment.capability,
+          { domain: 'workshop.task', capability: 'task-write' },
+        );
+        const memoryGuard = await createInstallationDomainMutationGuard(
+          environment.db,
+          options,
+          environment.capability,
+          { domain: 'workshop.memory', capability: 'memory-write' },
+        );
+        await environment.db
+          .prepare(
+            `CREATE TABLE workshop_domain_probe(
+               id TEXT PRIMARY KEY, domain TEXT NOT NULL
+             ) STRICT`,
+          )
+          .run();
+        const taskContext: AuthorizationContext = {
+          ...context(1, 'task-agent', ['workspace-1']),
+          capabilities: ['task-write'],
+        };
+        const memoryContext: AuthorizationContext = {
+          ...context(1, 'memory-agent', ['workspace-1']),
+          capabilities: ['memory-write'],
+        };
+        const task = await taskGuard.batchWithExpectedRevision(taskContext, [
+          environment.db.prepare(
+            `INSERT INTO workshop_domain_probe(id, domain)
+               VALUES ('task-ok', 'task') RETURNING id`,
+          ),
+        ]);
+        const memory = await memoryGuard.batchWithExpectedRevision(
+          memoryContext,
+          [
+            environment.db.prepare(
+              `INSERT INTO workshop_domain_probe(id, domain)
+               VALUES ('memory-ok', 'memory') RETURNING id`,
+            ),
+          ],
+        );
+        expect(task).toMatchObject({
+          authorizationRevision: 1,
+          searchGeneration: 1,
+          results: [{ results: [{ id: 'task-ok' }] }],
+        });
+        expect(memory).toMatchObject({
+          authorizationRevision: 1,
+          searchGeneration: 1,
+          results: [{ results: [{ id: 'memory-ok' }] }],
+        });
+        for (const [guard, deniedContext, id] of [
+          [memoryGuard, taskContext, 'task-on-memory'],
+          [taskGuard, memoryContext, 'memory-on-task'],
+          [taskGuard, writeContext(1), 'knowledge-on-task'],
+          [memoryGuard, writeContext(1), 'knowledge-on-memory'],
+          [
+            taskGuard,
+            { ...taskContext, installationId: 'other-installation' },
+            'cross-installation',
+          ],
+          [taskGuard, { ...taskContext, authorizationRevision: 0 }, 'stale'],
+        ] as const) {
+          await expect(
+            guard.batchWithExpectedRevision(deniedContext, [
+              environment.db
+                .prepare(
+                  `INSERT INTO workshop_domain_probe(id, domain) VALUES (?, 'denied')`,
+                )
+                .bind(id),
+            ]),
+          ).rejects.toBeInstanceOf(InvalidAuthorizationError);
+        }
+        await expect(
+          taskGuard.batchWithExpectedRevision(taskContext, [
+            environment.db.prepare(
+              `INSERT INTO workshop_domain_probe(id, domain)
+               VALUES ('rolled-back', 'task')`,
+            ),
+            environment.db.prepare(
+              `INSERT INTO taproot_assertions(assertion_key) SELECT NULL`,
+            ),
+          ]),
+        ).rejects.toBeInstanceOf(Error);
+        const proof = await environment.db
+          .prepare(
+            `SELECT
+               (SELECT COUNT(*) FROM workshop_domain_probe) AS domain_rows,
+               authorization_revision, search_generation
+             FROM taproot_installation_authorization WHERE singleton = 1`,
+          )
+          .all<{
+            domain_rows: number;
+            authorization_revision: number;
+            search_generation: number;
+          }>();
+        expect(proof.results[0]).toEqual({
+          domain_rows: 2,
+          authorization_revision: 1,
+          search_generation: 1,
+        });
+      } finally {
+        await environment.close();
+      }
+    }, 30_000);
+
+    it('binds counter advances to the previously read durable advance id', async () => {
+      const environment = await runtime.create();
+      try {
+        await bootstrapTaprootAuthorization(
+          environment.db,
+          options,
+          environment.capability,
+          installationId,
+        );
+        let interposedAdvanceId: string | null = null;
+        const db: D1DatabaseLike = {
+          prepare: (sql) => environment.db.prepare(sql),
+          batch: async <T = Record<string, unknown>>(
+            statements: D1PreparedStatementLike[],
+          ) => {
+            if (interposedAdvanceId !== null) {
+              const advanceId = interposedAdvanceId;
+              interposedAdvanceId = null;
+              await environment.db
+                .prepare(
+                  `UPDATE taproot_installation_authorization
+                   SET last_advance_id = ? WHERE singleton = 1`,
+                )
+                .bind(advanceId)
+                .run();
+            }
+            return environment.db.batch<T>(statements);
+          },
+        };
+        const capability = await writeCapability(db);
+        const guard = await createInstallationAuthorizationGuard(
+          db,
+          options,
+          capability,
+        );
+        await environment.db
+          .prepare(`CREATE TABLE advance_aba_probe(id TEXT PRIMARY KEY) STRICT`)
+          .run();
+        interposedAdvanceId = 'interposed-advance';
+        await expect(
+          guard.batchWithAuthorizationAdvance(
+            writeContext(1, true),
+            { advanceId: 'attempted-advance', reason: 'policy update' },
+            [
+              db.prepare(
+                `INSERT INTO advance_aba_probe(id) VALUES ('advance')`,
+              ),
+            ],
+          ),
+        ).rejects.toBeInstanceOf(Error);
+        interposedAdvanceId = 'interposed-canonical';
+        await expect(
+          createItem(db, options, guard, writeContext(1), {
+            id: 'Q1',
+            authorization: policy(1, publicScope),
+          }),
+        ).rejects.toBeInstanceOf(Error);
+        const proof = await environment.db
+          .prepare(
+            `SELECT
+               (SELECT COUNT(*) FROM advance_aba_probe) AS domain_rows,
+               (SELECT COUNT(*) FROM taproot_entities) AS entities,
+               authorization_revision, search_generation, last_advance_id
+             FROM taproot_installation_authorization WHERE singleton = 1`,
+          )
+          .all<{
+            domain_rows: number;
+            entities: number;
+            authorization_revision: number;
+            search_generation: number;
+            last_advance_id: string;
+          }>();
+        expect(proof.results[0]).toEqual({
+          domain_rows: 0,
+          entities: 0,
+          authorization_revision: 1,
+          search_generation: 1,
+          last_advance_id: 'interposed-canonical',
         });
       } finally {
         await environment.close();

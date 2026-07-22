@@ -68,6 +68,14 @@ returned separately, so callers cannot split the invariant across batches.
 The guard exposes counters, not policy JSON, and does not create a second
 revision.
 
+Ordinary non-Knowledge domains use a separate opaque
+`InstallationDomainMutationGuard` issued by the host for exactly one domain and
+one capability. Task and Memory guards are therefore distinct; a caller cannot
+select or widen the capability at the batch method. These guards only fence the
+current shared revision and never advance authorization or search counters.
+Knowledge authorization advances require both exact `knowledge:write` and
+orthogonal `knowledge:policy`.
+
 `TaprootHostWriteCapability` is limited to bootstrap, bounded legacy backfill,
 maintenance, and guard issuance. The database binding, host capability, guard,
 context, cursor key, and policy inputs must never come from request, MCP,

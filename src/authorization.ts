@@ -1073,10 +1073,14 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
       .prepare(
         `SELECT p.installation_id, p.authorization_revision,
                 p.effective_visibility_json AS visibility_json,
+                p.visibility_json AS declared_visibility_json,
                 p.workspace_id, p.owner_principal_id, p.source_revision
          FROM taproot_entity_authorization p
          JOIN taproot_entities e ON e.entity_id = p.entity_id
            AND e.revision = p.source_revision
+         JOIN taproot_installation_authorization state ON state.singleton = 1
+           AND state.installation_id = p.installation_id
+           AND p.authorization_revision BETWEEN 1 AND state.authorization_revision
          WHERE p.entity_id = ? AND p.deleted_at IS NULL
            AND e.deleted_at IS NULL`,
       )
@@ -1085,11 +1089,67 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
         installation_id: string;
         authorization_revision: number;
         visibility_json: string;
+        declared_visibility_json: string;
         workspace_id: string | null;
         owner_principal_id: string;
         source_revision: number;
       }>();
-    return authorizationRecordFromRow(result.results[0]);
+    const row = result.results[0];
+    if (!row) return null;
+    const declared = parseCanonicalVisibilityScope(
+      row.declared_visibility_json,
+    );
+    const effective = parseCanonicalVisibilityScope(row.visibility_json);
+    if (!declared || !effective) return null;
+    const statements = await this.#db
+      .prepare(
+        `SELECT restrictions_json, effective_visibility_json,
+                authorization_revision
+         FROM taproot_statement_authorization
+         WHERE entity_id = ? AND source_revision = ?
+         ORDER BY statement_id`,
+      )
+      .bind(entityId, row.source_revision)
+      .all<{
+        restrictions_json: string;
+        effective_visibility_json: string;
+        authorization_revision: number;
+      }>();
+    let expectedEffective = declared;
+    for (const statement of statements.results) {
+      const restrictions = parseCanonicalVisibilityRestrictions(
+        statement.restrictions_json,
+      );
+      const statementEffective = parseCanonicalVisibilityScope(
+        statement.effective_visibility_json,
+      );
+      if (
+        !restrictions ||
+        !statementEffective ||
+        Number(statement.authorization_revision) !==
+          Number(row.authorization_revision)
+      )
+        return null;
+      const expectedStatement = intersectVisibilityScopes(
+        declared,
+        ...restrictions,
+      );
+      if (
+        serializeVisibilityScope(statementEffective) !==
+        serializeVisibilityScope(expectedStatement)
+      )
+        return null;
+      expectedEffective = intersectVisibilityScopes(
+        expectedEffective,
+        expectedStatement,
+      );
+    }
+    if (
+      serializeVisibilityScope(effective) !==
+      serializeVisibilityScope(expectedEffective)
+    )
+      return null;
+    return authorizationRecordFromRow(row);
   }
 
   async getEntityRevisionAuthorization(
@@ -1102,7 +1162,9 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
                 MAX(current.authorization_revision, history.authorization_revision)
                   AS authorization_revision,
                 current.effective_visibility_json AS current_visibility_json,
+                current.visibility_json AS current_declared_visibility_json,
                 history.effective_visibility_json AS historical_visibility_json,
+                history.visibility_json AS historical_declared_visibility_json,
                 history.workspace_id, history.owner_principal_id,
                 history.source_revision
          FROM taproot_entity_authorization_revisions history
@@ -1112,6 +1174,10 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
          JOIN taproot_entities entity
            ON entity.entity_id = current.entity_id
           AND entity.revision = current.source_revision
+         JOIN taproot_installation_authorization state ON state.singleton = 1
+           AND state.installation_id = current.installation_id
+           AND current.authorization_revision BETWEEN 1 AND state.authorization_revision
+           AND history.authorization_revision BETWEEN 1 AND state.authorization_revision
          WHERE history.entity_id = ? AND history.source_revision = ?
            AND current.deleted_at IS NULL AND entity.deleted_at IS NULL`,
       )
@@ -1120,13 +1186,22 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
         installation_id: string;
         authorization_revision: number;
         current_visibility_json: string;
+        current_declared_visibility_json: string;
         historical_visibility_json: string;
+        historical_declared_visibility_json: string;
         workspace_id: string | null;
         owner_principal_id: string;
         source_revision: number;
       }>();
     const row = result.results[0];
-    if (!row) return null;
+    if (
+      !row ||
+      !parseCanonicalVisibilityScope(row.current_visibility_json) ||
+      !parseCanonicalVisibilityScope(row.current_declared_visibility_json) ||
+      !parseCanonicalVisibilityScope(row.historical_visibility_json) ||
+      !parseCanonicalVisibilityScope(row.historical_declared_visibility_json)
+    )
+      return null;
     return {
       installationId: row.installation_id,
       authorizationRevision: Number(row.authorization_revision),
@@ -1148,12 +1223,19 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
       .prepare(
         `SELECT p.installation_id, s.authorization_revision,
                 s.effective_visibility_json AS visibility_json,
+                s.restrictions_json, p.visibility_json AS parent_visibility_json,
+                p.effective_visibility_json AS parent_effective_visibility_json,
+                p.authorization_revision AS parent_authorization_revision,
                 p.workspace_id, p.owner_principal_id, s.source_revision
          FROM taproot_statement_authorization s
          JOIN taproot_entity_authorization p ON p.entity_id = s.entity_id
             AND p.source_revision = s.source_revision
          JOIN taproot_entities e ON e.entity_id = s.entity_id
             AND e.revision = s.source_revision
+         JOIN taproot_installation_authorization state ON state.singleton = 1
+           AND state.installation_id = p.installation_id
+           AND p.authorization_revision BETWEEN 1 AND state.authorization_revision
+           AND s.authorization_revision BETWEEN 1 AND state.authorization_revision
          WHERE s.entity_id = ? AND s.statement_id = ?
            AND p.deleted_at IS NULL AND e.deleted_at IS NULL`,
       )
@@ -1162,11 +1244,65 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
         installation_id: string;
         authorization_revision: number;
         visibility_json: string;
+        restrictions_json: string;
+        parent_visibility_json: string;
+        parent_effective_visibility_json: string;
+        parent_authorization_revision: number;
         workspace_id: string | null;
         owner_principal_id: string;
         source_revision: number;
       }>();
-    return authorizationRecordFromRow(result.results[0]);
+    const row = result.results[0];
+    if (
+      !row ||
+      Number(row.authorization_revision) !==
+        Number(row.parent_authorization_revision)
+    )
+      return null;
+    const declaredParent = parseCanonicalVisibilityScope(
+      row.parent_visibility_json,
+    );
+    const restrictions = parseCanonicalVisibilityRestrictions(
+      row.restrictions_json,
+    );
+    const effective = parseCanonicalVisibilityScope(row.visibility_json);
+    if (
+      !declaredParent ||
+      !restrictions ||
+      !effective ||
+      serializeVisibilityScope(effective) !==
+        serializeVisibilityScope(
+          intersectVisibilityScopes(declaredParent, ...restrictions),
+        )
+    )
+      return null;
+    return authorizationRecordFromRow(row);
+  }
+}
+
+function parseCanonicalVisibilityRestrictions(
+  raw: string,
+): readonly VisibilityScopeV1[] | null {
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!Array.isArray(value)) return null;
+    const restrictions = value.map((scope) =>
+      normalizeVisibilityScope(scope as VisibilityScopeV1),
+    );
+    return JSON.stringify(restrictions) === raw ? restrictions : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseCanonicalVisibilityScope(raw: string): VisibilityScopeV1 | null {
+  try {
+    const scope = normalizeVisibilityScope(
+      JSON.parse(raw) as VisibilityScopeV1,
+    );
+    return serializeVisibilityScope(scope) === raw ? scope : null;
+  } catch {
+    return null;
   }
 }
 

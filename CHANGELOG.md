@@ -35,6 +35,11 @@
   the ordered database batch. Authorization singleton/audit rows reject
   replacement, readiness verifies current and historical statement-policy
   coverage, and authorized bulk import advances its context between entities.
+- Added host-issued fence-only domain guards bound to one exact non-Knowledge
+  capability. Task/Memory-style writes can share the installation revision
+  without borrowing Knowledge authority or advancing counters; Knowledge
+  advances require orthogonal policy authority and bind the prior durable
+  advance ID.
 
 - Added required, explicitly authored nonblank `Statement.text` to canonical
   JSON and to every logical statement mutation.

@@ -151,6 +151,11 @@ The opaque guard also owns execution of ordered cross-package batches that
 need an exact authorization-revision fence or advance. It does not expose raw
 counter-update statements that a caller could separate from the corresponding
 audit, assertion, or domain writes.
+Hosts issue a distinct fence-only domain guard for each exact non-Knowledge
+domain capability, such as Task or Memory writes. The capability is bound at
+issuance, cannot be supplied at the call site, and an ordinary domain fence
+does not advance authorization or search counters. Knowledge authorization
+advances additionally require `knowledge:policy`.
 
 Statement creation and replacement include `text` on the `Statement` itself.
 Rank, qualifier, and reference mutation methods require authored text for the

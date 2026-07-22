@@ -65,6 +65,7 @@ writeFileSync(
       createItem,
       createProperty,
       createInstallationAuthorizationGuard,
+      createInstallationDomainMutationGuard,
       createTaprootHostWriteCapability,
       initializeTaproot,
       inspectTaprootSchema,
@@ -188,6 +189,48 @@ writeFileSync(
       const localGuard = await createInstallationAuthorizationGuard(
         local, options, localWriteCapability,
       );
+      const taskGuard = await createInstallationDomainMutationGuard(
+        local,
+        options,
+        localWriteCapability,
+        { domain: 'workshop.task', capability: 'task-write' },
+      );
+      await local.prepare(
+        'CREATE TABLE packed_task_probe(id TEXT PRIMARY KEY) STRICT',
+      ).run();
+      const taskContext = {
+        installationId,
+        principalId: 'packed-task-agent',
+        activeWorkspaceId: null,
+        workspaceIds: [],
+        capabilities: ['task-write'],
+        authorizationRevision: 1,
+      };
+      const taskCommit = await taskGuard.batchWithExpectedRevision(
+        taskContext,
+        [local.prepare("INSERT INTO packed_task_probe(id) VALUES ('task-ok') RETURNING id")],
+      );
+      if (
+        taskCommit.authorizationRevision !== 1 ||
+        taskCommit.searchGeneration !== 1 ||
+        taskCommit.results[0]?.results[0]?.id !== 'task-ok'
+      ) throw new Error('packed domain guard did not preserve ordered results');
+      let crossCapabilityRejected = false;
+      try {
+        await taskGuard.batchWithExpectedRevision(writer(1), [
+          local.prepare("INSERT INTO packed_task_probe(id) VALUES ('knowledge-denied')"),
+        ]);
+      } catch {
+        crossCapabilityRejected = true;
+      }
+      if (!crossCapabilityRejected) {
+        throw new Error('packed domain guard accepted a cross-domain capability');
+      }
+      const fencedState = await taskGuard.readCurrentState();
+      if (
+        fencedState.authorizationRevision !== 1 ||
+        fencedState.searchGeneration !== 1
+      ) throw new Error('ordinary domain fence advanced authorization counters');
       await createItem(local, options, localGuard, writer(1), {
         id: 'Q1',
         labels: { en: { language: 'en', value: 'packed local consumer' } },

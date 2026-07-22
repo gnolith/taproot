@@ -249,6 +249,19 @@ export const taprootAuthorizationSchemaStatements = [
     ON taproot_statement_authorization(entity_id, source_revision, statement_id)`,
   `CREATE INDEX IF NOT EXISTS taproot_authorization_outbox_state_idx
     ON taproot_authorization_projection_outbox(state, authorization_revision, event_id)`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_revisions_no_replace
+    BEFORE INSERT ON taproot_entity_revisions
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_entity_revisions
+      WHERE entity_id = NEW.entity_id AND revision = NEW.revision
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot revisions cannot be replaced'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_audit_no_replace
+    BEFORE INSERT ON taproot_audit_events
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_audit_events WHERE event_id = NEW.event_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot audit events cannot be replaced'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_installation_identity_no_update
     BEFORE UPDATE OF installation_id ON taproot_installation_authorization
     BEGIN SELECT RAISE(ABORT, 'taproot installation identity is immutable'); END`,
@@ -269,7 +282,8 @@ export const taprootAuthorizationSchemaStatements = [
     BEFORE INSERT ON taproot_entity_authorization_revisions
     WHEN EXISTS (
       SELECT 1 FROM taproot_entity_authorization_revisions
-      WHERE entity_id = NEW.entity_id AND source_revision = NEW.source_revision
+      WHERE (entity_id = NEW.entity_id AND source_revision = NEW.source_revision)
+         OR event_id = NEW.event_id
     )
     BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions cannot be replaced'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_update
@@ -721,9 +735,11 @@ export async function backfillTaprootAudit(
        SELECT event_id, entity_id, revision, 'import',
          attribution_json, edit_summary, tags_json, content_hash, parent_hash,
          json_object('source', 'legacy-v1'), created_at
-       FROM taproot_entity_revisions
-       WHERE true
-       ON CONFLICT(event_id) DO NOTHING`,
+       FROM taproot_entity_revisions revision
+       WHERE NOT EXISTS (
+         SELECT 1 FROM taproot_audit_events audit
+         WHERE audit.event_id = revision.event_id
+       )`,
     ),
   ]);
 }
@@ -1146,6 +1162,19 @@ export async function inspectTaprootSchema(
         `${table} columns are ${actualColumns.join(',')}, expected ${expectedColumns.join(',')}`,
       );
     }
+    const actualSql = tables.results.find(({ name }) => name === table)?.sql;
+    const expectedSql = taprootAuthorizationSchemaStatements.find((sql) =>
+      new RegExp(
+        `^\\s*CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${table}\\b`,
+        'iu',
+      ).test(sql),
+    );
+    if (
+      actualSql == null ||
+      expectedSql === undefined ||
+      normalizeCatalogSql(actualSql) !== normalizeCatalogSql(expectedSql)
+    )
+      errors.push(`${table} definition does not match the package catalog`);
   }
   const requiredIndexes = [
     'taproot_entities_type_idx',
@@ -1174,6 +1203,8 @@ export async function inspectTaprootSchema(
     'taproot_revisions_no_delete',
     'taproot_audit_no_update',
     'taproot_audit_no_delete',
+    'taproot_revisions_no_replace',
+    'taproot_audit_no_replace',
     'taproot_installation_identity_no_update',
     'taproot_installation_authorization_no_delete',
     'taproot_installation_authorization_no_replace',

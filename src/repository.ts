@@ -139,6 +139,7 @@ interface WriteContext {
 
 interface PreparedAuthorizationWrite {
   policy: CanonicalAuthorizationPolicyInput;
+  previousAdvanceId: string;
   authorizationRevision: number;
   searchGeneration: number;
   effectiveVisibilityJson: string;
@@ -1208,6 +1209,26 @@ export class TaprootRepository {
     options: BulkImportOptions,
   ): Promise<WriteResult> {
     if (options.mode === 'upsert') {
+      const authorization = options.authorizations?.[entity.id];
+      const authorizationContext = options.metadata?.authorizationContext;
+      if (authorization || authorizationContext) {
+        const currentRevision = await this.#preauthorizeCanonicalWrite(
+          entity.id,
+          authorization,
+          authorizationContext,
+        );
+        if (currentRevision !== null)
+          return this.replaceEntity(entity.id, entity, {
+            expectedRevision: currentRevision,
+            statementTexts: authoredStatementTexts(entity),
+            ...options.metadata,
+            ...(authorization ? { authorization } : {}),
+          });
+        return this.importEntity(entity, {
+          ...options.metadata,
+          ...(authorization ? { authorization } : {}),
+        });
+      }
       try {
         const current = await this.getEntity(entity.id);
         return await this.replaceEntity(entity.id, entity, {
@@ -1463,7 +1484,8 @@ export class TaprootRepository {
     );
     const authorization = await this.#db
       .prepare(
-        `SELECT s.installation_id, s.authorization_revision, s.search_generation
+        `SELECT s.installation_id, s.authorization_revision, s.search_generation,
+                s.last_advance_id
          FROM taproot_installation_authorization s
          JOIN taproot_entity_authorization p
            ON p.installation_id = s.installation_id
@@ -1475,6 +1497,7 @@ export class TaprootRepository {
         installation_id: string;
         authorization_revision: number;
         search_generation: number;
+        last_advance_id: string;
       }>();
     const authorizationState = authorization.results[0];
     if (!authorizationState)
@@ -1494,7 +1517,8 @@ export class TaprootRepository {
           `UPDATE taproot_installation_authorization
            SET search_generation = ?, last_advance_id = ?, updated_at = ?
            WHERE singleton = 1 AND installation_id = ?
-             AND authorization_revision = ? AND search_generation = ?`,
+             AND authorization_revision = ? AND search_generation = ?
+             AND last_advance_id = ?`,
         )
         .bind(
           nextSearchGeneration,
@@ -1503,6 +1527,7 @@ export class TaprootRepository {
           authorizationState.installation_id,
           authorizationState.authorization_revision,
           authorizationState.search_generation,
+          authorizationState.last_advance_id,
         ),
       this.#assertion(
         `EXISTS (
@@ -1948,13 +1973,15 @@ export class TaprootRepository {
 
     const state = await this.#db
       .prepare(
-        `SELECT installation_id, authorization_revision, search_generation
+        `SELECT installation_id, authorization_revision, search_generation,
+              last_advance_id
          FROM taproot_installation_authorization WHERE singleton = 1`,
       )
       .all<{
         installation_id: string;
         authorization_revision: number;
         search_generation: number;
+        last_advance_id: string;
       }>();
     const installation = state.results[0];
     if (
@@ -2120,6 +2147,7 @@ export class TaprootRepository {
       );
     return {
       policy,
+      previousAdvanceId: installation.last_advance_id,
       authorizationRevision,
       searchGeneration,
       effectiveVisibilityJson,
@@ -2133,7 +2161,7 @@ export class TaprootRepository {
     rawPolicy: CanonicalAuthorizationPolicyInput | undefined,
     rawContext: AuthorizationContext | undefined,
     expectedRevision?: number,
-  ): Promise<void> {
+  ): Promise<number | null> {
     if (!rawPolicy || !rawContext)
       throw new AuthorizationDeniedError('Authorization denied');
     let policy: CanonicalAuthorizationPolicyInput;
@@ -2182,7 +2210,15 @@ export class TaprootRepository {
     if (row.entity_id === null) {
       if (expectedRevision !== undefined)
         throw new AuthorizationDeniedError('Authorization denied');
-      return;
+      if (
+        (policy.workspaceId !== null &&
+          !caller.workspaceIds.includes(policy.workspaceId)) ||
+        !isVisibleTo(policy.visibility, caller) ||
+        (policy.ownerPrincipalId !== caller.principalId &&
+          !caller.capabilities.includes(KNOWLEDGE_POLICY_CAPABILITY))
+      )
+        throw new AuthorizationDeniedError('Authorization denied');
+      return null;
     }
     if (
       row.policy_installation_id !== row.installation_id ||
@@ -2199,6 +2235,7 @@ export class TaprootRepository {
       Number(row.policy_source_revision) !== expectedRevision
     )
       throw new RevisionConflictError('Canonical revision is stale');
+    return Number(row.policy_source_revision);
   }
 
   async #authorizedLifecycle(
@@ -2299,6 +2336,7 @@ export class TaprootRepository {
       searchGeneration,
       effectiveVisibilityJson,
       statementRows,
+      previousAdvanceId,
     } = prepared;
     const visibilityJson = serializeVisibilityScope(policy.visibility);
     const rowsJson = JSON.stringify(statementRows);
@@ -2309,7 +2347,8 @@ export class TaprootRepository {
            SET authorization_revision = ?, search_generation = ?, updated_at = ?
                , last_advance_id = ?
            WHERE singleton = 1 AND installation_id = ?
-             AND authorization_revision = ? AND search_generation = ?`,
+             AND authorization_revision = ? AND search_generation = ?
+             AND last_advance_id = ?`,
         )
         .bind(
           authorizationRevision,
@@ -2319,6 +2358,7 @@ export class TaprootRepository {
           policy.installationId,
           policy.expectedAuthorizationRevision,
           searchGeneration - 1,
+          previousAdvanceId,
         ),
       this.#assertion(
         `EXISTS (
@@ -3194,14 +3234,18 @@ function isUniqueEntityError(cause: Error): boolean {
 }
 
 function isRevisionUniqueError(cause: Error): boolean {
-  return /UNIQUE constraint failed: taproot_entity_revisions\.entity_id, taproot_entity_revisions\.revision/iu.test(
-    cause.message,
+  return (
+    /UNIQUE constraint failed: taproot_entity_revisions\.entity_id, taproot_entity_revisions\.revision/iu.test(
+      cause.message,
+    ) || /taproot revisions cannot be replaced/iu.test(cause.message)
   );
 }
 
 function isEventIdUniqueError(cause: Error): boolean {
-  return /UNIQUE constraint failed: taproot_audit_events\.event_id/iu.test(
-    cause.message,
+  return (
+    /UNIQUE constraint failed: taproot_audit_events\.event_id/iu.test(
+      cause.message,
+    ) || /taproot audit events cannot be replaced/iu.test(cause.message)
   );
 }
 

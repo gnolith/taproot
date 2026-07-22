@@ -125,6 +125,21 @@ CREATE INDEX IF NOT EXISTS taproot_statement_authorization_candidate_idx
 CREATE INDEX IF NOT EXISTS taproot_authorization_outbox_state_idx
   ON taproot_authorization_projection_outbox(state, authorization_revision, event_id);
 
+CREATE TRIGGER IF NOT EXISTS taproot_revisions_no_replace
+  BEFORE INSERT ON taproot_entity_revisions
+  WHEN EXISTS (
+    SELECT 1 FROM taproot_entity_revisions
+    WHERE entity_id = NEW.entity_id AND revision = NEW.revision
+  )
+  BEGIN SELECT RAISE(ABORT, 'taproot revisions cannot be replaced'); END;
+
+CREATE TRIGGER IF NOT EXISTS taproot_audit_no_replace
+  BEFORE INSERT ON taproot_audit_events
+  WHEN EXISTS (
+    SELECT 1 FROM taproot_audit_events WHERE event_id = NEW.event_id
+  )
+  BEGIN SELECT RAISE(ABORT, 'taproot audit events cannot be replaced'); END;
+
 CREATE TRIGGER IF NOT EXISTS taproot_installation_identity_no_update
   BEFORE UPDATE OF installation_id ON taproot_installation_authorization
   BEGIN SELECT RAISE(ABORT, 'taproot installation identity is immutable'); END;
@@ -145,7 +160,8 @@ CREATE TRIGGER IF NOT EXISTS taproot_entity_authorization_revisions_no_replace
   BEFORE INSERT ON taproot_entity_authorization_revisions
   WHEN EXISTS (
     SELECT 1 FROM taproot_entity_authorization_revisions
-    WHERE entity_id = NEW.entity_id AND source_revision = NEW.source_revision
+    WHERE (entity_id = NEW.entity_id AND source_revision = NEW.source_revision)
+       OR event_id = NEW.event_id
   )
   BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions cannot be replaced'); END;
 CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_update
