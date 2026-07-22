@@ -5,12 +5,11 @@ DDL-only, requires the exact `0005` catalog, advances schema version 4 to 5,
 and never backfills source events. Search administration explicitly initializes
 the first corpus and enqueues the current registry through bounded pages.
 
-The persisted lifecycle is dormant: it does not execute public search. An
-opaque host-issued `SearchMaterializationAdminGuardV1` exposes only bounded
+An opaque host-issued `SearchMaterializationAdminGuardV1` exposes bounded
 running, redacted health, dead-job retry, shadow rebuild start, and guarded
 activation. Every call requires current installation `search:admin` authority.
-No public API returns claim tokens, raw documents, chunks, stages, canonical
-claims, or text.
+No public API returns claim tokens, raw stages, or canonical claims. The public
+search service reads only committed current heads and returns bounded snippets.
 
 ## Projection and visibility
 
@@ -58,17 +57,29 @@ watermark, job set, anti-join, and expected corpus pointers in the same batch,
 atomically swaps the active corpus, increments cursor generation, and records
 immutable admin audit.
 
-Only Item-root production is currently executable. Item stages include Item and
-Statement documents completely; standalone Statement source events are
-coalesced as Item-root-owned rather than dead-lettered or duplicated. Task,
-Memory, Prompt, Resource, and Annotation producers remain absent, so product
-health intentionally remains
-`blocked-producers`; no backend-complete or public-search claim is made.
+Item stages include Item and Statement documents completely; standalone
+Statement source events are coalesced as Item-root-owned rather than
+dead-lettered or duplicated. Migration 0007 adds host-sealed Workshop Task,
+Memory, and Prompt producers. Their callbacks return only bounded canonical data,
+authorization data, and projection fields; they receive no SQL, database,
+lifecycle guard, mutation handle, or caller-shaped authorization context.
+Taproot derives hashes, identifiers, authority envelopes, and chunks.
+
+Producer manifests and adoption progress are durable and immutable/audited.
+Each corpus pins an exact fingerprint. A process restart must reconstruct the
+matching callback registration; missing or mismatched registrations leave jobs
+pending at attempt zero and appear dynamically in `blockedProducerKinds`.
+`sourcePolicyRevision` remains distinct from the live installation
+`authorizationRevision` through source, job, stage, and head fences. Migration
+0008 adds Taproot-native Resource and Annotation producers. Textual external
+Resource payloads are loaded only through the injected portable payload-store
+capability, with byte and SHA-256 integrity fences before projection.
 
 ## Qualification
 
 The same black-box lifecycle suite runs on persisted Node SQLite and real
-Miniflare/Workerd D1. It covers exact migration, 32-way reclaim contention,
+Miniflare/Workerd D1. It covers exact migrations, 0006 staged-graph
+preservation, producer adoption/reconstruction, 32-way reclaim contention,
 crashed-stage recovery, stale ABA tokens, stable IDs, replace-all removal,
 immediate stale fencing, mixed CNF, dual fanout, no-hole activation, and health
 redaction. The reproducible no-SLA baseline records 100,000 roots and 1,000,000

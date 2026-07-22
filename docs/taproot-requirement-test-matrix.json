@@ -1,0 +1,630 @@
+{
+  "version": 1,
+  "contract": "implementation-contracts/taproot.md",
+  "requirements": [
+    {
+      "id": "A02",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "A03",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "A04",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "A05",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "A07",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "A08",
+      "evidence": ["test/statement-text.test.ts"]
+    },
+    {
+      "id": "A09",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "A10",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "A11",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "A12",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "A13",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "A14",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "B01",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "B02",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "B03",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "B04",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "B05",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "B06",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "B07",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "B08",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "B09",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "B10",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "B11",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "B12",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "B13",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "C01",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "C02",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "C03",
+      "evidence": ["test/statement-text.test.ts"]
+    },
+    {
+      "id": "C04",
+      "evidence": ["test/statement-text.test.ts"]
+    },
+    {
+      "id": "C05",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "C06",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "C10",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "C11",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "C12",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "C13",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "C14",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "C15",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "C16",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "D01",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "D03",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "D04",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "E01",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E02",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E03",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E04",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E05",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E06",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E07",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E08",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E09",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E10",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E11",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "E12",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "F01",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "F02",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "F03",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "F04",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "F05",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "F06",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "F07",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "F08",
+      "evidence": [
+        "test/search-contract.test.ts",
+        "test/search-materialization.test.ts",
+        "test/external-search-producers.test.ts"
+      ]
+    },
+    {
+      "id": "F09",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "F10",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "F11",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "G01",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "G02",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "G03",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "G04",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "G05",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "G06",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "G08",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "H01",
+      "evidence": [
+        "test/authorized-surface.test.ts",
+        "test/semantic-search.test.ts",
+        "test/content-search.test.ts"
+      ]
+    },
+    {
+      "id": "H02",
+      "evidence": [
+        "test/authorized-surface.test.ts",
+        "test/semantic-search.test.ts",
+        "test/content-search.test.ts"
+      ]
+    },
+    {
+      "id": "H03",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "H04",
+      "evidence": [
+        "test/authorized-surface.test.ts",
+        "test/semantic-search.test.ts",
+        "test/content-search.test.ts"
+      ]
+    },
+    {
+      "id": "H09",
+      "evidence": [
+        "test/authorized-surface.test.ts",
+        "test/semantic-search.test.ts",
+        "test/content-search.test.ts"
+      ]
+    },
+    {
+      "id": "I01",
+      "evidence": ["test/requirement-matrix.test.ts"]
+    },
+    {
+      "id": "I02",
+      "evidence": ["test/requirement-matrix.test.ts"]
+    },
+    {
+      "id": "I03",
+      "evidence": ["test/requirement-matrix.test.ts"]
+    },
+    {
+      "id": "I04",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "I06",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "I07",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "I09",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "I10",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "I11",
+      "evidence": [
+        "test/content-search.test.ts",
+        "test/search-materialization.test.ts"
+      ]
+    },
+    {
+      "id": "I12",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "I13",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "I14",
+      "evidence": [
+        "test/semantic-search.test.ts",
+        "scripts/qdrant-conformance.mjs"
+      ]
+    },
+    {
+      "id": "I15",
+      "evidence": ["test/requirement-matrix.test.ts"]
+    }
+  ]
+}

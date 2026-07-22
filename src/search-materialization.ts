@@ -16,6 +16,8 @@ import {
   createSearchProjectionAuthorizationAuthorityV1,
   createTrustedSearchAuthorizationEnvelopeV1,
   projectItemForUnifiedSearchV1,
+  projectResourceForUnifiedSearchV1,
+  projectAnnotationForUnifiedSearchV1,
   type DerivedSearchDocumentV1,
   type SearchProjectionPlanV1,
   type SearchProjectionSourceEventV1,
@@ -27,19 +29,22 @@ import type {
   VisibilityAtomV1,
   VisibilityScopeV1,
 } from './types.js';
+import {
+  buildExternalSearchProjectionPlanInternalV1,
+  lookupExternalSearchProducerRuntimeInternalV1,
+} from './external-search-producers.js';
+import type { PortableResourcePayloadStoreV1 } from './content-domain.js';
 
-const IMPLEMENTED_PRODUCERS = ['item'] as const;
-const BLOCKED_PRODUCERS = [
-  'task',
-  'memory',
-  'prompt',
-  'resource',
-  'annotation',
-] as const;
 const MAX_RUN_JOBS = 100;
 const MAX_REBUILD_ROOTS = 100;
 const MAX_SQL_BATCH = 50;
 const MAX_ATTEMPTS = 5;
+const BUILTIN_SEARCH_KINDS = [
+  'statement',
+  'item',
+  'resource',
+  'annotation',
+] as const;
 
 export interface SearchMaterializationRunOptionsV1 {
   maxJobs: number;
@@ -94,6 +99,13 @@ interface RuntimeOptions {
   db: D1DatabaseLike;
   installationId: string;
   clock: () => Date;
+  payloadStore?: PortableResourcePayloadStoreV1;
+  maxExternalPayloadBytes?: number;
+}
+
+export interface SearchMaterializationContentOptionsV1 {
+  payloadStore?: PortableResourcePayloadStoreV1;
+  maxExternalPayloadBytes?: number;
 }
 
 interface JobRow {
@@ -106,8 +118,10 @@ interface JobRow {
   operation: 'upsert' | 'delete';
   root_revision: string;
   root_hash: string;
+  source_policy_revision: number;
   authorization_revision: number;
   search_generation: number;
+  producer_fingerprint: string | null;
   state: 'pending' | 'leased' | 'staged' | 'complete' | 'dead';
   attempt: number;
   claim_generation: number;
@@ -149,11 +163,22 @@ class SearchMaterializationRuntime {
   readonly #db: D1DatabaseLike;
   readonly #installationId: string;
   readonly #clock: () => Date;
+  readonly #payloadStore: PortableResourcePayloadStoreV1 | undefined;
+  readonly #maxExternalPayloadBytes: number;
 
   constructor(options: RuntimeOptions) {
     this.#db = options.db;
     this.#installationId = options.installationId;
     this.#clock = options.clock;
+    this.#payloadStore = options.payloadStore;
+    this.#maxExternalPayloadBytes =
+      options.maxExternalPayloadBytes ?? 8 * 1024 * 1024;
+    if (
+      !Number.isSafeInteger(this.#maxExternalPayloadBytes) ||
+      this.#maxExternalPayloadBytes < 65_536 ||
+      this.#maxExternalPayloadBytes > 64 * 1024 * 1024
+    )
+      throw new Error('maxExternalPayloadBytes is invalid');
   }
 
   async initialize(rawContext: AuthorizationContext): Promise<void> {
@@ -172,6 +197,47 @@ class SearchMaterializationRuntime {
     });
     const sourceHighWatermark = await this.#sourceHighWatermark();
     const statements: SqlitePreparedStatementLike[] = [
+      ...BUILTIN_SEARCH_KINDS.map((kind) =>
+        this.#db
+          .prepare(
+            `INSERT INTO taproot_unified_search_producer_manifests(
+               installation_id, source_kind, producer_fingerprint,
+               owning_domain, contract_version, projection_version,
+               authorization_contract_version, manifest_revision, created_at
+             ) VALUES (?, ?, 'taproot-builtin-projection-v1', 'taproot',
+               'taproot-external-search-producer-v1',
+               'taproot-unified-search-projection-v1',
+               'taproot-search-authorization-v1', 1, ?)
+             ON CONFLICT(installation_id, source_kind, producer_fingerprint)
+             DO NOTHING`,
+          )
+          .bind(this.#installationId, kind, now),
+      ),
+      ...UNIFIED_SEARCH_KINDS.map((kind) =>
+        this.#db
+          .prepare(
+            `INSERT INTO taproot_unified_search_producer_adoptions(
+               installation_id, source_kind, producer_fingerprint, state,
+               manifest_revision, updated_at)
+             VALUES (?, ?, ?, ?, 1, ?)
+             ON CONFLICT(installation_id, source_kind) DO NOTHING`,
+          )
+          .bind(
+            this.#installationId,
+            kind,
+            BUILTIN_SEARCH_KINDS.includes(
+              kind as (typeof BUILTIN_SEARCH_KINDS)[number],
+            )
+              ? 'taproot-builtin-projection-v1'
+              : null,
+            BUILTIN_SEARCH_KINDS.includes(
+              kind as (typeof BUILTIN_SEARCH_KINDS)[number],
+            )
+              ? 'ready'
+              : 'blocked',
+            now,
+          ),
+      ),
       this.#db
         .prepare(
           `INSERT INTO taproot_search_corpora(
@@ -194,7 +260,7 @@ class SearchMaterializationRuntime {
              installation_id, active_corpus_id, cursor_generation,
              lifecycle_generation, health_code, blocked_producer_count,
              created_at, updated_at
-           ) VALUES (?, ?, 1, 1, 'blocked-producers', 5, ?, ?)`,
+           ) VALUES (?, ?, 1, 1, 'blocked-producers', 3, ?, ?)`,
         )
         .bind(this.#installationId, corpusId, now, now),
       ...UNIFIED_SEARCH_KINDS.map((kind) =>
@@ -206,6 +272,26 @@ class SearchMaterializationRuntime {
           )
           .bind(corpusId, kind),
       ),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_unified_search_generation_producers(
+             corpus_id, installation_id, source_kind, producer_fingerprint,
+             contract_version, projection_version,
+             authorization_contract_version, state, updated_at
+           )
+           SELECT ?, a.installation_id, a.source_kind, a.producer_fingerprint,
+             m.contract_version, m.projection_version,
+             m.authorization_contract_version,
+             CASE WHEN a.state = 'ready' AND m.producer_fingerprint IS NOT NULL
+               THEN 'ready' ELSE 'blocked' END, ?
+           FROM taproot_unified_search_producer_adoptions a
+           LEFT JOIN taproot_unified_search_producer_manifests m
+             ON m.installation_id = a.installation_id
+            AND m.source_kind = a.source_kind
+            AND m.producer_fingerprint = a.producer_fingerprint
+           WHERE a.installation_id = ?`,
+        )
+        .bind(corpusId, now, this.#installationId),
       this.#db
         .prepare(
           `INSERT INTO taproot_search_admin_audit(
@@ -325,6 +411,9 @@ class SearchMaterializationRuntime {
       }>();
     const countRow = counts.results[0];
     const generation = generations.results[0]!;
+    const blockedProducerKinds = await this.#blockedProducerKinds(
+      state.active_corpus_id,
+    );
     return {
       version: 1,
       status:
@@ -339,7 +428,7 @@ class SearchMaterializationRuntime {
           ? null
           : Number(generation.shadow_generation),
       cursorGeneration: Number(state.cursor_generation),
-      blockedProducerKinds: [...BLOCKED_PRODUCERS],
+      blockedProducerKinds,
       pendingJobs: Number(countRow?.pending ?? 0),
       leasedJobs: Number(countRow?.leased ?? 0),
       deadJobs: Number(countRow?.dead ?? 0),
@@ -481,6 +570,26 @@ class SearchMaterializationRuntime {
           )
           .bind(corpusId, kind),
       ),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_unified_search_generation_producers(
+             corpus_id, installation_id, source_kind, producer_fingerprint,
+             contract_version, projection_version,
+             authorization_contract_version, state, updated_at
+           )
+           SELECT ?, a.installation_id, a.source_kind, a.producer_fingerprint,
+             m.contract_version, m.projection_version,
+             m.authorization_contract_version,
+             CASE WHEN a.state = 'ready' AND m.producer_fingerprint IS NOT NULL
+               THEN 'ready' ELSE 'blocked' END, ?
+           FROM taproot_unified_search_producer_adoptions a
+           LEFT JOIN taproot_unified_search_producer_manifests m
+             ON m.installation_id = a.installation_id
+            AND m.source_kind = a.source_kind
+            AND m.producer_fingerprint = a.producer_fingerprint
+           WHERE a.installation_id = ?`,
+        )
+        .bind(corpusId, now, this.#installationId),
       this.#db
         .prepare(
           `UPDATE taproot_search_installation_state
@@ -670,6 +779,7 @@ class SearchMaterializationRuntime {
             Number(right.source_event_sequence) ||
           left.corpus_id.localeCompare(right.corpus_id),
       )
+      .filter((job) => this.#producerAvailable(job))
       .slice(0, limit);
     const claims: Claim[] = [];
     for (const observed of candidates) {
@@ -740,6 +850,61 @@ class SearchMaterializationRuntime {
     return claims;
   }
 
+  #producerAvailable(job: JobRow): boolean {
+    if (
+      BUILTIN_SEARCH_KINDS.includes(
+        job.source_kind as (typeof BUILTIN_SEARCH_KINDS)[number],
+      ) &&
+      job.producer_fingerprint === 'taproot-builtin-projection-v1'
+    )
+      return true;
+    return (
+      lookupExternalSearchProducerRuntimeInternalV1(
+        this.#db,
+        this.#installationId,
+        job.source_kind,
+        job.producer_fingerprint,
+      ) !== null
+    );
+  }
+
+  async #blockedProducerKinds(
+    corpusId: string,
+  ): Promise<readonly UnifiedSearchKind[]> {
+    const result = await this.#db
+      .prepare(
+        `SELECT source_kind, producer_fingerprint, state
+         FROM taproot_unified_search_generation_producers
+         WHERE corpus_id = ? ORDER BY source_kind`,
+      )
+      .bind(corpusId)
+      .all<{
+        source_kind: UnifiedSearchKind;
+        producer_fingerprint: string | null;
+        state: 'ready' | 'blocked' | 'retired';
+      }>();
+    const byKind = new Map(result.results.map((row) => [row.source_kind, row]));
+    return UNIFIED_SEARCH_KINDS.filter((kind) => {
+      const row = byKind.get(kind);
+      if (!row || row.state !== 'ready') return true;
+      if (
+        BUILTIN_SEARCH_KINDS.includes(
+          kind as (typeof BUILTIN_SEARCH_KINDS)[number],
+        ) &&
+        row.producer_fingerprint === 'taproot-builtin-projection-v1'
+      )
+        return false;
+      return (
+        lookupExternalSearchProducerRuntimeInternalV1(
+          this.#db,
+          this.#installationId,
+          kind,
+          row.producer_fingerprint,
+        ) === null
+      );
+    });
+  }
+
   async #processClaim(
     claim: Claim,
     maxChunkBytes: number,
@@ -753,13 +918,15 @@ class SearchMaterializationRuntime {
       await this.#completeSuperseded(claim, 'item-root-owned');
       return 'superseded';
     }
-    if (!IMPLEMENTED_PRODUCERS.includes(claim.job.source_kind as never)) {
-      return this.#deferOrDead(claim, 'producer-unavailable');
-    }
     const plan =
       claim.job.operation === 'delete'
         ? await emptyPlan(claim.job, this.#installationId)
-        : await this.#loadAndProjectItem(claim.job, maxChunkBytes);
+        : claim.job.source_kind === 'item'
+          ? await this.#loadAndProjectItem(claim.job, maxChunkBytes)
+          : claim.job.source_kind === 'resource' ||
+              claim.job.source_kind === 'annotation'
+            ? await this.#loadAndProjectContent(claim.job, maxChunkBytes)
+            : await this.#loadAndProjectExternal(claim.job, maxChunkBytes);
     if (!plan) {
       await this.#completeSuperseded(claim, 'canonical-state-stale');
       return 'superseded';
@@ -775,6 +942,30 @@ class SearchMaterializationRuntime {
     }
     await this.#finalizeStage(claim, stageId, plan);
     return 'completed';
+  }
+
+  async #loadAndProjectExternal(
+    job: JobRow,
+    maxChunkBytes: number,
+  ): Promise<SearchProjectionPlanV1 | null> {
+    const runtime = lookupExternalSearchProducerRuntimeInternalV1(
+      this.#db,
+      this.#installationId,
+      job.source_kind,
+      job.producer_fingerprint,
+    );
+    if (!runtime) return null;
+    const loaded = await runtime.callbacks.loadCurrent({
+      sourceId: job.source_id,
+      expectedSourceRevision: job.root_revision,
+    });
+    if (!loaded) return null;
+    return buildExternalSearchProjectionPlanInternalV1(
+      runtime,
+      loaded,
+      projectionSource(job, this.#installationId),
+      maxChunkBytes,
+    );
   }
 
   async #loadAndProjectItem(
@@ -813,7 +1004,7 @@ class SearchMaterializationRuntime {
       row.redirect_to !== null ||
       String(row.revision) !== job.root_revision ||
       row.content_hash !== job.root_hash ||
-      Number(row.authorization_revision) !== job.authorization_revision
+      Number(row.authorization_revision) !== job.source_policy_revision
     )
       return null;
     const entity = parseEntityJson(row.entity_json);
@@ -844,6 +1035,7 @@ class SearchMaterializationRuntime {
         installationId: this.#installationId,
         workspaceId: row.workspace_id,
         ownerPrincipalId: row.owner_principal_id,
+        sourcePolicyRevision: job.source_policy_revision,
         authorizationRevision: job.authorization_revision,
         visibility: JSON.parse(
           row.effective_visibility_json,
@@ -861,7 +1053,7 @@ class SearchMaterializationRuntime {
       const policy = byId.get(statement.id);
       if (
         !policy ||
-        Number(policy.authorization_revision) !== job.authorization_revision
+        Number(policy.authorization_revision) !== job.source_policy_revision
       )
         return null;
       statementAuthorizations[statement.id] =
@@ -873,6 +1065,7 @@ class SearchMaterializationRuntime {
           installationId: this.#installationId,
           workspaceId: row.workspace_id,
           ownerPrincipalId: row.owner_principal_id,
+          sourcePolicyRevision: job.source_policy_revision,
           authorizationRevision: job.authorization_revision,
           visibility: JSON.parse(
             policy.effective_visibility_json,
@@ -887,6 +1080,152 @@ class SearchMaterializationRuntime {
       mixedScope: 'partition',
       maxChunkBytes,
     });
+  }
+
+  async #loadAndProjectContent(
+    job: JobRow,
+    maxChunkBytes: number,
+  ): Promise<SearchProjectionPlanV1 | null> {
+    if (job.source_kind !== 'resource' && job.source_kind !== 'annotation')
+      return null;
+    const table =
+      job.source_kind === 'resource'
+        ? 'taproot_resources'
+        : 'taproot_annotations';
+    const result = await this.#db
+      .prepare(
+        `SELECT record_json, revision, policy_revision, visibility_json, deleted_at FROM ${table} WHERE record_id = ? AND installation_id = ?`,
+      )
+      .bind(job.source_id, this.#installationId)
+      .all<{
+        record_json: string;
+        revision: number;
+        policy_revision: number;
+        visibility_json: string;
+        deleted_at: string | null;
+      }>();
+    const row = result.results[0];
+    if (
+      !row ||
+      row.deleted_at !== null ||
+      String(row.revision) !== job.root_revision ||
+      Number(row.policy_revision) !== job.source_policy_revision ||
+      (await canonicalSearchHashV1(JSON.parse(row.record_json))) !==
+        job.root_hash
+    )
+      return null;
+    const record = JSON.parse(row.record_json) as {
+      id: string;
+      title?: string;
+      payload?: {
+        kind: string;
+        text?: string;
+        location?: string;
+        storage?: 'blob' | 'file' | 'url';
+        byteLength?: number;
+      };
+      integrity?: { algorithm: string; digest: string; byteLength: number };
+      mediaType?: string;
+      language?: string;
+      body?: { kind: string; text?: string; resourceId?: string };
+      authorization: { workspaceId: string | null; ownerPrincipalId: string };
+    };
+    let text =
+      job.source_kind === 'resource'
+        ? record.payload?.kind === 'inline-text'
+          ? record.payload.text
+          : (record.title ?? record.payload?.location)
+        : record.body?.kind === 'text'
+          ? record.body.text
+          : undefined;
+    if (
+      job.source_kind === 'resource' &&
+      record.payload?.kind === 'location' &&
+      this.#payloadStore &&
+      isTextualMediaType(record.mediaType ?? 'application/octet-stream')
+    ) {
+      const bytes = await this.#payloadStore.load(
+        record.payload as Parameters<PortableResourcePayloadStoreV1['load']>[0],
+      );
+      if (bytes.byteLength > this.#maxExternalPayloadBytes)
+        throw new Error(
+          'external resource payload exceeds materialization bound',
+        );
+      if (
+        !record.integrity ||
+        record.integrity.algorithm !== 'sha256' ||
+        record.integrity.byteLength !== bytes.byteLength ||
+        (await sha256Bytes(bytes)) !== record.integrity.digest
+      )
+        throw new Error('external resource payload integrity mismatch');
+      text = [
+        record.title,
+        new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
+    if (job.source_kind === 'annotation' && !text && record.body?.resourceId) {
+      const body = await this.#db
+        .prepare(
+          `SELECT record_json FROM taproot_resources WHERE record_id = ? AND installation_id = ? AND deleted_at IS NULL`,
+        )
+        .bind(record.body.resourceId, this.#installationId)
+        .all<{ record_json: string }>();
+      const resource = body.results[0]
+        ? (JSON.parse(body.results[0].record_json) as {
+            payload?: { kind: string; text?: string };
+            title?: string;
+          })
+        : undefined;
+      text =
+        resource?.payload?.kind === 'inline-text'
+          ? resource.payload.text
+          : resource?.title;
+    }
+    if (!text) return null;
+    const source = projectionSource(job, this.#installationId);
+    const authority = createSearchProjectionAuthorizationAuthorityV1(
+      new PersistedEntityAuthorizationSource(this.#db),
+    );
+    const authorization = await createTrustedSearchAuthorizationEnvelopeV1(
+      authority,
+      {
+        version: 1,
+        sourceKind: job.source_kind,
+        sourceId: job.source_id,
+        sourceRevision: job.root_revision,
+        installationId: this.#installationId,
+        workspaceId: record.authorization.workspaceId,
+        ownerPrincipalId: record.authorization.ownerPrincipalId,
+        sourcePolicyRevision: job.source_policy_revision,
+        authorizationRevision: job.authorization_revision,
+        visibility: JSON.parse(row.visibility_json) as VisibilityScopeV1,
+      },
+    );
+    return job.source_kind === 'resource'
+      ? projectResourceForUnifiedSearchV1({
+          source,
+          resourceId: job.source_id,
+          ...(record.title === undefined ? {} : { title: record.title }),
+          text,
+          ...(record.language === undefined
+            ? {}
+            : { language: record.language }),
+          mediaType: record.mediaType ?? 'application/octet-stream',
+          authorization,
+          maxChunkBytes,
+        })
+      : projectAnnotationForUnifiedSearchV1({
+          source,
+          annotationId: job.source_id,
+          text,
+          ...(record.language === undefined
+            ? {}
+            : { language: record.language }),
+          authorization,
+          maxChunkBytes,
+        });
   }
 
   async #persistInvisibleStage(
@@ -908,8 +1247,9 @@ class SearchMaterializationRuntime {
              stage_id, job_id, corpus_id, claim_token, claim_generation,
              state, root_kind, root_id, source_event_id,
              source_event_sequence, root_revision, root_hash,
-             authorization_revision, created_at
-           ) VALUES (?, ?, ?, ?, ?, 'building', ?, ?, ?, ?, ?, ?, ?, ?)`,
+             source_policy_revision, authorization_revision,
+             producer_fingerprint, created_at
+           ) VALUES (?, ?, ?, ?, ?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           stageId,
@@ -923,7 +1263,9 @@ class SearchMaterializationRuntime {
           claim.job.source_event_sequence,
           claim.job.root_revision,
           claim.job.root_hash,
+          claim.job.source_policy_revision,
           claim.job.authorization_revision,
+          claim.job.producer_fingerprint,
           now,
         ),
     ]);
@@ -1190,15 +1532,18 @@ class SearchMaterializationRuntime {
           `INSERT INTO taproot_search_materialization_heads(
              corpus_id, root_kind, root_id, current_stage_id,
              source_event_id, source_event_sequence, root_revision,
-             root_hash, authorization_revision, eligible, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             root_hash, source_policy_revision, authorization_revision,
+             producer_fingerprint, eligible, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(corpus_id, root_kind, root_id) DO UPDATE SET
              current_stage_id = excluded.current_stage_id,
              source_event_id = excluded.source_event_id,
              source_event_sequence = excluded.source_event_sequence,
              root_revision = excluded.root_revision,
              root_hash = excluded.root_hash,
+             source_policy_revision = excluded.source_policy_revision,
              authorization_revision = excluded.authorization_revision,
+             producer_fingerprint = excluded.producer_fingerprint,
              eligible = excluded.eligible, updated_at = excluded.updated_at
            WHERE excluded.source_event_sequence > taproot_search_materialization_heads.source_event_sequence`,
         )
@@ -1211,7 +1556,9 @@ class SearchMaterializationRuntime {
           claim.job.source_event_sequence,
           claim.job.root_revision,
           claim.job.root_hash,
+          claim.job.source_policy_revision,
           claim.job.authorization_revision,
+          claim.job.producer_fingerprint,
           eligible,
           now,
         ),
@@ -1223,7 +1570,8 @@ class SearchMaterializationRuntime {
              WHERE corpus_id = ? AND root_kind = ? AND root_id = ?
                AND current_stage_id = ? AND source_event_id = ?
                AND source_event_sequence = ? AND root_revision = ?
-               AND root_hash = ? AND authorization_revision = ?
+               AND root_hash = ? AND source_policy_revision = ?
+               AND authorization_revision = ? AND producer_fingerprint IS ?
                AND eligible = ?
            )`,
         )
@@ -1236,7 +1584,9 @@ class SearchMaterializationRuntime {
           claim.job.source_event_sequence,
           claim.job.root_revision,
           claim.job.root_hash,
+          claim.job.source_policy_revision,
           claim.job.authorization_revision,
+          claim.job.producer_fingerprint,
           eligible,
         ),
       this.#db
@@ -1443,15 +1793,19 @@ class SearchMaterializationRuntime {
     const rows = await this.#db
       .prepare(
         `SELECT r.*, e.sequence, e.event_id, e.operation, e.source_hash,
-                e.authorization_revision, e.search_generation, e.created_at
+                e.source_policy_revision, e.authorization_revision,
+                e.search_generation, e.created_at, p.producer_fingerprint
          FROM taproot_unified_search_source_registry r
          JOIN taproot_unified_search_source_events e
            ON e.sequence = r.current_event_sequence AND e.event_id = r.current_event_id
+         JOIN taproot_unified_search_generation_producers p
+           ON p.corpus_id = ? AND p.installation_id = r.installation_id
+          AND p.source_kind = r.source_kind AND p.state = 'ready'
          WHERE r.installation_id = ?
            AND (? IS NULL OR r.source_kind || ':' || r.source_id > ?)
          ORDER BY r.source_kind, r.source_id LIMIT ?`,
       )
-      .bind(this.#installationId, cursor, cursor, limit)
+      .bind(corpusId, this.#installationId, cursor, cursor, limit)
       .all<Record<string, unknown>>();
     for (const row of rows.results) {
       const key = `${String(row.source_kind)}:${String(row.source_id)}`;
@@ -1482,9 +1836,10 @@ class SearchMaterializationRuntime {
             `INSERT INTO taproot_search_projection_jobs(
                job_id, corpus_id, installation_id, source_event_id,
                source_event_sequence, source_kind, source_id, operation,
-               root_revision, root_hash, authorization_revision,
-               search_generation, state, not_before, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+               root_revision, root_hash, source_policy_revision,
+               authorization_revision, search_generation, producer_fingerprint,
+               state, not_before, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
              ON CONFLICT(corpus_id, source_event_id) DO NOTHING`,
           )
           .bind(
@@ -1498,8 +1853,10 @@ class SearchMaterializationRuntime {
             row.operation,
             row.source_revision,
             row.source_hash,
+            row.source_policy_revision,
             row.authorization_revision,
             row.search_generation,
+            row.producer_fingerprint,
             row.created_at,
             row.created_at,
             row.created_at,
@@ -1659,6 +2016,7 @@ function projectionSource(
     sourceId: job.source_id,
     sourceRevision: job.root_revision,
     sourceHash: job.root_hash,
+    sourcePolicyRevision: Number(job.source_policy_revision),
     authorizationRevision: Number(job.authorization_revision),
     searchGeneration: Number(job.search_generation),
   };
@@ -1759,6 +2117,25 @@ async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
+}
+
+async function sha256Bytes(value: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(value));
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function isTextualMediaType(value: string): boolean {
+  const mediaType = value.toLowerCase().split(';', 1)[0]!.trim();
+  return (
+    mediaType.startsWith('text/') ||
+    mediaType === 'application/json' ||
+    mediaType.endsWith('+json') ||
+    mediaType === 'application/xml' ||
+    mediaType.endsWith('+xml') ||
+    mediaType === 'application/javascript'
+  );
 }
 
 function allStatements(item: Item) {

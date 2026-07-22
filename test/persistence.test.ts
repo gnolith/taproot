@@ -50,6 +50,8 @@ describe('portable Taproot persistence', () => {
         'pending',
         'pending',
         'pending',
+        'pending',
+        'pending',
       ]);
       const tablesBefore = await db
         .prepare(
@@ -64,6 +66,8 @@ describe('portable Taproot persistence', () => {
       const inspection = await inspectTaprootPersistence(db);
       expect(inspection).toMatchObject({ baseIri, current: true });
       expect(inspection.migrations.map(({ status }) => status)).toEqual([
+        'applied',
+        'applied',
         'applied',
         'applied',
         'applied',
@@ -237,6 +241,11 @@ describe('portable Taproot persistence', () => {
         { id: '0005-unified-search-source-events', status: 'pending' },
         {
           id: '0006-unified-search-materialization-lifecycle',
+          status: 'pending',
+        },
+        { id: '0007-external-search-producers', status: 'pending' },
+        {
+          id: '0008-complete-search-content-semantic',
           status: 'pending',
         },
       ]);

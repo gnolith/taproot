@@ -17,7 +17,7 @@ describe('package release guard', () => {
     expect(manifest).toMatchObject({
       name: '@gnolith/taproot',
       private: false,
-      version: '0.3.0',
+      version: '0.4.0',
       publishConfig: { access: 'public', provenance: true },
     });
     expect(manifest.dependencies['@gnolith/diamond']).toBe('0.4.0');

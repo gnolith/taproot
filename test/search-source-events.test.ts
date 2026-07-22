@@ -32,6 +32,8 @@ import {
   setLabel,
   softDeleteEntity,
   taprootSearchMaterializationSchemaStatements,
+  taprootExternalSearchProducerSchemaStatements,
+  taprootCompleteSearchSchemaStatements,
   type AuthorizationContext,
   type CanonicalAuthorizationPolicyInput,
   type TaprootHostWriteCapability,
@@ -92,6 +94,11 @@ describe('unified-search source-event migration 0005', () => {
         id: '0006-unified-search-materialization-lifecycle',
         status: 'pending',
       },
+      { id: '0007-external-search-producers', status: 'pending' },
+      {
+        id: '0008-complete-search-content-semantic',
+        status: 'pending',
+      },
     ]);
     await applyTaprootMigrations(db, options);
     expect((await inspectTaprootSchema(db)).valid).toBe(true);
@@ -100,7 +107,9 @@ describe('unified-search source-event migration 0005', () => {
     await db.close();
     db = new NodeSqliteDatabase(path);
     try {
-      expect((await inspectTaprootSchema(db)).valid).toBe(true);
+      const inspection = await inspectTaprootSchema(db);
+      expect(inspection.errors).toEqual([]);
+      expect(inspection.valid).toBe(true);
       expect(
         (await planTaprootMigrations(db)).every(
           ({ status }) => status === 'applied',
@@ -147,7 +156,9 @@ describe('unified-search source-event migration 0005', () => {
         'DB',
       )) as unknown as D1DatabaseLike;
       await initializeTaproot(db, options);
-      expect((await inspectTaprootSchema(db)).valid).toBe(true);
+      const inspection = await inspectTaprootSchema(db);
+      expect(inspection.errors).toEqual([]);
+      expect(inspection.valid).toBe(true);
       expect(await count(db, 'taproot_unified_search_source_events')).toBe(0);
     } finally {
       await miniflare.dispose();
@@ -961,6 +972,8 @@ async function migrationCount(db: D1DatabaseLike, id: string): Promise<number> {
 }
 
 async function downgradeTo0004(db: D1DatabaseLike): Promise<void> {
+  await dropCompleteSearchSchema(db);
+  await dropExternalSearchProducerSchema(db);
   await dropSearchMaterializationSchema(db);
   await db.batch([
     db.prepare(`DROP TABLE taproot_unified_search_source_registry`),
@@ -971,7 +984,9 @@ async function downgradeTo0004(db: D1DatabaseLike): Promise<void> {
        WHERE namespace = '@gnolith/taproot'
          AND migration_id IN (
            '0005-unified-search-source-events',
-           '0006-unified-search-materialization-lifecycle'
+           '0006-unified-search-materialization-lifecycle',
+           '0007-external-search-producers'
+           ,'0008-complete-search-content-semantic'
          )`,
     ),
     db.prepare(
@@ -979,6 +994,40 @@ async function downgradeTo0004(db: D1DatabaseLike): Promise<void> {
        WHERE metadata_key = 'schema_version'`,
     ),
   ]);
+}
+
+async function dropExternalSearchProducerSchema(
+  db: D1DatabaseLike,
+): Promise<void> {
+  const objects = taprootExternalSearchProducerSchemaStatements
+    .map((sql) =>
+      /^CREATE (TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
+        sql,
+      ),
+    )
+    .filter((match): match is RegExpExecArray => match !== null)
+    .reverse();
+  await db.batch(
+    objects.map((match) =>
+      db.prepare(`DROP ${match[1]!.toUpperCase()} IF EXISTS ${match[2]}`),
+    ),
+  );
+}
+
+async function dropCompleteSearchSchema(db: D1DatabaseLike): Promise<void> {
+  const objects = taprootCompleteSearchSchemaStatements
+    .map((sql) =>
+      /^CREATE (?:UNIQUE )?(TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
+        sql,
+      ),
+    )
+    .filter((match): match is RegExpExecArray => match !== null)
+    .reverse();
+  await db.batch(
+    objects.map((match) =>
+      db.prepare(`DROP ${match[1]!.toUpperCase()} IF EXISTS ${match[2]}`),
+    ),
+  );
 }
 
 async function dropSearchMaterializationSchema(

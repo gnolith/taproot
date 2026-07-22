@@ -1,7 +1,7 @@
 {
   "name": "@gnolith/taproot",
-  "version": "0.3.0",
-  "description": "Portable SQLite and D1 Wikibase-compatible knowledge graph and revision layer for Gnolith.",
+  "version": "0.4.0",
+  "description": "Portable canonical knowledge, content, authorization, and hybrid search layer for Gnolith.",
   "author": "Gnolith contributors",
   "keywords": [
     "cloudflare-d1",
@@ -48,6 +48,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "baseline:hybrid-search": "npm run build && node scripts/hybrid-search-baseline.mjs",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run interop:check && npm run pack:check && npm run consumer:check && npm run licenses:check && npm run repository:check",
     "consumer:check": "node scripts/consumer-smoke.mjs",
     "interop:check": "vitest run test/interop.test.ts",
@@ -65,6 +66,7 @@
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run test/repository.test.ts test/interop.test.ts",
     "test:persistence": "vitest run test/persistence.test.ts test/migration-recovery.test.ts",
+    "test:qdrant": "npm run build && node scripts/qdrant-conformance.mjs",
     "test:unit": "vitest run test/rdf.test.ts test/scaffold.test.ts",
     "typecheck": "tsc --noEmit"
   },

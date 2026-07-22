@@ -154,6 +154,7 @@ export interface SearchProjectionSourceEventV1 {
   sourceId: string;
   sourceRevision: string;
   sourceHash: string;
+  sourcePolicyRevision: number;
   authorizationRevision: number;
   searchGeneration: number;
 }
@@ -166,6 +167,7 @@ export interface SearchAuthorizationEnvelopeValueV1 {
   installationId: string;
   workspaceId: string | null;
   ownerPrincipalId: string;
+  sourcePolicyRevision: number;
   authorizationRevision: number;
   visibility: VisibilityScopeV1;
   fingerprint: string;
@@ -180,7 +182,16 @@ export interface SearchProjectionAuthorizationAuthorityV1 {
 }
 
 export type SearchProjectionFieldV1 =
-  'label' | 'alias' | 'description' | 'type' | 'statement';
+  | 'label'
+  | 'alias'
+  | 'description'
+  | 'type'
+  | 'statement'
+  | 'title'
+  | 'content'
+  | 'prompt'
+  | 'result'
+  | 'status';
 
 export interface SearchProjectionSegmentV1 {
   field: SearchProjectionFieldV1;
@@ -198,7 +209,7 @@ export interface DerivedSearchDocumentV1 {
   /** Stable within one installation/root/canonical reference across revisions. */
   documentSlot: string;
   hash: string;
-  kind: 'statement' | 'item';
+  kind: UnifiedSearchKind;
   source: SearchProjectionSourceEventV1;
   /** Event-producing aggregate root used for replace-all and deletion. */
   rootReference: UnifiedSearchReferenceV1;
@@ -267,6 +278,26 @@ export interface ItemProjectionInputV1 {
     Record<string, TrustedSearchAuthorizationEnvelopeV1>
   >;
   mixedScope: 'partition' | 'reject';
+  maxChunkBytes?: number;
+}
+
+export interface ResourceProjectionInputV1 {
+  source: SearchProjectionSourceEventV1;
+  resourceId: string;
+  title?: string;
+  text: string;
+  language?: string;
+  mediaType: string;
+  authorization: TrustedSearchAuthorizationEnvelopeV1;
+  maxChunkBytes?: number;
+}
+
+export interface AnnotationProjectionInputV1 {
+  source: SearchProjectionSourceEventV1;
+  annotationId: string;
+  text: string;
+  language?: string;
+  authorization: TrustedSearchAuthorizationEnvelopeV1;
   maxChunkBytes?: number;
 }
 
@@ -564,6 +595,7 @@ export function normalizeSearchProjectionSourceEventV1(
     'sourceId',
     'sourceRevision',
     'sourceHash',
+    'sourcePolicyRevision',
     'authorizationRevision',
     'searchGeneration',
   ]);
@@ -579,6 +611,10 @@ export function normalizeSearchProjectionSourceEventV1(
     sourceId: identifier(input.sourceId, 'sourceId'),
     sourceRevision: opaque(input.sourceRevision, 'sourceRevision'),
     sourceHash: sha256(input.sourceHash, 'sourceHash'),
+    sourcePolicyRevision: revision(
+      input.sourcePolicyRevision,
+      'sourcePolicyRevision',
+    ),
     authorizationRevision: revision(
       input.authorizationRevision,
       'authorizationRevision',
@@ -619,6 +655,7 @@ export async function createTrustedSearchAuthorizationEnvelopeV1(
     'installationId',
     'workspaceId',
     'ownerPrincipalId',
+    'sourcePolicyRevision',
     'authorizationRevision',
     'visibility',
   ]);
@@ -635,6 +672,10 @@ export async function createTrustedSearchAuthorizationEnvelopeV1(
         ? null
         : identifier(input.workspaceId, 'workspaceId'),
     ownerPrincipalId: identifier(input.ownerPrincipalId, 'ownerPrincipalId'),
+    sourcePolicyRevision: revision(
+      input.sourcePolicyRevision,
+      'sourcePolicyRevision',
+    ),
     authorizationRevision: revision(
       input.authorizationRevision,
       'authorizationRevision',
@@ -823,12 +864,86 @@ export function projectPromptForUnifiedSearchV1(): never {
   return unsupportedProjection('prompt');
 }
 
-export function projectResourceForUnifiedSearchV1(): never {
-  return unsupportedProjection('resource');
+export async function projectResourceForUnifiedSearchV1(
+  input: ResourceProjectionInputV1,
+): Promise<SearchProjectionPlanV1> {
+  const source = normalizeSearchProjectionSourceEventV1(input.source);
+  if (source.operation !== 'upsert' || source.kind !== 'resource')
+    invalid('resource projection requires a Resource upsert source event');
+  const resourceId = identifier(input.resourceId, 'resourceId');
+  if (source.sourceId !== resourceId)
+    invalid('resource source id does not match the Resource');
+  const authorization = authorizationFor(
+    input.authorization,
+    source,
+    'resource',
+    resourceId,
+  );
+  const segments: SearchProjectionSegmentV1[] = [];
+  if (input.title !== undefined)
+    segments.push(
+      segment('title', resourceId, input.language ?? null, input.title),
+    );
+  segments.push(
+    segment('content', resourceId, input.language ?? null, input.text),
+  );
+  const reference = { kind: 'resource' as const, resourceId };
+  const document = await buildDocument(
+    'resource',
+    source,
+    authorization,
+    'resource',
+    reference,
+    reference,
+    {
+      languages: input.language ? [input.language] : [],
+      sourceRevisions: [source.sourceRevision],
+      byKind: { resource: { mediaTypes: [input.mediaType] } },
+    },
+    segments,
+  );
+  return buildPlan(
+    source,
+    [document],
+    await chunkDocument(document, normalizeChunkBytes(input.maxChunkBytes)),
+  );
 }
 
-export function projectAnnotationForUnifiedSearchV1(): never {
-  return unsupportedProjection('annotation');
+export async function projectAnnotationForUnifiedSearchV1(
+  input: AnnotationProjectionInputV1,
+): Promise<SearchProjectionPlanV1> {
+  const source = normalizeSearchProjectionSourceEventV1(input.source);
+  if (source.operation !== 'upsert' || source.kind !== 'annotation')
+    invalid('annotation projection requires an Annotation upsert source event');
+  const annotationId = identifier(input.annotationId, 'annotationId');
+  if (source.sourceId !== annotationId)
+    invalid('annotation source id does not match the Annotation');
+  const authorization = authorizationFor(
+    input.authorization,
+    source,
+    'annotation',
+    annotationId,
+  );
+  const reference = { kind: 'annotation' as const, annotationId };
+  const document = await buildDocument(
+    'annotation',
+    source,
+    authorization,
+    'annotation',
+    reference,
+    reference,
+    {
+      languages: input.language ? [input.language] : [],
+      sourceRevisions: [source.sourceRevision],
+      byKind: {},
+    },
+    [segment('content', annotationId, input.language ?? null, input.text)],
+  );
+  return buildPlan(
+    source,
+    [document],
+    await chunkDocument(document, normalizeChunkBytes(input.maxChunkBytes)),
+  );
 }
 
 function unsupportedProjection(kind: UnifiedSearchKind): never {
@@ -947,6 +1062,7 @@ function authorizationFor(
     authorization.sourceKind !== sourceKind ||
     authorization.sourceId !== sourceId ||
     authorization.sourceRevision !== source.sourceRevision ||
+    authorization.sourcePolicyRevision !== source.sourcePolicyRevision ||
     authorization.authorizationRevision !== source.authorizationRevision ||
     authorization.installationId !== source.installationId
   )
@@ -961,6 +1077,7 @@ async function intersectAuthorization(
   if (
     item.installationId !== statement.installationId ||
     item.sourceRevision !== statement.sourceRevision ||
+    item.sourcePolicyRevision !== statement.sourcePolicyRevision ||
     item.authorizationRevision !== statement.authorizationRevision
   )
     invalid('statement authorization is not in the Item authorization domain');
@@ -1078,7 +1195,7 @@ function segment(
 }
 
 async function buildDocument(
-  kind: 'statement' | 'item',
+  kind: UnifiedSearchKind,
   source: SearchProjectionSourceEventV1,
   authorization: SearchAuthorizationEnvelopeValueV1,
   documentSlot: string,
@@ -1349,6 +1466,7 @@ function authorizationFingerprint(value: {
   installationId: string;
   workspaceId: string | null;
   ownerPrincipalId: string;
+  sourcePolicyRevision: number;
   authorizationRevision: number;
   visibility: VisibilityScopeV1;
 }): Promise<string> {
@@ -1357,6 +1475,7 @@ function authorizationFingerprint(value: {
     installationId: value.installationId,
     workspaceId: value.workspaceId,
     ownerPrincipalId: value.ownerPrincipalId,
+    sourcePolicyRevision: value.sourcePolicyRevision,
     authorizationRevision: value.authorizationRevision,
     visibility: value.visibility,
   });

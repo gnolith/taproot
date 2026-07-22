@@ -313,8 +313,15 @@ writeFileSync(
       });
       if (
         materializationReceipt.completed !== 1 ||
-        materializationReceipt.deferred !== 1
-      ) throw new Error('packed materialization did not process Item and block Task');
+        materializationReceipt.deferred !== 0 ||
+        materializationReceipt.dead !== 0
+      ) throw new Error('packed materialization did not process Item without attempting blocked Task');
+      const blockedTaskJobs = await local.prepare(
+        "SELECT COUNT(*) AS count FROM taproot_search_projection_jobs WHERE source_kind = 'task'",
+      ).all();
+      if (Number(blockedTaskJobs.results[0]?.count) !== 0) {
+        throw new Error('packed materialization enqueued blocked Task work');
+      }
       const visible = await local.prepare(
         \`SELECT d.document_slot, d.document_text
            FROM taproot_search_installation_state s
@@ -333,6 +340,7 @@ writeFileSync(
       const materializationHealth = await materialization.health(searchAdmin(2));
       if (
         materializationHealth.status !== 'blocked' ||
+        !materializationHealth.blockedProducerKinds.includes('task') ||
         JSON.stringify(materializationHealth).includes('packed local consumer')
       ) throw new Error('packed materialization health was not blocked and redacted');
       const projectionAuthority = createSearchProjectionAuthorizationAuthorityV1(
@@ -343,6 +351,7 @@ writeFileSync(
         sourceKind: 'statement',
         sourceId: 'Q1$packed-search',
         sourceRevision: '2',
+        sourcePolicyRevision: 2,
         installationId,
         workspaceId: null,
         ownerPrincipalId: 'packed-consumer-principal',
@@ -375,6 +384,7 @@ writeFileSync(
           sourceId: 'Q1$packed-search',
           sourceRevision: '2',
           sourceHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          sourcePolicyRevision: 2,
           authorizationRevision: 2,
           searchGeneration: 2,
         },
@@ -433,6 +443,7 @@ writeFileSync(
           sourceId: 'Q9',
           sourceRevision: '2',
           sourceHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          sourcePolicyRevision: 2,
           authorizationRevision: 2,
           searchGeneration: 2,
         },

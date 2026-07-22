@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.4.0
+
+- Added migration 0008 and the 0.4 public surface: canonical Resource and
+  Web-Annotation-aligned records, injected portable payload hydration, native
+  Resource/Annotation projection, authorized seven-kind lexical search,
+  deterministic chunk results/cursors/hydration, configurable semantic fusion,
+  durable embedding plans and budgets, SQLite and Qdrant vector adapters,
+  OpenAI/Ollama-compatible embedding adapters, and installation snapshot/restore.
+- Added shared native SQLite/Workerd content-search conformance, deterministic
+  adapter tests, pinned real-Qdrant lifecycle CI, hybrid performance evidence,
+  snapshot round trips, and a machine-checked 89-requirement evidence map.
+
+- Added migration 0007 with immutable external-producer manifests, durable
+  resumable adoption/audit state, generation-pinned fingerprints, distinct
+  source-policy and live-authorization fences, and a host-sealed data-only
+  Workshop Task/Memory boundary. Missing or mismatched process runtimes remain
+  dynamically blocked without consuming attempts. Existing 0006 staged graphs
+  are preserved on native SQLite and Workerd D1. Site deployment remains out of
+  package scope.
+
 - Added DDL-only migration 0006 and an opaque `search:admin`-guarded,
   runtime-neutral materialization lifecycle with bounded durable jobs,
   128-bit lease tokens and ABA fencing, invisible staged manifests, atomic
@@ -10,7 +30,7 @@
 - Added complete persisted Item-root projection into stable Item and Statement
   document slots with canonical references, CNF visibility/filter rows, traced
   chunks, removal semantics, and identical native SQLite/Workerd D1 lifecycle
-  tests. Five non-Taproot producers remain explicitly blocked, and no public
+  tests. Deferred producers remain explicitly blocked, and no public
   query/ranking/snippet/cursor surface or complete-Site assembly is added.
 - Added DDL-only migration 0005 with an immutable, metadata-only unified-search
   source-event log and current registry, plus opaque domain-bound atomic event

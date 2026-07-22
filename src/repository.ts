@@ -2559,6 +2559,7 @@ export class TaprootRepository {
         installationId: authorization.policy.installationId,
         domain: 'knowledge',
         sourceKind: 'item',
+        sourcePolicyRevision: authorization.authorizationRevision,
         authorizationRevision: authorization.authorizationRevision,
         searchGeneration: authorization.searchGeneration,
         createdAt: context.createdAt,

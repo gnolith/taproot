@@ -21,6 +21,8 @@ import {
   taprootAuthorizationSchemaStatements,
   taprootSearchSourceEventSchemaStatements,
   taprootSearchMaterializationSchemaStatements,
+  taprootExternalSearchProducerSchemaStatements,
+  taprootCompleteSearchSchemaStatements,
   type Reference,
   type Snak,
   type Statement,
@@ -51,9 +53,13 @@ async function dropAuthorizationSchema(db: D1DatabaseLike): Promise<void> {
     ...taprootAuthorizationSchemaStatements,
     ...taprootSearchSourceEventSchemaStatements,
     ...taprootSearchMaterializationSchemaStatements,
+    ...taprootExternalSearchProducerSchemaStatements,
+    ...taprootCompleteSearchSchemaStatements,
   ]
     .map((sql) =>
-      /^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS ([a-z0-9_]+)/iu.exec(sql),
+      /^CREATE (?:UNIQUE )?(TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
+        sql,
+      ),
     )
     .filter((match): match is RegExpExecArray => match !== null)
     .reverse();
@@ -79,7 +85,9 @@ describe('TaprootRepository on Workerd D1', () => {
                  '0003-canonical-statement-text',
                  '0004-canonical-authorization-policy',
                  '0005-unified-search-source-events',
-                 '0006-unified-search-materialization-lifecycle'
+                 '0006-unified-search-materialization-lifecycle',
+                 '0007-external-search-producers'
+                 ,'0008-complete-search-content-semantic'
                )`,
           ),
           env.db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),
@@ -158,7 +166,9 @@ describe('TaprootRepository on Workerd D1', () => {
                '0003-canonical-statement-text',
                  '0004-canonical-authorization-policy',
                  '0005-unified-search-source-events',
-                 '0006-unified-search-materialization-lifecycle'
+                 '0006-unified-search-materialization-lifecycle',
+                 '0007-external-search-producers'
+                 ,'0008-complete-search-content-semantic'
              )`,
         ),
         env.db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),

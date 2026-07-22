@@ -20,7 +20,19 @@ import { canonicalizeTaprootBaseIri } from './migrations.js';
 import {
   createSearchMaterializationRuntimeV1,
   type SearchMaterializationAdminGuardV1,
+  type SearchMaterializationContentOptionsV1,
 } from './search-materialization.js';
+import {
+  createExternalSearchDomainMutationCoordinatorInternalV1,
+  createExternalSearchDomainPolicyAuthorityInternalV1,
+  createExternalSearchProducerGuardInternalV1,
+  type ExternalSearchDomainMutationBindingV1,
+  type ExternalSearchDomainMutationCoordinatorV1,
+  type ExternalSearchDomainPolicyAuthorityV1,
+  type ExternalSearchProducerCallbacksV1,
+  type ExternalSearchProducerDescriptorV1,
+  type ExternalSearchProducerGuardV1,
+} from './external-search-producers.js';
 import {
   KNOWLEDGE_WRITE_CAPABILITY,
   KNOWLEDGE_POLICY_CAPABILITY,
@@ -226,17 +238,34 @@ export function createTaprootHostWriteCapability(
 }
 
 export * from './canonical.js';
+export * from './content-domain.js';
 export * from './authorization.js';
 export * from './errors.js';
 export * from './migrations.js';
 export * from './rdf.js';
 export * from './search-contract.js';
+export * from './search-service.js';
+export * from './semantic-search.js';
+export * from './snapshot.js';
 export {
   UNIFIED_SEARCH_SOURCE_KINDS_V1,
   normalizeInstallationSearchSourceBindingV1,
   normalizeUnifiedSearchSourceEventInputV1,
   unifiedSearchSourcePayloadHashV1,
 } from './search-source-events.js';
+export type {
+  ExternalSearchCanonicalMutationInputV1,
+  ExternalSearchCanonicalMutationReceiptV1,
+  ExternalSearchDomainMutationBindingV1,
+  ExternalSearchDomainMutationCoordinatorV1,
+  ExternalSearchDomainPolicyAuthorityV1,
+  ExternalSearchDomainSqlV1,
+  ExternalSearchLoadedSourceV1,
+  ExternalSearchProducerCallbacksV1,
+  ExternalSearchProducerDescriptorV1,
+  ExternalSearchProducerGuardV1,
+  OpaqueExternalSearchCanonicalMutationV1,
+} from './external-search-producers.js';
 export type {
   SearchMaterializationAdminGuardV1,
   SearchMaterializationHealthV1,
@@ -640,6 +669,72 @@ export async function createInstallationDomainMutationGuard(
   return guard;
 }
 
+/** Host assembly issues the only SQL-preparing bridge for Workshop Task/Memory writes. */
+export async function createExternalSearchDomainMutationCoordinatorV1(
+  db: D1DatabaseLike,
+  options: TaprootWriteOptions,
+  hostCapability: TaprootHostWriteCapability,
+  binding: ExternalSearchDomainMutationBindingV1,
+): Promise<ExternalSearchDomainMutationCoordinatorV1> {
+  repository(db, options, hostCapability);
+  const state = await readInstallationAuthorizationState(db);
+  return createExternalSearchDomainMutationCoordinatorInternalV1({
+    db,
+    installationId: state.installationId,
+    domain: binding.domain,
+    sourceKind: binding.sourceKind,
+    capability: binding.capability,
+    changeClasses: binding.changeClasses,
+    clock: options.clock ?? (() => new Date()),
+  });
+}
+
+/** Host assembly issues the opaque policy authority paired with one producer kind. */
+export async function createExternalSearchDomainPolicyAuthorityV1(
+  db: D1DatabaseLike,
+  options: TaprootWriteOptions,
+  hostCapability: TaprootHostWriteCapability,
+  binding: Pick<ExternalSearchDomainMutationBindingV1, 'domain' | 'sourceKind'>,
+): Promise<ExternalSearchDomainPolicyAuthorityV1> {
+  repository(db, options, hostCapability);
+  const state = await readInstallationAuthorizationState(db);
+  return createExternalSearchDomainPolicyAuthorityInternalV1({
+    db,
+    installationId: state.installationId,
+    domain: binding.domain,
+    sourceKind: binding.sourceKind,
+  });
+}
+
+/**
+ * Host-sealed external producer boundary. Callbacks receive data and an opaque
+ * policy authority only; they never receive the database, SQL, lifecycle
+ * guards, mutation handles, or caller-shaped authorization fields.
+ */
+export async function createExternalSearchProducerGuardV1(
+  db: D1DatabaseLike,
+  options: TaprootWriteOptions,
+  hostCapability: TaprootHostWriteCapability,
+  descriptor: ExternalSearchProducerDescriptorV1,
+  callbacks: ExternalSearchProducerCallbacksV1,
+  owningDomainPolicyAuthority: ExternalSearchDomainPolicyAuthorityV1,
+  opaqueDomainMutationCoordinator: ExternalSearchDomainMutationCoordinatorV1,
+): Promise<ExternalSearchProducerGuardV1> {
+  repository(db, options, hostCapability);
+  const state = await readInstallationAuthorizationState(db);
+  return createExternalSearchProducerGuardInternalV1(
+    {
+      db,
+      installationId: state.installationId,
+      clock: options.clock ?? (() => new Date()),
+    },
+    descriptor,
+    callbacks,
+    owningDomainPolicyAuthority,
+    opaqueDomainMutationCoordinator,
+  );
+}
+
 /**
  * Assembly issues this opaque guard for exactly one non-Knowledge source kind.
  * It owns source-event persistence only; it does not materialize or query search.
@@ -707,6 +802,7 @@ export async function createInstallationSearchSourceGuardV1(
           binding.domain,
           binding.sourceKind,
           event,
+          replay.sourcePolicyRevision,
           replay.authorizationRevision,
           replay.searchGeneration,
         );
@@ -746,6 +842,7 @@ export async function createInstallationSearchSourceGuardV1(
           installationId: binding.installationId,
           domain: binding.domain,
           sourceKind: binding.sourceKind,
+          sourcePolicyRevision: currentState.authorizationRevision,
           authorizationRevision: currentState.authorizationRevision,
           searchGeneration,
           createdAt,
@@ -810,6 +907,7 @@ export async function createSearchMaterializationAdminGuardV1(
   db: D1DatabaseLike,
   options: TaprootWriteOptions,
   hostCapability: TaprootHostWriteCapability,
+  contentOptions: SearchMaterializationContentOptionsV1 = {},
 ): Promise<SearchMaterializationAdminGuardV1> {
   repository(db, options, hostCapability);
   const state = await readInstallationAuthorizationState(db);
@@ -817,6 +915,7 @@ export async function createSearchMaterializationAdminGuardV1(
     db,
     installationId: state.installationId,
     clock: options.clock ?? (() => new Date()),
+    ...contentOptions,
   });
 }
 

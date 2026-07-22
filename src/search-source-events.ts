@@ -67,6 +67,7 @@ export interface PersistedSearchSourceRegistryV1 {
   domain: string;
   sourceRevision: string;
   payloadHash: string;
+  sourcePolicyRevision: number;
   authorizationRevision: number;
   searchGeneration: number;
 }
@@ -128,6 +129,7 @@ export async function unifiedSearchSourcePayloadHashV1(
   domain: string,
   sourceKind: UnifiedSearchSourceKindV1,
   event: Readonly<UnifiedSearchSourceEventInputV1>,
+  sourcePolicyRevision: number,
   authorizationRevision: number,
   searchGeneration: number,
 ): Promise<string> {
@@ -142,6 +144,7 @@ export async function unifiedSearchSourcePayloadHashV1(
     event.changeClass,
     event.sourceRevision,
     event.sourceHash,
+    sourcePolicyRevision,
     authorizationRevision,
     searchGeneration,
     event.predecessor?.eventId ?? null,
@@ -165,7 +168,8 @@ export async function readPersistedSearchSourceRegistryV1(
   const result = await db
     .prepare(
       `SELECT domain, current_event_id, current_event_sequence, source_revision,
-              payload_hash, authorization_revision, search_generation
+              payload_hash, source_policy_revision, authorization_revision,
+              search_generation
        FROM taproot_unified_search_source_registry
        WHERE installation_id = ? AND source_kind = ? AND source_id = ?`,
     )
@@ -176,6 +180,7 @@ export async function readPersistedSearchSourceRegistryV1(
       current_event_sequence: number;
       source_revision: string;
       payload_hash: string;
+      source_policy_revision: number;
       authorization_revision: number;
       search_generation: number;
     }>();
@@ -187,6 +192,7 @@ export async function readPersistedSearchSourceRegistryV1(
         domain: row.domain,
         sourceRevision: row.source_revision,
         payloadHash: row.payload_hash,
+        sourcePolicyRevision: Number(row.source_policy_revision),
         authorizationRevision: Number(row.authorization_revision),
         searchGeneration: Number(row.search_generation),
       }
@@ -202,12 +208,14 @@ export async function inspectUnifiedSearchSourceReplayV1(
 ): Promise<{
   eventId: string;
   payloadHash: string;
+  sourcePolicyRevision: number;
   authorizationRevision: number;
   searchGeneration: number;
 } | null> {
   const result = await db
     .prepare(
-      `SELECT event_id, payload_hash, authorization_revision, search_generation
+      `SELECT event_id, payload_hash, source_policy_revision,
+              authorization_revision, search_generation
        FROM taproot_unified_search_source_events
        WHERE installation_id = ? AND source_kind = ? AND source_id = ?
          AND source_revision = ?`,
@@ -216,6 +224,7 @@ export async function inspectUnifiedSearchSourceReplayV1(
     .all<{
       event_id: string;
       payload_hash: string;
+      source_policy_revision: number;
       authorization_revision: number;
       search_generation: number;
     }>();
@@ -224,6 +233,7 @@ export async function inspectUnifiedSearchSourceReplayV1(
     ? {
         eventId: row.event_id,
         payloadHash: row.payload_hash,
+        sourcePolicyRevision: Number(row.source_policy_revision),
         authorizationRevision: Number(row.authorization_revision),
         searchGeneration: Number(row.search_generation),
       }
@@ -236,6 +246,7 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
     installationId: string;
     domain: string;
     sourceKind: UnifiedSearchSourceKindV1;
+    sourcePolicyRevision: number;
     authorizationRevision: number;
     searchGeneration: number;
     createdAt: string;
@@ -251,6 +262,7 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
     authority.domain,
     authority.sourceKind,
     event,
+    authority.sourcePolicyRevision,
     authority.authorizationRevision,
     authority.searchGeneration,
   );
@@ -262,9 +274,9 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
         `INSERT INTO taproot_unified_search_source_events(
            event_id, installation_id, domain, source_kind, source_id,
            operation, change_class, source_revision, source_hash,
-           authorization_revision, search_generation, predecessor_event_id,
+           source_policy_revision, authorization_revision, search_generation, predecessor_event_id,
            predecessor_sequence, payload_hash, created_at
-         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
          WHERE (? IS NULL AND NOT EXISTS (
            SELECT 1 FROM taproot_unified_search_source_registry
            WHERE installation_id = ? AND source_kind = ? AND source_id = ?
@@ -284,6 +296,7 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
         event.changeClass,
         event.sourceRevision,
         event.sourceHash,
+        authority.sourcePolicyRevision,
         authority.authorizationRevision,
         authority.searchGeneration,
         predecessorEventId,
@@ -306,8 +319,9 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
         `INSERT INTO taproot_unified_search_source_registry(
            installation_id, source_kind, source_id, domain, current_event_id,
            current_event_sequence, operation, change_class, source_revision,
-           source_hash, authorization_revision, search_generation, payload_hash, updated_at
-         ) SELECT ?, ?, ?, ?, e.event_id, e.sequence, ?, ?, ?, ?, ?, ?, ?, ?
+           source_hash, source_policy_revision, authorization_revision,
+           search_generation, payload_hash, updated_at
+         ) SELECT ?, ?, ?, ?, e.event_id, e.sequence, ?, ?, ?, ?, ?, ?, ?, ?, ?
            FROM taproot_unified_search_source_events e WHERE e.event_id = ?
          ON CONFLICT(installation_id, source_kind, source_id) DO UPDATE SET
            current_event_id = excluded.current_event_id,
@@ -316,6 +330,7 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
            change_class = excluded.change_class,
            source_revision = excluded.source_revision,
            source_hash = excluded.source_hash,
+           source_policy_revision = excluded.source_policy_revision,
            authorization_revision = excluded.authorization_revision,
            search_generation = excluded.search_generation,
            payload_hash = excluded.payload_hash,
@@ -333,6 +348,7 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
         event.changeClass,
         event.sourceRevision,
         event.sourceHash,
+        authority.sourcePolicyRevision,
         authority.authorizationRevision,
         authority.searchGeneration,
         payloadHash,
@@ -348,6 +364,7 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
            SELECT 1 FROM taproot_unified_search_source_registry
            WHERE installation_id = ? AND source_kind = ? AND source_id = ?
              AND domain = ? AND current_event_id = ? AND source_revision = ?
+             AND source_policy_revision = ?
              AND authorization_revision = ? AND search_generation = ?
              AND payload_hash = ?
          )`,
@@ -359,6 +376,7 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
         authority.domain,
         event.eventId,
         event.sourceRevision,
+        authority.sourcePolicyRevision,
         authority.authorizationRevision,
         authority.searchGeneration,
         payloadHash,
@@ -403,13 +421,15 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
         `INSERT INTO taproot_search_projection_jobs(
            job_id, corpus_id, installation_id, source_event_id,
            source_event_sequence, source_kind, source_id, operation,
-           root_revision, root_hash, authorization_revision,
-           search_generation, state, not_before, created_at, updated_at
+           root_revision, root_hash, source_policy_revision,
+           authorization_revision, search_generation, producer_fingerprint,
+           state, not_before, created_at, updated_at
          )
          SELECT c.corpus_id || ':' || e.event_id, c.corpus_id,
            e.installation_id, e.event_id, e.sequence, e.source_kind,
            e.source_id, e.operation, e.source_revision, e.source_hash,
-           e.authorization_revision, e.search_generation, 'pending',
+           e.source_policy_revision, e.authorization_revision,
+           e.search_generation, p.producer_fingerprint, 'pending',
            e.created_at, e.created_at, e.created_at
          FROM taproot_unified_search_source_events e
          JOIN taproot_search_installation_state s
@@ -417,6 +437,9 @@ export async function prepareUnifiedSearchSourceEventStatementsV1(
          JOIN taproot_search_corpora c
            ON c.corpus_id = s.active_corpus_id
              OR c.corpus_id = s.shadow_corpus_id
+         JOIN taproot_unified_search_generation_producers p
+           ON p.corpus_id = c.corpus_id AND p.installation_id = e.installation_id
+          AND p.source_kind = e.source_kind AND p.state = 'ready'
          WHERE e.event_id = ?
          ON CONFLICT(corpus_id, source_event_id) DO NOTHING`,
       )
