@@ -32,6 +32,7 @@ import type {
 } from './types.js';
 
 export * from './canonical.js';
+export * from './authorization.js';
 export * from './errors.js';
 export * from './migrations.js';
 export * from './rdf.js';

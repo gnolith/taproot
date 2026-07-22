@@ -14,10 +14,23 @@ manifest in the `@gnolith/taproot` ledger namespace. Known version-one layouts
 are inspected before adoption. Unknown, partial, out-of-order, or
 checksum-drifted histories raise typed migration/schema errors.
 
-`TaprootRepository` is the primary API; equivalent top-level functions are
-exported for request-scoped use.
+`AuthorizedTaprootReader` is the authorization-enforcing application/search
+read boundary. It requires a host-created `AuthorizationContext` and an
+`EntityAuthorizationSource`; neither can be omitted. See
+[`authorization.md`](authorization.md).
+
+The older `TaprootRepository` and equivalent top-level functions remain a
+trusted maintenance/compatibility API in 0.2. They must not be exposed as a
+request-scoped, agent, MCP, or search read boundary.
 
 ## Reads
+
+Normal canonical hydration uses `AuthorizedTaprootReader.getEntity`,
+`getEntityRevision`, and `resolveEntity`. It checks canonical policy before and
+after hydration and fails closed on absent, stale, cross-installation, or
+changed authorization state.
+
+The following legacy trusted-maintenance reads are not authorization-enforcing:
 
 - `getEntity`, `resolveEntity`, `getEntityRevision`
 - `listEntities`, `listEntityRevisionsPage`, `searchEntitiesPage`

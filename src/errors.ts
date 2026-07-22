@@ -29,3 +29,5 @@ export class BulkLimitError extends TaprootError {}
 export class InvalidBaseIriError extends TaprootError {}
 export class BaseIriMismatchError extends TaprootError {}
 export class TaprootMigrationStateError extends SchemaMismatchError {}
+export class InvalidAuthorizationError extends TaprootError {}
+export class AuthorizationDeniedError extends TaprootError {}
