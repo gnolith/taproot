@@ -17,13 +17,31 @@ describe('package release guard', () => {
     expect(manifest).toMatchObject({
       name: '@gnolith/taproot',
       private: false,
-      version: '0.4.0',
+      version: '0.4.1',
       publishConfig: { access: 'public', provenance: true },
     });
-    expect(manifest.dependencies['@gnolith/diamond']).toBe('0.4.0');
+    expect(manifest.dependencies['@gnolith/diamond']).toBe('0.4.1');
     expect(Object.values(manifest.dependencies)).not.toContainEqual(
       expect.stringMatching(/^(?:file:|link:)/),
     );
+  });
+
+  it('locks the qualified Diamond and Qdrant runtime coordinates', () => {
+    const root = new URL('..', import.meta.url);
+    const consumer = readFileSync(
+      new URL('scripts/consumer-smoke.mjs', root),
+      'utf8',
+    );
+    const qdrant = readFileSync(
+      new URL('scripts/qdrant-conformance.mjs', root),
+      'utf8',
+    );
+    expect(consumer).toContain("diamondInstances[0] !== '0.4.1'");
+    expect(consumer).not.toContain('DIAMOND_TARBALL');
+    expect(qdrant).toContain(
+      'qdrant/qdrant:v1.18.2@sha256:da65a06bc75e42702f80c992b99c5144b0fbd675ae7a96d2991de0bf957b7071',
+    );
+    expect(qdrant).toContain("const PLATFORM = 'linux/amd64'");
   });
 
   it('rejects malformed input and empty command batches before touching D1', async () => {

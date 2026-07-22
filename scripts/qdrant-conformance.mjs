@@ -2,7 +2,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { createQdrantVectorIndexV1 } from '../dist/index.js';
 
-const IMAGE = 'qdrant/qdrant:v1.15.4';
+const IMAGE =
+  'qdrant/qdrant:v1.18.2@sha256:da65a06bc75e42702f80c992b99c5144b0fbd675ae7a96d2991de0bf957b7071';
+const PLATFORM = 'linux/amd64';
 const name = `taproot-qdrant-${process.pid}`;
 const port = await availablePort();
 
@@ -21,6 +23,16 @@ try {
     `${port}:6333`,
     IMAGE,
   ]);
+  const inspectedPlatform = spawnSync(
+    'docker',
+    ['image', 'inspect', IMAGE, '--format', '{{.Os}}/{{.Architecture}}'],
+    { encoding: 'utf8' },
+  );
+  assert(
+    inspectedPlatform.status === 0 &&
+      inspectedPlatform.stdout.trim() === PLATFORM,
+    `Qdrant image platform must be ${PLATFORM}`,
+  );
   const endpoint = `http://127.0.0.1:${port}`;
   await waitUntilReady(endpoint);
   const collection = 'taproot_conformance';
@@ -92,6 +104,7 @@ try {
   console.log(
     JSON.stringify({
       image: IMAGE,
+      platform: PLATFORM,
       dimensions: 3,
       metric: 'cosine',
       lifecycle: 'validate/upsert/authorized-query/isolation/delete',

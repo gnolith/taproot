@@ -38,6 +38,8 @@ const requiredFiles = [
   'migrations/0004_canonical_authorization_policy.sql',
   'migrations/0005_unified_search_source_events.sql',
   'migrations/0006_unified_search_materialization_lifecycle.sql',
+  'migrations/0007_external_search_producers.sql',
+  'migrations/0008_complete_search_content_semantic.sql',
   'benchmarks/search-source-events-100k.json',
   'benchmarks/search-materialization-100k.json',
   'scripts/search-source-event-baseline.mjs',
@@ -76,6 +78,8 @@ assert.equal(packageJson.private, false);
 assert.equal(packageJson.publishConfig?.access, 'public');
 assert.equal(packageJson.publishConfig?.provenance, true);
 assert.match(packageJson.engines?.node ?? '', /^>=22/);
+assert.equal(packageJson.version, '0.4.1');
+assert.equal(packageJson.dependencies?.['@gnolith/diamond'], '0.4.1');
 assert.equal(
   packageJson.repository?.url,
   'https://github.com/gnolith/taproot.git',
@@ -84,10 +88,45 @@ for (const value of Object.values(packageJson.dependencies ?? {})) {
   assert.doesNotMatch(value, /^(?:file:|link:)/, 'local dependency is present');
 }
 
+const consumerSmoke = readFileSync('scripts/consumer-smoke.mjs', 'utf8');
+assert.ok(
+  consumerSmoke.includes("[npmCli, 'ls', '@gnolith/diamond', '--all'"),
+  'packed consumer must inspect the complete Diamond dependency graph',
+);
+assert.ok(
+  consumerSmoke.includes("diamondInstances[0] !== '0.4.1'"),
+  'packed consumer must require one Diamond 0.4.1 runtime',
+);
+assert.doesNotMatch(
+  consumerSmoke,
+  /DIAMOND_TARBALL|file:|link:/,
+  'packed consumer must use the public Diamond dependency',
+);
+
+const qdrantConformance = readFileSync(
+  'scripts/qdrant-conformance.mjs',
+  'utf8',
+);
+assert.ok(
+  qdrantConformance.includes(
+    'qdrant/qdrant:v1.18.2@sha256:da65a06bc75e42702f80c992b99c5144b0fbd675ae7a96d2991de0bf957b7071',
+  ),
+  'Qdrant conformance must use the qualified manifest digest',
+);
+assert.ok(
+  qdrantConformance.includes("const PLATFORM = 'linux/amd64'"),
+  'Qdrant conformance must remain scoped to linux/amd64',
+);
+
 for (const workflow of repositoryFiles.filter((file) =>
   file.startsWith('.github/workflows/'),
 )) {
   const text = readFileSync(workflow, 'utf8');
+  assert.doesNotMatch(
+    text,
+    /repository:\s*gnolith\/diamond|DIAMOND_TARBALL|\.diamond-handoff|qdrant\/qdrant:v1\.15\.4/,
+    `${workflow} contains a stale runtime source or pin`,
+  );
   for (const match of text.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)/gm)) {
     assert.match(
       match[1],

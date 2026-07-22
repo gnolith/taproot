@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error('consumer smoke must be run through npm');
@@ -17,18 +17,9 @@ const packOutput = execFileSync(
 );
 const [{ filename, integrity, shasum }] = JSON.parse(packOutput);
 const archive = join(root, filename);
-const diamondSpec = process.env.DIAMOND_TARBALL
-  ? resolve(process.env.DIAMOND_TARBALL)
-  : '@gnolith/diamond@0.4.0';
 const taprootSha256 = createHash('sha256')
   .update(readFileSync(archive))
   .digest('hex');
-if (process.env.DIAMOND_TARBALL) {
-  const diamondSha256 = createHash('sha256')
-    .update(readFileSync(diamondSpec))
-    .digest('hex');
-  console.log(`Diamond packed artifact sha256=${diamondSha256}`);
-}
 console.log(
   `Taproot packed artifact sha256=${taprootSha256} integrity=${integrity} shasum=${shasum}`,
 );
@@ -48,11 +39,26 @@ execFileSync(
     '--prefix',
     root,
     archive,
-    diamondSpec,
     'miniflare@^4.20260714.0',
   ],
   { stdio: 'inherit' },
 );
+const dependencyTree = JSON.parse(
+  execFileSync(
+    process.execPath,
+    [npmCli, 'ls', '@gnolith/diamond', '--all', '--json', '--prefix', root],
+    { encoding: 'utf8' },
+  ),
+);
+const diamondInstances = collectDependencyVersions(
+  dependencyTree,
+  '@gnolith/diamond',
+);
+if (diamondInstances.length !== 1 || diamondInstances[0] !== '0.4.1') {
+  throw new Error(
+    `consumer must install one Diamond 0.4.1 runtime; found ${JSON.stringify(diamondInstances)}`,
+  );
+}
 writeFileSync(
   join(root, 'smoke.mjs'),
   `
@@ -589,9 +595,22 @@ for (const path of [
   'migrations/0003_canonical_statement_text.sql',
   'migrations/0004_canonical_authorization_policy.sql',
   'migrations/0005_unified_search_source_events.sql',
+  'migrations/0006_unified_search_materialization_lifecycle.sql',
+  'migrations/0007_external_search_producers.sql',
+  'migrations/0008_complete_search_content_semantic.sql',
 ]) {
   if (!existsSync(join(root, 'node_modules', packagePath, path))) {
     throw new Error(`packed artifact is missing ${path}`);
   }
 }
 console.log(`consumer smoke passed for ${installed.name}@${installed.version}`);
+console.log('consumer dependency graph contains one @gnolith/diamond@0.4.1');
+
+function collectDependencyVersions(node, dependencyName) {
+  const versions = [];
+  for (const [name, dependency] of Object.entries(node.dependencies ?? {})) {
+    if (name === dependencyName) versions.push(dependency.version);
+    versions.push(...collectDependencyVersions(dependency, dependencyName));
+  }
+  return versions;
+}

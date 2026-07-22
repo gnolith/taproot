@@ -12,7 +12,7 @@ editing commands, term search, repairable projections, and a deterministic RDF p
 
 ## Status
 
-Version `0.4.0` supports Node 22 and 24 and depends exactly on Diamond `0.4.0`,
+Version `0.4.1` supports Node 22 and 24 and depends exactly on Diamond `0.4.1`,
 which exposes transaction-composable RDF patches, a runtime-neutral SQLite
 capability, and a process-local `node:sqlite` adapter.
 
