@@ -1,6 +1,7 @@
 import type {
   D1DatabaseLike,
   SqlitePreparedStatementLike,
+  SqliteResultLike,
 } from '@gnolith/diamond';
 import { InvalidAuthorizationError } from './errors.js';
 import { canonicalizeTaprootBaseIri } from './migrations.js';
@@ -106,16 +107,18 @@ const hostWriteCapabilities = new WeakMap<
 export interface InstallationAuthorizationGuard {
   readonly kind: 'taproot-installation-authorization-guard-v1';
   readCurrentState(): Promise<InstallationAuthorizationState>;
-  prepareExpectedRevisionFence(
+  batchWithExpectedRevision(
     context: AuthorizationContext,
-  ): Promise<SqlitePreparedStatementLike>;
-  prepareAuthorizationAdvance(
+    statements: readonly SqlitePreparedStatementLike[],
+  ): Promise<readonly SqliteResultLike[]>;
+  batchWithAuthorizationAdvance(
     context: AuthorizationContext,
     audit: { advanceId: string; domain: string; reason: string },
+    statements: readonly SqlitePreparedStatementLike[],
   ): Promise<{
     authorizationRevision: number;
     searchGeneration: number;
-    statements: readonly SqlitePreparedStatementLike[];
+    results: readonly SqliteResultLike[];
   }>;
 }
 
@@ -385,6 +388,19 @@ async function prepareGuardAdvance(
   return { authorizationRevision, searchGeneration, statements };
 }
 
+function validateGuardDomainStatements(
+  statements: readonly SqlitePreparedStatementLike[],
+): void {
+  if (
+    !Array.isArray(statements) ||
+    statements.length < 1 ||
+    statements.length > 100
+  )
+    throw new InvalidAuthorizationError(
+      'an authorization batch must contain 1 through 100 domain statements',
+    );
+}
+
 /**
  * Assembly-only pristine bootstrap for immutable installation authorization.
  * It cannot be used after canonical entities exist.
@@ -425,12 +441,33 @@ export async function createInstallationAuthorizationGuard(
   const guard: InstallationAuthorizationGuard = Object.freeze({
     kind: 'taproot-installation-authorization-guard-v1' as const,
     readCurrentState: () => readGuardState(binding),
-    prepareExpectedRevisionFence: (context: AuthorizationContext) =>
-      prepareGuardFence(binding, context),
-    prepareAuthorizationAdvance: (
+    batchWithExpectedRevision: async (
+      context: AuthorizationContext,
+      statements: readonly SqlitePreparedStatementLike[],
+    ) => {
+      validateGuardDomainStatements(statements);
+      return binding.db.batch([
+        ...statements,
+        await prepareGuardFence(binding, context),
+      ]);
+    },
+    batchWithAuthorizationAdvance: async (
       context: AuthorizationContext,
       audit: { advanceId: string; domain: string; reason: string },
-    ) => prepareGuardAdvance(binding, context, audit),
+      domainStatements: readonly SqlitePreparedStatementLike[],
+    ) => {
+      validateGuardDomainStatements(domainStatements);
+      const advance = await prepareGuardAdvance(binding, context, audit);
+      const results = await binding.db.batch([
+        ...domainStatements,
+        ...advance.statements,
+      ]);
+      return {
+        authorizationRevision: advance.authorizationRevision,
+        searchGeneration: advance.searchGeneration,
+        results,
+      };
+    },
   });
   installationAuthorizationGuards.set(guard, binding);
   return guard;
@@ -514,6 +551,11 @@ function writeMetadata<T extends object>(
   value: T,
   context: AuthorizationContext,
 ): T & { authorizationContext: AuthorizationContext } {
+  const authorization = (value as { authorization?: unknown }).authorization;
+  if (!Object.hasOwn(value, 'authorization') || authorization === undefined)
+    throw new InvalidAuthorizationError(
+      'canonical authorization policy is required for every write',
+    );
   return { ...value, authorizationContext: context };
 }
 
@@ -583,6 +625,16 @@ export const importEntities = (
   bulk: AuthorizedBulkImportOptions,
 ) => {
   const values = [...entities];
+  if (
+    typeof bulk !== 'object' ||
+    bulk === null ||
+    typeof bulk.authorizations !== 'object' ||
+    bulk.authorizations === null ||
+    Array.isArray(bulk.authorizations)
+  )
+    throw new InvalidAuthorizationError(
+      'bulk authorizations must explicitly and exactly cover imported entities',
+    );
   const expected = [...new Set(values.map(({ id }) => id))].sort();
   const provided = Object.keys(bulk.authorizations).sort();
   if (JSON.stringify(expected) !== JSON.stringify(provided))
@@ -593,7 +645,10 @@ export const importEntities = (
   return bound.repository
     .importEntities(values, {
       ...bulk,
-      metadata: writeMetadata(bulk.metadata ?? {}, bound.context),
+      metadata: {
+        ...(bulk.metadata ?? {}),
+        authorizationContext: bound.context,
+      },
     })
     .then((result): BulkMutationReceipt => ({
       succeeded: result.succeeded.map(mutationReceipt),

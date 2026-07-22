@@ -60,9 +60,13 @@ write, or policy mutation.
 
 Every successful advance stores a unique durable ID. The update and following
 assertion both bind that ID, preventing an ABA race in which two batches target
-the same next counters, including writes to different entities. The guard also
-provides DB-bound fence/advance statements for another package's ordered batch;
-it exposes counters, not policy JSON, and does not create a second revision.
+the same next counters, including writes to different entities. For an ordered
+cross-package batch, the guard owns the database `batch` call and wraps the
+domain statements with either an exact-revision fence or an authorization
+advance plus its audit and assertion. Fence and advance statements are never
+returned separately, so callers cannot split the invariant across batches.
+The guard exposes counters, not policy JSON, and does not create a second
+revision.
 
 `TaprootHostWriteCapability` is limited to bootstrap, bounded legacy backfill,
 maintenance, and guard issuance. The database binding, host capability, guard,

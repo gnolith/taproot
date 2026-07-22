@@ -255,30 +255,63 @@ export const taprootAuthorizationSchemaStatements = [
   `CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_no_delete
     BEFORE DELETE ON taproot_installation_authorization
     BEGIN SELECT RAISE(ABORT, 'taproot installation authorization is durable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_no_replace
+    BEFORE INSERT ON taproot_installation_authorization
+    WHEN EXISTS (SELECT 1 FROM taproot_installation_authorization WHERE singleton = NEW.singleton)
+    BEGIN SELECT RAISE(ABORT, 'taproot installation authorization cannot be replaced'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_entity_authorization_revisions_no_update
     BEFORE UPDATE ON taproot_entity_authorization_revisions
     BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions are immutable'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_entity_authorization_revisions_no_delete
     BEFORE DELETE ON taproot_entity_authorization_revisions
     BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_entity_authorization_revisions_no_replace
+    BEFORE INSERT ON taproot_entity_authorization_revisions
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_entity_authorization_revisions
+      WHERE entity_id = NEW.entity_id AND source_revision = NEW.source_revision
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions cannot be replaced'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_update
     BEFORE UPDATE ON taproot_statement_authorization_revisions
     BEGIN SELECT RAISE(ABORT, 'taproot statement authorization revisions are immutable'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_delete
     BEFORE DELETE ON taproot_statement_authorization_revisions
     BEGIN SELECT RAISE(ABORT, 'taproot statement authorization revisions are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_replace
+    BEFORE INSERT ON taproot_statement_authorization_revisions
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_statement_authorization_revisions
+      WHERE entity_id = NEW.entity_id AND source_revision = NEW.source_revision
+        AND statement_id = NEW.statement_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot statement authorization revisions cannot be replaced'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_authorization_admin_audit_no_update
     BEFORE UPDATE ON taproot_authorization_admin_audit
     BEGIN SELECT RAISE(ABORT, 'taproot authorization administration audit is immutable'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_authorization_admin_audit_no_delete
     BEFORE DELETE ON taproot_authorization_admin_audit
     BEGIN SELECT RAISE(ABORT, 'taproot authorization administration audit is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_authorization_admin_audit_no_replace
+    BEFORE INSERT ON taproot_authorization_admin_audit
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_authorization_admin_audit
+      WHERE sequence = NEW.sequence OR audit_id = NEW.audit_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization administration audit cannot be replaced'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_advances_no_update
     BEFORE UPDATE ON taproot_installation_authorization_advances
     BEGIN SELECT RAISE(ABORT, 'taproot authorization advances are immutable'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_advances_no_delete
     BEFORE DELETE ON taproot_installation_authorization_advances
     BEGIN SELECT RAISE(ABORT, 'taproot authorization advances are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_advances_no_replace
+    BEFORE INSERT ON taproot_installation_authorization_advances
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_installation_authorization_advances
+      WHERE advance_id = NEW.advance_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization advances cannot be replaced'); END`,
   `INSERT INTO taproot_metadata(metadata_key, metadata_value)
     VALUES ('schema_version', '${TAPROOT_SCHEMA_VERSION}')
     ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
@@ -1005,6 +1038,115 @@ export async function inspectTaprootSchema(
   const missingColumns = requiredRevisionColumns.filter(
     (name) => !presentColumns.has(name),
   );
+  const authorizationColumns: Readonly<Record<string, readonly string[]>> = {
+    taproot_installation_authorization: [
+      'singleton',
+      'installation_id',
+      'authorization_revision',
+      'search_generation',
+      'last_advance_id',
+      'created_at',
+      'updated_at',
+    ],
+    taproot_entity_authorization: [
+      'entity_id',
+      'installation_id',
+      'workspace_id',
+      'owner_principal_id',
+      'visibility_json',
+      'effective_visibility_json',
+      'source_revision',
+      'authorization_revision',
+      'deleted_at',
+      'event_id',
+      'updated_at',
+    ],
+    taproot_entity_authorization_revisions: [
+      'entity_id',
+      'source_revision',
+      'installation_id',
+      'workspace_id',
+      'owner_principal_id',
+      'visibility_json',
+      'effective_visibility_json',
+      'authorization_revision',
+      'deleted_at',
+      'event_id',
+      'created_at',
+    ],
+    taproot_statement_authorization: [
+      'entity_id',
+      'statement_id',
+      'source_revision',
+      'restrictions_json',
+      'effective_visibility_json',
+      'authorization_revision',
+    ],
+    taproot_statement_authorization_revisions: [
+      'entity_id',
+      'source_revision',
+      'statement_id',
+      'restrictions_json',
+      'effective_visibility_json',
+      'authorization_revision',
+    ],
+    taproot_authorization_projection_outbox: [
+      'event_id',
+      'entity_id',
+      'source_revision',
+      'authorization_revision',
+      'search_generation',
+      'operation',
+      'state',
+      'created_at',
+    ],
+    taproot_authorization_backfill_plans: [
+      'plan_id',
+      'installation_id',
+      'base_authorization_revision',
+      'manifest_json',
+      'manifest_hash',
+      'entity_count',
+      'revision_count',
+      'status',
+      'created_by',
+      'created_at',
+      'completed_at',
+    ],
+    taproot_authorization_admin_audit: [
+      'sequence',
+      'audit_id',
+      'event_type',
+      'principal_id',
+      'plan_id',
+      'authorization_revision',
+      'details_json',
+      'created_at',
+    ],
+    taproot_installation_authorization_advances: [
+      'advance_id',
+      'installation_id',
+      'from_revision',
+      'to_revision',
+      'search_generation',
+      'domain',
+      'principal_id',
+      'reason',
+      'created_at',
+    ],
+  };
+  for (const [table, expectedColumns] of Object.entries(authorizationColumns)) {
+    if (!names.has(table)) continue;
+    const columns = await db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all<{ name: string }>();
+    const actualColumns = columns.results.map(({ name }) => name);
+    if (JSON.stringify(actualColumns) !== JSON.stringify(expectedColumns)) {
+      errors.push(
+        `${table} columns are ${actualColumns.join(',')}, expected ${expectedColumns.join(',')}`,
+      );
+    }
+  }
   const requiredIndexes = [
     'taproot_entities_type_idx',
     'taproot_entities_modified_idx',
@@ -1034,14 +1176,19 @@ export async function inspectTaprootSchema(
     'taproot_audit_no_delete',
     'taproot_installation_identity_no_update',
     'taproot_installation_authorization_no_delete',
+    'taproot_installation_authorization_no_replace',
     'taproot_entity_authorization_revisions_no_update',
     'taproot_entity_authorization_revisions_no_delete',
+    'taproot_entity_authorization_revisions_no_replace',
     'taproot_statement_authorization_revisions_no_update',
     'taproot_statement_authorization_revisions_no_delete',
+    'taproot_statement_authorization_revisions_no_replace',
     'taproot_authorization_admin_audit_no_update',
     'taproot_authorization_admin_audit_no_delete',
+    'taproot_authorization_admin_audit_no_replace',
     'taproot_installation_authorization_advances_no_update',
     'taproot_installation_authorization_advances_no_delete',
+    'taproot_installation_authorization_advances_no_replace',
   ];
   const triggerRows = await db
     .prepare(

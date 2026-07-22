@@ -193,6 +193,28 @@ writeFileSync(
         labels: { en: { language: 'en', value: 'packed local consumer' } },
         authorization: policy(1),
       });
+      if (
+        'prepareAuthorizationAdvance' in localGuard ||
+        'prepareExpectedRevisionFence' in localGuard
+      ) {
+        throw new Error('guard exposed splittable authorization statements');
+      }
+      const beforeOmission = await local.prepare(
+        'SELECT (SELECT COUNT(*) FROM taproot_entities) AS entities, (SELECT COUNT(*) FROM taproot_entity_authorization) AS policies, (SELECT COUNT(*) FROM taproot_authorization_projection_outbox) AS outbox, authorization_revision AS authorizationRevision FROM taproot_installation_authorization WHERE singleton = 1',
+      ).all();
+      let omissionRejected = false;
+      try {
+        await createItem(local, options, localGuard, writer(2), { id: 'Q2' });
+      } catch {
+        omissionRejected = true;
+      }
+      if (!omissionRejected) throw new Error('runtime authorization omission committed');
+      const afterOmission = await local.prepare(
+        'SELECT (SELECT COUNT(*) FROM taproot_entities) AS entities, (SELECT COUNT(*) FROM taproot_entity_authorization) AS policies, (SELECT COUNT(*) FROM taproot_authorization_projection_outbox) AS outbox, authorization_revision AS authorizationRevision FROM taproot_installation_authorization WHERE singleton = 1',
+      ).all();
+      if (JSON.stringify(beforeOmission.results) !== JSON.stringify(afterOmission.results)) {
+        throw new Error('runtime authorization omission left durable side effects');
+      }
       for (const forbidden of [
         'TaprootRepository', 'createTaproot', 'getEntity', 'listEntities',
         'searchEntities', 'listAuditEvents', 'exportEntities',

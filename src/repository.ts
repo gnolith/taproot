@@ -20,6 +20,7 @@ import {
 } from './canonical.js';
 import {
   EntityAlreadyExistsError,
+  AuthorizationDeniedError,
   EntityNotFoundError,
   InvalidEntityError,
   InvalidStatementError,
@@ -748,7 +749,21 @@ export class TaprootRepository {
     targetRevision: number,
     edit: StatementRevisionEdit,
   ): Promise<WriteResult> {
+    if (edit.authorization || edit.authorizationContext)
+      await this.#preauthorizeCanonicalWrite(
+        id,
+        edit.authorization,
+        edit.authorizationContext,
+        edit.expectedRevision,
+      );
     const target = await this.getEntityRevision(id, targetRevision);
+    if (target.redirectTo)
+      await this.#validateRedirectTarget(
+        id,
+        target.redirectTo,
+        target.entity.type,
+        edit.authorizationContext,
+      );
     return this.#mutate(
       id,
       edit,
@@ -798,26 +813,26 @@ export class TaprootRepository {
   ): Promise<WriteResult> {
     if (id === target)
       throw new InvalidEntityError('An entity cannot redirect to itself');
-    const source = await this.getEntity(id);
-    const targetEntity = await this.getEntity(target);
-    if (source.entity.type !== targetEntity.entity.type)
-      throw new InvalidEntityError(
-        'Redirect source and target must have the same entity type',
+    if (edit.authorization || edit.authorizationContext)
+      await this.#preauthorizeCanonicalWrite(
+        id,
+        edit.authorization,
+        edit.authorizationContext,
+        edit.expectedRevision,
       );
-    if (targetEntity.deletedAt)
-      throw new InvalidEntityError(
-        'An entity cannot redirect to a deleted target',
-      );
-    const seen = new Set<EntityId>([id]);
-    let cursor: EntityId | null = target;
-    for (let depth = 0; cursor && depth < 100; depth += 1) {
-      if (seen.has(cursor))
-        throw new InvalidEntityError('Redirect would create a cycle');
-      seen.add(cursor);
-      cursor = (await this.getEntity(cursor)).redirectTo;
-    }
-    if (cursor)
-      throw new InvalidEntityError('Redirect chain exceeds 100 entities');
+    const source = edit.authorizationContext
+      ? await this.#authorizedLifecycle(id, edit.authorizationContext)
+      : await this.getEntity(id).then(({ entity, deletedAt, redirectTo }) => ({
+          type: entity.type,
+          deletedAt,
+          redirectTo,
+        }));
+    await this.#validateRedirectTarget(
+      id,
+      target,
+      source.type,
+      edit.authorizationContext,
+    );
     return this.#mutate(
       id,
       edit,
@@ -1114,6 +1129,7 @@ export class TaprootRepository {
     }
     const succeeded = new Map<number, WriteResult>();
     const failed: BulkImportResult['failed'] = [];
+    let authorizationContext = options.metadata?.authorizationContext;
     let pending = values
       .map((entity, index) => ({ entity, index }))
       .sort(
@@ -1126,10 +1142,22 @@ export class TaprootRepository {
       let progress = false;
       for (const entry of pending) {
         try {
-          succeeded.set(
-            entry.index,
-            await this.#importOne(entry.entity, options),
-          );
+          const effectiveOptions: BulkImportOptions = authorizationContext
+            ? {
+                ...options,
+                metadata: { ...options.metadata, authorizationContext },
+              }
+            : options;
+          const result = await this.#importOne(entry.entity, effectiveOptions);
+          succeeded.set(entry.index, result);
+          if (
+            authorizationContext &&
+            result.authorizationRevision !== undefined
+          )
+            authorizationContext = {
+              ...authorizationContext,
+              authorizationRevision: result.authorizationRevision,
+            };
           progress = true;
         } catch (error) {
           if (error instanceof PropertyNotFoundError) {
@@ -1563,6 +1591,12 @@ export class TaprootRepository {
   ): Promise<WriteResult> {
     const started = performance.now();
     validateEntity(entity);
+    if (metadata.authorization || metadata.authorizationContext)
+      await this.#preauthorizeCanonicalWrite(
+        entity.id,
+        metadata.authorization,
+        metadata.authorizationContext,
+      );
     if (await this.#loadRow(entity.id))
       throw new EntityAlreadyExistsError(`Entity ${entity.id} already exists`);
     await this.#validatePropertyDatatypes(entity);
@@ -1721,6 +1755,13 @@ export class TaprootRepository {
     eventType: AuditEventType = 'update',
   ): Promise<WriteResult> {
     const started = performance.now();
+    if (edit.authorization || edit.authorizationContext)
+      await this.#preauthorizeCanonicalWrite(
+        id,
+        edit.authorization,
+        edit.authorizationContext,
+        edit.expectedRevision,
+      );
     const row = await this.#loadRow(id);
     if (!row) throw new EntityNotFoundError(`Entity ${id} was not found`);
     const stored = storedFromRow(row);
@@ -2085,6 +2126,164 @@ export class TaprootRepository {
       action,
       statementRows,
     };
+  }
+
+  async #preauthorizeCanonicalWrite(
+    entityId: EntityId,
+    rawPolicy: CanonicalAuthorizationPolicyInput | undefined,
+    rawContext: AuthorizationContext | undefined,
+    expectedRevision?: number,
+  ): Promise<void> {
+    if (!rawPolicy || !rawContext)
+      throw new AuthorizationDeniedError('Authorization denied');
+    let policy: CanonicalAuthorizationPolicyInput;
+    let caller: AuthorizationContext;
+    try {
+      policy = normalizeCanonicalAuthorizationPolicy(rawPolicy);
+      caller = normalizeAuthorizationContext(rawContext);
+    } catch {
+      throw new AuthorizationDeniedError('Authorization denied');
+    }
+    if (!caller.capabilities.includes(KNOWLEDGE_WRITE_CAPABILITY))
+      throw new AuthorizationDeniedError('Authorization denied');
+    const result = await this.#db
+      .prepare(
+        `SELECT s.installation_id, s.authorization_revision,
+                e.entity_id, e.revision,
+                p.installation_id AS policy_installation_id,
+                p.source_revision AS policy_source_revision,
+                p.effective_visibility_json
+         FROM taproot_installation_authorization s
+         LEFT JOIN taproot_entities e ON e.entity_id = ?
+         LEFT JOIN taproot_entity_authorization p
+           ON p.entity_id = e.entity_id AND p.source_revision = e.revision
+         WHERE s.singleton = 1`,
+      )
+      .bind(entityId)
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        entity_id: string | null;
+        revision: number | null;
+        policy_installation_id: string | null;
+        policy_source_revision: number | null;
+        effective_visibility_json: string | null;
+      }>();
+    const row = result.results[0];
+    if (
+      !row ||
+      row.installation_id !== policy.installationId ||
+      row.installation_id !== caller.installationId ||
+      Number(row.authorization_revision) !==
+        policy.expectedAuthorizationRevision ||
+      Number(row.authorization_revision) !== caller.authorizationRevision
+    )
+      throw new AuthorizationDeniedError('Authorization denied');
+    if (row.entity_id === null) {
+      if (expectedRevision !== undefined)
+        throw new AuthorizationDeniedError('Authorization denied');
+      return;
+    }
+    if (
+      row.policy_installation_id !== row.installation_id ||
+      row.policy_source_revision === null ||
+      row.effective_visibility_json === null ||
+      !isVisibleTo(
+        JSON.parse(row.effective_visibility_json) as VisibilityScopeV1,
+        caller,
+      )
+    )
+      throw new AuthorizationDeniedError('Authorization denied');
+    if (
+      expectedRevision !== undefined &&
+      Number(row.policy_source_revision) !== expectedRevision
+    )
+      throw new RevisionConflictError('Canonical revision is stale');
+  }
+
+  async #authorizedLifecycle(
+    entityId: EntityId,
+    rawContext: AuthorizationContext,
+  ): Promise<{
+    type: WikibaseEntity['type'];
+    deletedAt: string | null;
+    redirectTo: EntityId | null;
+  }> {
+    const caller = normalizeAuthorizationContext(rawContext);
+    if (!caller.capabilities.includes(KNOWLEDGE_WRITE_CAPABILITY))
+      throw new AuthorizationDeniedError('Authorization denied');
+    const result = await this.#db
+      .prepare(
+        `SELECT e.entity_type, e.deleted_at, e.redirect_to,
+                p.effective_visibility_json
+         FROM taproot_installation_authorization s
+         JOIN taproot_entities e ON e.entity_id = ?
+         JOIN taproot_entity_authorization p
+           ON p.entity_id = e.entity_id AND p.source_revision = e.revision
+         WHERE s.singleton = 1
+           AND s.installation_id = ? AND s.authorization_revision = ?
+           AND p.installation_id = s.installation_id`,
+      )
+      .bind(entityId, caller.installationId, caller.authorizationRevision)
+      .all<{
+        entity_type: WikibaseEntity['type'];
+        deleted_at: string | null;
+        redirect_to: EntityId | null;
+        effective_visibility_json: string;
+      }>();
+    const row = result.results[0];
+    if (
+      !row ||
+      !isVisibleTo(
+        JSON.parse(row.effective_visibility_json) as VisibilityScopeV1,
+        caller,
+      )
+    )
+      throw new AuthorizationDeniedError('Authorization denied');
+    return {
+      type: row.entity_type,
+      deletedAt: row.deleted_at,
+      redirectTo: row.redirect_to,
+    };
+  }
+
+  async #validateRedirectTarget(
+    sourceId: EntityId,
+    targetId: EntityId,
+    sourceType: WikibaseEntity['type'],
+    authorizationContext: AuthorizationContext | undefined,
+  ): Promise<void> {
+    const seen = new Set<EntityId>([sourceId]);
+    let cursor: EntityId | null = targetId;
+    for (let depth = 0; cursor && depth < 100; depth += 1) {
+      if (seen.has(cursor))
+        throw new InvalidEntityError('Redirect would create a cycle');
+      seen.add(cursor);
+      const target: {
+        type: WikibaseEntity['type'];
+        deletedAt: string | null;
+        redirectTo: EntityId | null;
+      } = authorizationContext
+        ? await this.#authorizedLifecycle(cursor, authorizationContext)
+        : await this.getEntity(cursor).then(
+            ({ entity, deletedAt, redirectTo }) => ({
+              type: entity.type,
+              deletedAt,
+              redirectTo,
+            }),
+          );
+      if (target.type !== sourceType)
+        throw new InvalidEntityError(
+          'Redirect source and target must have the same entity type',
+        );
+      if (target.deletedAt)
+        throw new InvalidEntityError(
+          'An entity cannot redirect to a deleted target',
+        );
+      cursor = target.redirectTo;
+    }
+    if (cursor)
+      throw new InvalidEntityError('Redirect chain exceeds 100 entities');
   }
 
   #authorizationWriteStatements(

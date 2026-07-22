@@ -50,6 +50,8 @@ export interface AuthorizationReadinessInspection {
     currentPolicies: number;
     revisionPolicies: number;
     quarantinedEntities: number;
+    revisionPolicyMismatches: number;
+    statementPolicyMismatches: number;
   };
   ready: boolean;
   issues: AuthorizationReadinessIssue[];
@@ -150,6 +152,60 @@ export async function inspectAuthorizationReadiness(
       quarantined_entities: number;
     }>();
   const count = counts.results[0]!;
+  const integrity = await db
+    .prepare(
+      `WITH
+       expected_current(entity_id, revision, statement_id) AS (
+         SELECT e.entity_id, e.revision, json_extract(statement.value, '$.id')
+         FROM taproot_entities e,
+           json_each(e.entity_json, '$.claims') claim,
+           json_each(claim.value) statement
+       ),
+       expected_history(entity_id, revision, statement_id) AS (
+         SELECT r.entity_id, r.revision, json_extract(statement.value, '$.id')
+         FROM taproot_entity_revisions r,
+           json_each(r.entity_json, '$.claims') claim,
+           json_each(claim.value) statement
+       )
+       SELECT
+         (SELECT COUNT(*) FROM taproot_entity_revisions r WHERE NOT EXISTS (
+           SELECT 1 FROM taproot_entity_authorization_revisions p
+           WHERE p.entity_id = r.entity_id AND p.source_revision = r.revision
+             AND p.installation_id = ?
+             AND p.authorization_revision BETWEEN 1 AND ?
+         )) +
+         (SELECT COUNT(*) FROM taproot_entity_authorization_revisions p
+          WHERE NOT EXISTS (
+            SELECT 1 FROM taproot_entity_revisions r
+            WHERE r.entity_id = p.entity_id AND r.revision = p.source_revision
+          )) AS revision_policy_mismatches,
+         (SELECT COUNT(*) FROM expected_current e WHERE NOT EXISTS (
+           SELECT 1 FROM taproot_statement_authorization p
+           WHERE p.entity_id = e.entity_id AND p.source_revision = e.revision
+             AND p.statement_id = e.statement_id
+         )) +
+         (SELECT COUNT(*) FROM taproot_statement_authorization p WHERE NOT EXISTS (
+           SELECT 1 FROM expected_current e
+           WHERE e.entity_id = p.entity_id AND e.revision = p.source_revision
+             AND e.statement_id = p.statement_id
+         )) +
+         (SELECT COUNT(*) FROM expected_history e WHERE NOT EXISTS (
+           SELECT 1 FROM taproot_statement_authorization_revisions p
+           WHERE p.entity_id = e.entity_id AND p.source_revision = e.revision
+             AND p.statement_id = e.statement_id
+         )) +
+         (SELECT COUNT(*) FROM taproot_statement_authorization_revisions p WHERE NOT EXISTS (
+           SELECT 1 FROM expected_history e
+           WHERE e.entity_id = p.entity_id AND e.revision = p.source_revision
+             AND e.statement_id = p.statement_id
+         )) AS statement_policy_mismatches`,
+    )
+    .bind(context.installationId, context.authorizationRevision)
+    .all<{
+      revision_policy_mismatches: number;
+      statement_policy_mismatches: number;
+    }>();
+  const integrityCount = integrity.results[0]!;
   const page = await db
     .prepare(
       `SELECT entity_id, revision FROM taproot_entities
@@ -177,10 +233,17 @@ export async function inspectAuthorizationReadiness(
       currentPolicies: Number(count.current_policies),
       revisionPolicies: Number(count.revision_policies),
       quarantinedEntities: Number(count.quarantined_entities),
+      revisionPolicyMismatches: Number(
+        integrityCount.revision_policy_mismatches,
+      ),
+      statementPolicyMismatches: Number(
+        integrityCount.statement_policy_mismatches,
+      ),
     },
     ready:
       Number(count.quarantined_entities) === 0 &&
-      Number(count.canonical_revisions) === Number(count.revision_policies),
+      Number(integrityCount.revision_policy_mismatches) === 0 &&
+      Number(integrityCount.statement_policy_mismatches) === 0,
     issues,
     cursor:
       page.results.length > limit
@@ -682,27 +745,44 @@ async function readinessCodes(
     codes.push('missing-revision-policy');
   const statementMismatch = await db
     .prepare(
-      `WITH expected(entity_id, revision, statement_id) AS (
-         SELECT r.entity_id, r.revision, json_extract(statement.value, '$.id')
+      `WITH expected_current(entity_id, revision, statement_id) AS (
+          SELECT e.entity_id, e.revision, json_extract(statement.value, '$.id')
+          FROM taproot_entities e,
+            json_each(e.entity_json, '$.claims') claim,
+            json_each(claim.value) statement
+          WHERE e.entity_id = ?
+        ), expected_history(entity_id, revision, statement_id) AS (
+          SELECT r.entity_id, r.revision, json_extract(statement.value, '$.id')
          FROM taproot_entity_revisions r,
            json_each(r.entity_json, '$.claims') claim,
            json_each(claim.value) statement
          WHERE r.entity_id = ?
        )
        SELECT
-         (SELECT COUNT(*) FROM expected e WHERE NOT EXISTS (
-           SELECT 1 FROM taproot_statement_authorization_revisions p
+          (SELECT COUNT(*) FROM expected_current e WHERE NOT EXISTS (
+            SELECT 1 FROM taproot_statement_authorization p
+            WHERE p.entity_id = e.entity_id AND p.source_revision = e.revision
+              AND p.statement_id = e.statement_id
+          )) +
+          (SELECT COUNT(*) FROM taproot_statement_authorization p
+           WHERE p.entity_id = ? AND NOT EXISTS (
+             SELECT 1 FROM expected_current e
+             WHERE e.entity_id = p.entity_id AND e.revision = p.source_revision
+               AND e.statement_id = p.statement_id
+           )) +
+          (SELECT COUNT(*) FROM expected_history e WHERE NOT EXISTS (
+            SELECT 1 FROM taproot_statement_authorization_revisions p
            WHERE p.entity_id = e.entity_id AND p.source_revision = e.revision
              AND p.statement_id = e.statement_id
          )) +
          (SELECT COUNT(*) FROM taproot_statement_authorization_revisions p
           WHERE p.entity_id = ? AND NOT EXISTS (
-            SELECT 1 FROM expected e
+             SELECT 1 FROM expected_history e
             WHERE e.entity_id = p.entity_id AND e.revision = p.source_revision
               AND e.statement_id = p.statement_id
           )) AS count`,
     )
-    .bind(entityId, entityId)
+    .bind(entityId, entityId, entityId, entityId)
     .all<{ count: number }>();
   if (Number(statementMismatch.results[0]?.count ?? 0) !== 0)
     codes.push('statement-policy-mismatch');

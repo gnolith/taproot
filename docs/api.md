@@ -50,7 +50,11 @@ create a cycle. `resolveEntity` follows a bounded chain and reports every hop.
 
 `createStatement` and `createReference` build correctly shaped values. Import
 accepts trusted explicit Q/P IDs and advances counters. `importEntities`
-supports create-only or upsert mode and reports per-entity failures.
+supports create-only or upsert mode and reports per-entity failures. An
+authorized bulk import supplies one policy per entity. Those policies name the
+sequential expected installation authorization revisions; after each success,
+Taproot advances the context revision used for the next entity while preserving
+the same authenticated principal, grants, and capabilities.
 
 `Statement.text` is required, non-whitespace authored text describing that
 exact structured revision. `addStatement` and `replaceStatement` receive it on
@@ -78,6 +82,9 @@ guard, or authorization context to request, user, agent, or MCP code.
 
 `bootstrapTaprootAuthorization` initializes a pristine database once.
 `createInstallationAuthorizationGuard` issues the normal-write guard.
+The guard can also execute an ordered cross-package database batch behind an
+exact-revision fence or an inseparable authorization advance. It never returns
+raw fence or advance statements to the caller.
 `inspectTaprootAuthorizationReadiness`,
 `planTaprootAuthorizationBackfill`, and
 `applyTaprootAuthorizationBackfill` are host-controlled, exact

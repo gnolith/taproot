@@ -131,30 +131,63 @@ CREATE TRIGGER IF NOT EXISTS taproot_installation_identity_no_update
 CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_no_delete
   BEFORE DELETE ON taproot_installation_authorization
   BEGIN SELECT RAISE(ABORT, 'taproot installation authorization is durable'); END;
+CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_no_replace
+  BEFORE INSERT ON taproot_installation_authorization
+  WHEN EXISTS (SELECT 1 FROM taproot_installation_authorization WHERE singleton = NEW.singleton)
+  BEGIN SELECT RAISE(ABORT, 'taproot installation authorization cannot be replaced'); END;
 CREATE TRIGGER IF NOT EXISTS taproot_entity_authorization_revisions_no_update
   BEFORE UPDATE ON taproot_entity_authorization_revisions
   BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS taproot_entity_authorization_revisions_no_delete
   BEFORE DELETE ON taproot_entity_authorization_revisions
   BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS taproot_entity_authorization_revisions_no_replace
+  BEFORE INSERT ON taproot_entity_authorization_revisions
+  WHEN EXISTS (
+    SELECT 1 FROM taproot_entity_authorization_revisions
+    WHERE entity_id = NEW.entity_id AND source_revision = NEW.source_revision
+  )
+  BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions cannot be replaced'); END;
 CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_update
   BEFORE UPDATE ON taproot_statement_authorization_revisions
   BEGIN SELECT RAISE(ABORT, 'taproot statement authorization revisions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_delete
   BEFORE DELETE ON taproot_statement_authorization_revisions
   BEGIN SELECT RAISE(ABORT, 'taproot statement authorization revisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_replace
+  BEFORE INSERT ON taproot_statement_authorization_revisions
+  WHEN EXISTS (
+    SELECT 1 FROM taproot_statement_authorization_revisions
+    WHERE entity_id = NEW.entity_id AND source_revision = NEW.source_revision
+      AND statement_id = NEW.statement_id
+  )
+  BEGIN SELECT RAISE(ABORT, 'taproot statement authorization revisions cannot be replaced'); END;
 CREATE TRIGGER IF NOT EXISTS taproot_authorization_admin_audit_no_update
   BEFORE UPDATE ON taproot_authorization_admin_audit
   BEGIN SELECT RAISE(ABORT, 'taproot authorization administration audit is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS taproot_authorization_admin_audit_no_delete
   BEFORE DELETE ON taproot_authorization_admin_audit
   BEGIN SELECT RAISE(ABORT, 'taproot authorization administration audit is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS taproot_authorization_admin_audit_no_replace
+  BEFORE INSERT ON taproot_authorization_admin_audit
+  WHEN EXISTS (
+    SELECT 1 FROM taproot_authorization_admin_audit
+    WHERE sequence = NEW.sequence OR audit_id = NEW.audit_id
+  )
+  BEGIN SELECT RAISE(ABORT, 'taproot authorization administration audit cannot be replaced'); END;
 CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_advances_no_update
   BEFORE UPDATE ON taproot_installation_authorization_advances
   BEGIN SELECT RAISE(ABORT, 'taproot authorization advances are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_advances_no_delete
   BEFORE DELETE ON taproot_installation_authorization_advances
   BEGIN SELECT RAISE(ABORT, 'taproot authorization advances are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_advances_no_replace
+  BEFORE INSERT ON taproot_installation_authorization_advances
+  WHEN EXISTS (
+    SELECT 1 FROM taproot_installation_authorization_advances
+    WHERE advance_id = NEW.advance_id
+  )
+  BEGIN SELECT RAISE(ABORT, 'taproot authorization advances cannot be replaced'); END;
 
 INSERT INTO taproot_metadata(metadata_key, metadata_value)
   VALUES ('schema_version', '3')

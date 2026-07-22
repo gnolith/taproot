@@ -27,6 +27,14 @@
   outbox and counter advances, fail-closed legacy quarantine, and bounded
   hash-attested `search:admin` backfill. Unique durable advance IDs prevent
   same-target ABA races for canonical and cross-package ordered batches.
+- Runtime JavaScript writes now fail closed when authorization metadata is
+  omitted, authorize before loading existing canonical state, validate redirect
+  targets and historical reverts against current policy, and preserve generic
+  denial behavior for missing, stale, or inaccessible targets.
+- Cross-package authorization fencing is guard-executed and inseparable from
+  the ordered database batch. Authorization singleton/audit rows reject
+  replacement, readiness verifies current and historical statement-policy
+  coverage, and authorized bulk import advances its context between entities.
 
 - Added required, explicitly authored nonblank `Statement.text` to canonical
   JSON and to every logical statement mutation.

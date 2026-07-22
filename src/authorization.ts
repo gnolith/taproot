@@ -1098,22 +1098,46 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
   ): Promise<CanonicalAuthorizationRecord | null> {
     const result = await this.#db
       .prepare(
-        `SELECT installation_id, authorization_revision,
-                effective_visibility_json AS visibility_json,
-                workspace_id, owner_principal_id, source_revision
-         FROM taproot_entity_authorization_revisions
-         WHERE entity_id = ? AND source_revision = ?`,
+        `SELECT current.installation_id,
+                MAX(current.authorization_revision, history.authorization_revision)
+                  AS authorization_revision,
+                current.effective_visibility_json AS current_visibility_json,
+                history.effective_visibility_json AS historical_visibility_json,
+                history.workspace_id, history.owner_principal_id,
+                history.source_revision
+         FROM taproot_entity_authorization_revisions history
+         JOIN taproot_entity_authorization current
+           ON current.entity_id = history.entity_id
+          AND current.installation_id = history.installation_id
+         JOIN taproot_entities entity
+           ON entity.entity_id = current.entity_id
+          AND entity.revision = current.source_revision
+         WHERE history.entity_id = ? AND history.source_revision = ?
+           AND current.deleted_at IS NULL AND entity.deleted_at IS NULL`,
       )
       .bind(entityId, revisionNumber)
       .all<{
         installation_id: string;
         authorization_revision: number;
-        visibility_json: string;
+        current_visibility_json: string;
+        historical_visibility_json: string;
         workspace_id: string | null;
         owner_principal_id: string;
         source_revision: number;
       }>();
-    return authorizationRecordFromRow(result.results[0]);
+    const row = result.results[0];
+    if (!row) return null;
+    return {
+      installationId: row.installation_id,
+      authorizationRevision: Number(row.authorization_revision),
+      visibility: intersectVisibilityScopes(
+        JSON.parse(row.current_visibility_json) as VisibilityScopeV1,
+        JSON.parse(row.historical_visibility_json) as VisibilityScopeV1,
+      ),
+      workspaceId: row.workspace_id,
+      ownerPrincipalId: row.owner_principal_id,
+      sourceRevision: Number(row.source_revision),
+    };
   }
 
   async getStatementAuthorization(
@@ -1127,9 +1151,11 @@ export class PersistedEntityAuthorizationSource implements EntityAuthorizationSo
                 p.workspace_id, p.owner_principal_id, s.source_revision
          FROM taproot_statement_authorization s
          JOIN taproot_entity_authorization p ON p.entity_id = s.entity_id
-           AND p.source_revision = s.source_revision
+            AND p.source_revision = s.source_revision
+         JOIN taproot_entities e ON e.entity_id = s.entity_id
+            AND e.revision = s.source_revision
          WHERE s.entity_id = ? AND s.statement_id = ?
-           AND p.deleted_at IS NULL`,
+           AND p.deleted_at IS NULL AND e.deleted_at IS NULL`,
       )
       .bind(entityId, statementId)
       .all<{

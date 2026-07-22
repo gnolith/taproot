@@ -147,6 +147,11 @@ they do not return canonical JSON, text, RDF counts, hashes, or audit bodies.
 `TaprootRepository` and raw read helpers are intentionally absent from package
 exports in the breaking 0.3 line.
 
+The opaque guard also owns execution of ordered cross-package batches that
+need an exact authorization-revision fence or advance. It does not expose raw
+counter-update statements that a caller could separate from the corresponding
+audit, assertion, or domain writes.
+
 Statement creation and replacement include `text` on the `Statement` itself.
 Rank, qualifier, and reference mutation methods require authored text for the
 new logical statement revision. `replaceEntity` and `revertEntity` require an
@@ -177,8 +182,10 @@ that as `QuadPatchTooLargeError`. Store PDFs, images, audio, OCR, transcripts,
 and article bodies externally and represent them as knowledge Items.
 
 Bulk imports default to create-only, can opt into `upsert`, are capped at 100
-entities by default, and commit one entity atomically at a time. Multi-command
-edits apply up to 100 commands in one revision. All list limits are capped at 500.
+entities by default, and commit one entity atomically at a time. Authorized
+bulk policies use sequential expected authorization revisions; Taproot carries
+each successful advance into the next entity's context. Multi-command edits
+apply up to 100 commands in one revision. All list limits are capped at 500.
 
 See the [local D1 and Diamond interoperability example](examples/d1-diamond-interop/README.md),
 [`COMPATIBILITY.md`](COMPATIBILITY.md), and the architecture, API, operations,
