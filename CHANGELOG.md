@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.4.1
+
+- Qualified and pinned the public `@gnolith/diamond@0.4.1` artifact across
+  native SQLite, Workerd D1, migrations, prepared RDF patches, ledger,
+  packed-consumer, and release gates. The disposable consumer now rejects any
+  dependency graph other than one Diamond 0.4.1 runtime.
+- Updated real-Qdrant conformance to the Seedbed-supported Linux/amd64
+  `qdrant/qdrant:v1.18.2` manifest at digest
+  `sha256:da65a06bc75e42702f80c992b99c5144b0fbd675ae7a96d2991de0bf957b7071`
+  and added repository drift guards for both runtime coordinates.
+
 ## 0.4.0
 
 - Added migration 0008 and the 0.4 public surface: canonical Resource and

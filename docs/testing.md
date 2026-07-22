@@ -57,8 +57,9 @@ fakes, persisted/reopened exact SQLite vector conformance, authorization and
 installation isolation, durable approval/state transitions, selected-generation
 readiness, three-attempt circuits, redacted warning-once behavior, and healthy
 lexical fallback. `npm run test:qdrant` pulls pinned
-`qdrant/qdrant:v1.15.4` and runs real validate/probe/upsert/authorized-query/
-isolation/delete conformance. `npm run baseline:hybrid-search` records
+`qdrant/qdrant:v1.18.2@sha256:da65a06bc75e42702f80c992b99c5144b0fbd675ae7a96d2991de0bf957b7071`
+for `linux/amd64` and runs real validate/probe/upsert/authorized-query/isolation/
+delete conformance. `npm run baseline:hybrid-search` records
 reproducible indexing, query, storage, memory, vector, batch, and token evidence
 without asserting an unsupported SLA.
 
@@ -82,7 +83,8 @@ same-adapter enforcement, late-batch rollback, and concurrent writers.
 package, installs the tarball into a fresh temporary project with registry
 Diamond and Miniflare dependencies, initializes a new D1 database, writes an
 entity, and verifies the RDF through privileged package-test SPARQL using only
-public package exports. This proves RDF interoperability, not authorization of
+public package exports. It additionally requires npm's complete installed tree
+to contain exactly one `@gnolith/diamond@0.4.1` runtime. This proves RDF interoperability, not authorization of
 a user-facing SPARQL endpoint.
 
 `npm run check` is the complete local package release-quality gate. Coverage

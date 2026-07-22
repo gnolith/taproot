@@ -19,22 +19,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: gnolith/diamond
-          ref: 326da7e48d77cddc5a58e21cf65d872ecb9b3b74
-          path: .diamond-handoff
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
-      - name: Install exact packed Diamond handoff
-        run: |
-          npm ci --ignore-scripts --prefix .diamond-handoff
-          npm pack ./.diamond-handoff --pack-destination "$RUNNER_TEMP"
-          echo "ac8e34810a8504bd891b36a199973f2d65ef652555644813c7a36f1c7016c9d2  $RUNNER_TEMP/gnolith-diamond-0.4.0.tgz" | sha256sum --check
-          npm install --no-save --ignore-scripts --package-lock=false "$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz"
-          node -e "require('node:fs').rmSync('.diamond-handoff', { recursive: true, force: true })"
+      - run: npm ci
       - run: npm run format:check
       - run: npm run lint
       - run: npm run typecheck
@@ -59,22 +48,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: gnolith/diamond
-          ref: 326da7e48d77cddc5a58e21cf65d872ecb9b3b74
-          path: .diamond-handoff
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - name: Install exact packed Diamond handoff
-        run: |
-          npm ci --ignore-scripts --prefix .diamond-handoff
-          npm pack ./.diamond-handoff --pack-destination "$RUNNER_TEMP"
-          echo "ac8e34810a8504bd891b36a199973f2d65ef652555644813c7a36f1c7016c9d2  $RUNNER_TEMP/gnolith-diamond-0.4.0.tgz" | sha256sum --check
-          npm install --no-save --ignore-scripts --package-lock=false "$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz"
-          node -e "require('node:fs').rmSync('.diamond-handoff', { recursive: true, force: true })"
+      - run: npm ci
       - run: npm run typecheck
       - run: npm run test:unit
       - run: npm run test:integration
@@ -86,22 +64,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: gnolith/diamond
-          ref: 326da7e48d77cddc5a58e21cf65d872ecb9b3b74
-          path: .diamond-handoff
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-      - name: Install exact packed Diamond handoff
-        run: |
-          npm ci --ignore-scripts --prefix .diamond-handoff
-          npm pack ./.diamond-handoff --pack-destination "$RUNNER_TEMP"
-          echo "ac8e34810a8504bd891b36a199973f2d65ef652555644813c7a36f1c7016c9d2  $RUNNER_TEMP/gnolith-diamond-0.4.0.tgz" | sha256sum --check
-          npm install --no-save --ignore-scripts --package-lock=false "$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz"
-          node -e "require('node:fs').rmSync('.diamond-handoff', { recursive: true, force: true })"
-          echo "DIAMOND_TARBALL=$RUNNER_TEMP/gnolith-diamond-0.4.0.tgz" >> "$GITHUB_ENV"
+      - run: npm ci
       - run: npm run consumer:check
 
   qdrant-conformance:

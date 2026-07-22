@@ -1,9 +1,19 @@
 # Wikibase compatibility target
 
-Taproot 0.4.x requires `@gnolith/diamond` 0.4.0 exactly. Existing Cloudflare D1
+Taproot 0.4.1 requires `@gnolith/diamond` 0.4.1 exactly. Existing Cloudflare D1
 objects remain compatible with the exported `D1DatabaseLike` surface. New
 embedders may use the equivalent `SqliteDatabaseLike`; both require one
 adapter/connection with ordered atomic batch semantics.
+
+The exact Diamond pin is the public-registry artifact qualified by Taproot's
+native SQLite, Workerd D1, migration, prepared-patch, ledger, packed-consumer,
+and release gates. It also makes npm converge on one Diamond runtime instead of
+permitting a second compatible-looking copy.
+
+The supported real-Qdrant conformance matrix is currently `linux/amd64` with
+`qdrant/qdrant:v1.18.2@sha256:da65a06bc75e42702f80c992b99c5144b0fbd675ae7a96d2991de0bf957b7071`.
+That platform-specific manifest is what CI and local release qualification run;
+other architectures are not claimed by this matrix.
 
 Fresh databases require an explicit durable absolute HTTP(S) base IRI. A
 version-one database is adopted only when its known table and version markers
