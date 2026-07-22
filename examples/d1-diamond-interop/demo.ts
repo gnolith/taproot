@@ -1,21 +1,24 @@
 import {
   RevisionConflictError,
   SEARCH_ADMIN_CAPABILITY,
+  KNOWLEDGE_WRITE_CAPABILITY,
+  KNOWLEDGE_POLICY_CAPABILITY,
   addStatement,
+  bootstrapTaprootAuthorization,
   createAuthorizationCursorCodec,
   createAuthorizedTaproot,
   createItem,
   createProperty,
   createTaprootHostWriteCapability,
+  createInstallationAuthorizationGuard,
   exportEntityJson,
   initializeTaproot,
   setLabel,
   setStatementRank,
-  type CanonicalAuthorizationRecord,
+  type CanonicalAuthorizationPolicyInput,
   type D1DatabaseLike,
-  type EntityAuthorizationSource,
-  type EntityId,
   type Statement,
+  type AuthorizationContext,
 } from '@gnolith/taproot';
 import { createSparqlHandler } from '@gnolith/diamond';
 
@@ -29,21 +32,35 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
       'sign',
     ]),
   );
+  await bootstrapTaprootAuthorization(
+    db,
+    options,
+    writeCapability,
+    'demo-installation',
+  );
+  const authorizationGuard = await createInstallationAuthorizationGuard(
+    db,
+    options,
+    writeCapability,
+  );
 
-  await createProperty(db, options, writeCapability, {
+  await createProperty(db, options, authorizationGuard, writer(1), {
     datatype: 'string',
     labels: { en: { language: 'en', value: 'occupation' } },
+    authorization: policy(1),
   });
-  await createProperty(db, options, writeCapability, {
+  await createProperty(db, options, authorizationGuard, writer(2), {
     datatype: 'time',
     labels: { en: { language: 'en', value: 'point in time' } },
+    authorization: policy(2),
   });
-  await createProperty(db, options, writeCapability, {
+  await createProperty(db, options, authorizationGuard, writer(3), {
     datatype: 'url',
     labels: { en: { language: 'en', value: 'reference URL' } },
+    authorization: policy(3),
   });
 
-  const created = await createItem(db, options, writeCapability, {
+  const created = await createItem(db, options, authorizationGuard, writer(4), {
     labels: { en: { language: 'en', value: 'Ada Lovelace' } },
     descriptions: {
       en: { language: 'en', value: 'English mathematician' },
@@ -54,6 +71,7 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
       tool: 'gnolith-mcp',
     },
     requestId: 'demo-request',
+    authorization: policy(4),
   });
   const occupation: Statement = {
     id: `${created.entityId}$occupation`,
@@ -110,22 +128,28 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
   const added = await addStatement(
     db,
     options,
-    writeCapability,
+    authorizationGuard,
+    writer(5, true),
     created.entityId,
     occupation,
     {
       expectedRevision: created.newRevision,
+      authorization: policy(5, { [occupation.id]: [] }),
     },
   );
   const preferred = await setStatementRank(
     db,
     options,
-    writeCapability,
+    authorizationGuard,
+    writer(6),
     created.entityId,
     occupation.id,
     'preferred',
     'Ada Lovelace worked as a computer programmer in 1843 (preferred).',
-    { expectedRevision: added.newRevision },
+    {
+      expectedRevision: added.newRevision,
+      authorization: policy(6, { [occupation.id]: [] }),
+    },
   );
   const unknownOccupation: Statement = {
     id: `${created.entityId}$unknown-occupation`,
@@ -144,11 +168,16 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
   await addStatement(
     db,
     options,
-    writeCapability,
+    authorizationGuard,
+    writer(7, true),
     created.entityId,
     unknownOccupation,
     {
       expectedRevision: preferred.newRevision,
+      authorization: policy(7, {
+        [occupation.id]: [],
+        [unknownOccupation.id]: [],
+      }),
     },
   );
 
@@ -169,12 +198,17 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
     await setLabel(
       db,
       options,
-      writeCapability,
+      authorizationGuard,
+      writer(8),
       created.entityId,
       'en',
       'stale edit',
       {
         expectedRevision: created.newRevision,
+        authorization: policy(8, {
+          [occupation.id]: [],
+          [unknownOccupation.id]: [],
+        }),
       },
     );
   } catch (cause) {
@@ -182,22 +216,6 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
   }
 
   const sparqlResults: unknown = await response.json();
-  const policy: CanonicalAuthorizationRecord = {
-    installationId: 'demo-installation',
-    authorizationRevision: 1,
-    visibility: { version: 1, clauses: [] },
-  };
-  const source: EntityAuthorizationSource = {
-    getInstallationAuthorizationState: () =>
-      Promise.resolve({
-        installationId: 'demo-installation',
-        authorizationRevision: 1,
-      }),
-    getEntityAuthorization: (entityId: EntityId) =>
-      Promise.resolve(entityId === created.entityId ? policy : null),
-    getEntityRevisionAuthorization: (entityId: EntityId) =>
-      Promise.resolve(entityId === created.entityId ? policy : null),
-  };
   const reader = createAuthorizedTaproot(
     db,
     options,
@@ -207,9 +225,8 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
       activeWorkspaceId: null,
       workspaceIds: [],
       capabilities: [SEARCH_ADMIN_CAPABILITY],
-      authorizationRevision: 1,
+      authorizationRevision: 8,
     },
-    source,
     {
       cursorCodec: createAuthorizationCursorCodec(
         await crypto.subtle.generateKey(
@@ -229,5 +246,36 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
     staleRevisionRejected,
     audit: audit.items,
     integrity,
+  };
+}
+
+function policy(
+  expectedAuthorizationRevision: number,
+  statementRestrictions: CanonicalAuthorizationPolicyInput['statementRestrictions'] = {},
+): CanonicalAuthorizationPolicyInput {
+  return {
+    installationId: 'demo-installation',
+    workspaceId: null,
+    ownerPrincipalId: 'demo-principal',
+    visibility: { version: 1, clauses: [] },
+    statementRestrictions,
+    expectedAuthorizationRevision,
+  };
+}
+
+function writer(
+  authorizationRevision: number,
+  policyAuthority = false,
+): AuthorizationContext {
+  return {
+    installationId: 'demo-installation',
+    principalId: 'demo-principal',
+    activeWorkspaceId: null,
+    workspaceIds: [],
+    capabilities: [
+      KNOWLEDGE_WRITE_CAPABILITY,
+      ...(policyAuthority ? [KNOWLEDGE_POLICY_CAPABILITY] : []),
+    ],
+    authorizationRevision,
   };
 }

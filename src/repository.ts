@@ -20,6 +20,7 @@ import {
 } from './canonical.js';
 import {
   EntityAlreadyExistsError,
+  AuthorizationDeniedError,
   EntityNotFoundError,
   InvalidEntityError,
   InvalidStatementError,
@@ -35,6 +36,16 @@ import { buildEntityQuads } from './rdf.js';
 import { withoutTrailingSlashes } from './iri.js';
 import { canonicalizeTaprootBaseIri } from './migrations.js';
 import { TAPROOT_RDF_VERSION } from './schema.js';
+import {
+  intersectVisibilityScopes,
+  isVisibleTo,
+  normalizeCanonicalAuthorizationPolicy,
+  normalizeAuthorizationContext,
+  normalizeVisibilityScope,
+  serializeVisibilityScope,
+  KNOWLEDGE_POLICY_CAPABILITY,
+  KNOWLEDGE_WRITE_CAPABILITY,
+} from './authorization.js';
 import type {
   AliasMap,
   AuditEvent,
@@ -66,6 +77,9 @@ import type {
   TaprootOptions,
   WikibaseEntity,
   WriteResult,
+  CanonicalAuthorizationPolicyInput,
+  VisibilityScopeV1,
+  AuthorizationContext,
 } from './types.js';
 
 interface EntityRow {
@@ -123,6 +137,26 @@ interface WriteContext {
   lifecycle: Lifecycle;
 }
 
+interface PreparedAuthorizationWrite {
+  policy: CanonicalAuthorizationPolicyInput;
+  previousAdvanceId: string;
+  authorizationRevision: number;
+  searchGeneration: number;
+  effectiveVisibilityJson: string;
+  action: 'create' | 'unchanged' | 'policy-change';
+  statementRows: Array<{
+    statementId: string;
+    restrictionsJson: string;
+    effectiveVisibilityJson: string;
+  }>;
+}
+
+export interface LegacyAuthorizationBootstrapAttestation {
+  entityCount: number;
+  revisionCount: number;
+  revisionManifestHash: string;
+}
+
 export interface CreateItemInput extends EditMetadata {
   id?: `Q${number}`;
   labels?: LanguageMap;
@@ -167,6 +201,9 @@ export interface ListAuditOptions {
 
 export interface BulkImportOptions {
   metadata?: EditMetadata;
+  authorizations?: Readonly<
+    Partial<Record<EntityId, CanonicalAuthorizationPolicyInput>>
+  >;
   continueOnError?: boolean;
   mode?: 'create' | 'upsert';
 }
@@ -212,6 +249,124 @@ export class TaprootRepository {
       ...(options.observe ? { observe: options.observe } : {}),
       ...(options.factory ? { factory: options.factory } : {}),
     };
+  }
+
+  /** Assembly-only pristine bootstrap. Canonical writes remain policy-bound. */
+  async bootstrapAuthorization(installationId: string): Promise<void> {
+    if (
+      typeof installationId !== 'string' ||
+      !installationId.trim() ||
+      installationId.length > 256
+    )
+      throw new InvalidEntityError(
+        'installationId must contain 1 through 256 characters',
+      );
+    const createdAt = this.#options.clock().toISOString();
+    try {
+      await this.#db.batch([
+        this.#assertion(`NOT EXISTS (SELECT 1 FROM taproot_entities)`),
+        this.#db
+          .prepare(
+            `INSERT INTO taproot_installation_authorization(
+               singleton, installation_id, authorization_revision,
+               search_generation, last_advance_id, created_at, updated_at
+             ) VALUES (1, ?, 1, 1, 'bootstrap', ?, ?)`,
+          )
+          .bind(installationId, createdAt, createdAt),
+      ]);
+    } catch (cause) {
+      throw new RevisionConflictError(
+        'Authorization bootstrap requires a pristine uninitialized installation',
+        { cause: toError(cause) },
+      );
+    }
+  }
+
+  /** Explicit bootstrap for a fully quarantined pre-0004 installation. */
+  async bootstrapLegacyAuthorization(
+    installationId: string,
+    attestation: LegacyAuthorizationBootstrapAttestation,
+  ): Promise<void> {
+    if (
+      typeof installationId !== 'string' ||
+      !installationId.trim() ||
+      installationId.length > 256
+    )
+      throw new InvalidEntityError(
+        'installationId must contain 1 through 256 characters',
+      );
+    if (
+      !Number.isSafeInteger(attestation.entityCount) ||
+      attestation.entityCount < 1 ||
+      !Number.isSafeInteger(attestation.revisionCount) ||
+      attestation.revisionCount < attestation.entityCount ||
+      !/^[a-f0-9]{64}$/u.test(attestation.revisionManifestHash)
+    )
+      throw new InvalidEntityError(
+        'Legacy authorization attestation is invalid',
+      );
+    const counts = await this.#db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM taproot_entities) AS entity_count,
+           (SELECT COUNT(*) FROM taproot_entity_revisions) AS revision_count,
+           (SELECT COUNT(*) FROM taproot_entity_authorization) AS policy_count`,
+      )
+      .all<{
+        entity_count: number;
+        revision_count: number;
+        policy_count: number;
+      }>();
+    const count = counts.results[0];
+    const revisions = await this.#db
+      .prepare(
+        `SELECT entity_id, revision, content_hash
+         FROM taproot_entity_revisions ORDER BY entity_id, revision`,
+      )
+      .all<{ entity_id: string; revision: number; content_hash: string }>();
+    const manifestHash = await sha256(
+      JSON.stringify(
+        revisions.results.map(({ entity_id, revision, content_hash }) => [
+          entity_id,
+          Number(revision),
+          content_hash,
+        ]),
+      ),
+    );
+    if (
+      Number(count?.entity_count ?? 0) !== attestation.entityCount ||
+      Number(count?.revision_count ?? 0) !== attestation.revisionCount ||
+      Number(count?.policy_count ?? 0) !== 0 ||
+      manifestHash !== attestation.revisionManifestHash
+    )
+      throw new RevisionConflictError(
+        'Legacy authorization attestation does not match quarantined canonical state',
+      );
+    const createdAt = this.#options.clock().toISOString();
+    try {
+      await this.#db.batch([
+        this.#assertion(
+          `(SELECT COUNT(*) FROM taproot_entities) = ?
+           AND (SELECT COUNT(*) FROM taproot_entity_revisions) = ?
+           AND NOT EXISTS (SELECT 1 FROM taproot_entity_authorization)`,
+          attestation.entityCount,
+          attestation.revisionCount,
+        ),
+        this.#db
+          .prepare(
+            `INSERT INTO taproot_installation_authorization(
+               singleton, installation_id, authorization_revision,
+               search_generation, last_advance_id, created_at, updated_at
+             ) VALUES (1, ?, 1, 1, 'legacy-bootstrap', ?, ?)`,
+          )
+          .bind(installationId, createdAt, createdAt),
+      ]);
+    } catch (cause) {
+      throw new RevisionConflictError(
+        'Legacy authorization bootstrap lost its state attestation race',
+        { cause: toError(cause) },
+      );
+    }
   }
 
   async getEntity(id: EntityId): Promise<StoredEntity> {
@@ -595,7 +750,21 @@ export class TaprootRepository {
     targetRevision: number,
     edit: StatementRevisionEdit,
   ): Promise<WriteResult> {
+    if (edit.authorization || edit.authorizationContext)
+      await this.#preauthorizeCanonicalWrite(
+        id,
+        edit.authorization,
+        edit.authorizationContext,
+        edit.expectedRevision,
+      );
     const target = await this.getEntityRevision(id, targetRevision);
+    if (target.redirectTo)
+      await this.#validateRedirectTarget(
+        id,
+        target.redirectTo,
+        target.entity.type,
+        edit.authorizationContext,
+      );
     return this.#mutate(
       id,
       edit,
@@ -645,26 +814,26 @@ export class TaprootRepository {
   ): Promise<WriteResult> {
     if (id === target)
       throw new InvalidEntityError('An entity cannot redirect to itself');
-    const source = await this.getEntity(id);
-    const targetEntity = await this.getEntity(target);
-    if (source.entity.type !== targetEntity.entity.type)
-      throw new InvalidEntityError(
-        'Redirect source and target must have the same entity type',
+    if (edit.authorization || edit.authorizationContext)
+      await this.#preauthorizeCanonicalWrite(
+        id,
+        edit.authorization,
+        edit.authorizationContext,
+        edit.expectedRevision,
       );
-    if (targetEntity.deletedAt)
-      throw new InvalidEntityError(
-        'An entity cannot redirect to a deleted target',
-      );
-    const seen = new Set<EntityId>([id]);
-    let cursor: EntityId | null = target;
-    for (let depth = 0; cursor && depth < 100; depth += 1) {
-      if (seen.has(cursor))
-        throw new InvalidEntityError('Redirect would create a cycle');
-      seen.add(cursor);
-      cursor = (await this.getEntity(cursor)).redirectTo;
-    }
-    if (cursor)
-      throw new InvalidEntityError('Redirect chain exceeds 100 entities');
+    const source = edit.authorizationContext
+      ? await this.#authorizedLifecycle(id, edit.authorizationContext)
+      : await this.getEntity(id).then(({ entity, deletedAt, redirectTo }) => ({
+          type: entity.type,
+          deletedAt,
+          redirectTo,
+        }));
+    await this.#validateRedirectTarget(
+      id,
+      target,
+      source.type,
+      edit.authorizationContext,
+    );
     return this.#mutate(
       id,
       edit,
@@ -961,6 +1130,7 @@ export class TaprootRepository {
     }
     const succeeded = new Map<number, WriteResult>();
     const failed: BulkImportResult['failed'] = [];
+    let authorizationContext = options.metadata?.authorizationContext;
     let pending = values
       .map((entity, index) => ({ entity, index }))
       .sort(
@@ -973,10 +1143,22 @@ export class TaprootRepository {
       let progress = false;
       for (const entry of pending) {
         try {
-          succeeded.set(
-            entry.index,
-            await this.#importOne(entry.entity, options),
-          );
+          const effectiveOptions: BulkImportOptions = authorizationContext
+            ? {
+                ...options,
+                metadata: { ...options.metadata, authorizationContext },
+              }
+            : options;
+          const result = await this.#importOne(entry.entity, effectiveOptions);
+          succeeded.set(entry.index, result);
+          if (
+            authorizationContext &&
+            result.authorizationRevision !== undefined
+          )
+            authorizationContext = {
+              ...authorizationContext,
+              authorizationRevision: result.authorizationRevision,
+            };
           progress = true;
         } catch (error) {
           if (error instanceof PropertyNotFoundError) {
@@ -1027,18 +1209,46 @@ export class TaprootRepository {
     options: BulkImportOptions,
   ): Promise<WriteResult> {
     if (options.mode === 'upsert') {
+      const authorization = options.authorizations?.[entity.id];
+      const authorizationContext = options.metadata?.authorizationContext;
+      if (authorization || authorizationContext) {
+        const currentRevision = await this.#preauthorizeCanonicalWrite(
+          entity.id,
+          authorization,
+          authorizationContext,
+        );
+        if (currentRevision !== null)
+          return this.replaceEntity(entity.id, entity, {
+            expectedRevision: currentRevision,
+            statementTexts: authoredStatementTexts(entity),
+            ...options.metadata,
+            ...(authorization ? { authorization } : {}),
+          });
+        return this.importEntity(entity, {
+          ...options.metadata,
+          ...(authorization ? { authorization } : {}),
+        });
+      }
       try {
         const current = await this.getEntity(entity.id);
         return await this.replaceEntity(entity.id, entity, {
           expectedRevision: current.entity.lastrevid,
           statementTexts: authoredStatementTexts(entity),
           ...options.metadata,
+          ...(options.authorizations?.[entity.id]
+            ? { authorization: options.authorizations[entity.id] }
+            : {}),
         });
       } catch (error) {
         if (!(error instanceof EntityNotFoundError)) throw error;
       }
     }
-    return this.importEntity(entity, options.metadata);
+    return this.importEntity(entity, {
+      ...options.metadata,
+      ...(options.authorizations?.[entity.id]
+        ? { authorization: options.authorizations[entity.id] }
+        : {}),
+    });
   }
 
   async applyCommands(
@@ -1272,12 +1482,84 @@ export class TaprootRepository {
         redirectTo: stored.redirectTo,
       },
     );
+    const authorization = await this.#db
+      .prepare(
+        `SELECT s.installation_id, s.authorization_revision, s.search_generation,
+                s.last_advance_id
+         FROM taproot_installation_authorization s
+         JOIN taproot_entity_authorization p
+           ON p.installation_id = s.installation_id
+         WHERE s.singleton = 1 AND p.entity_id = ?
+           AND p.source_revision = ?`,
+      )
+      .bind(id, stored.entity.lastrevid)
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        search_generation: number;
+        last_advance_id: string;
+      }>();
+    const authorizationState = authorization.results[0];
+    if (!authorizationState)
+      throw new RevisionConflictError(
+        'Projection repair requires current canonical authorization policy',
+      );
+    const nextSearchGeneration =
+      Number(authorizationState.search_generation) + 1;
     const statements: SqlitePreparedStatementLike[] = [
       this.#db
         .prepare(`DELETE FROM taproot_terms WHERE entity_id = ?`)
         .bind(id),
       this.#termsInsert(stored.entity),
       this.#auditInsert(stored.entity, metadata, context),
+      this.#db
+        .prepare(
+          `UPDATE taproot_installation_authorization
+           SET search_generation = ?, last_advance_id = ?, updated_at = ?
+           WHERE singleton = 1 AND installation_id = ?
+             AND authorization_revision = ? AND search_generation = ?
+             AND last_advance_id = ?`,
+        )
+        .bind(
+          nextSearchGeneration,
+          context.eventId,
+          context.createdAt,
+          authorizationState.installation_id,
+          authorizationState.authorization_revision,
+          authorizationState.search_generation,
+          authorizationState.last_advance_id,
+        ),
+      this.#assertion(
+        `EXISTS (
+           SELECT 1 FROM taproot_installation_authorization s
+           JOIN taproot_entity_authorization p
+             ON p.installation_id = s.installation_id
+            WHERE s.singleton = 1 AND p.entity_id = ?
+              AND p.source_revision = ? AND s.authorization_revision = ?
+              AND s.search_generation = ?
+              AND s.last_advance_id = ?
+          )`,
+        id,
+        stored.entity.lastrevid,
+        authorizationState.authorization_revision,
+        nextSearchGeneration,
+        context.eventId,
+      ),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_authorization_projection_outbox(
+             event_id, entity_id, source_revision, authorization_revision,
+             search_generation, operation, created_at
+           ) VALUES (?, ?, ?, ?, ?, 'repair', ?)`,
+        )
+        .bind(
+          context.eventId,
+          id,
+          stored.entity.lastrevid,
+          authorizationState.authorization_revision,
+          nextSearchGeneration,
+          context.createdAt,
+        ),
       ...patch.statements,
       ...this.#ownershipPatch(id, actual, expected).statements,
     ];
@@ -1296,6 +1578,11 @@ export class TaprootRepository {
       if (isEventIdUniqueError(cause))
         throw new RevisionConflictError(
           'Generated audit event id already exists',
+          { cause },
+        );
+      if (isAssertionError(cause))
+        throw new RevisionConflictError(
+          'Canonical policy changed during projection repair',
           { cause },
         );
       throw cause;
@@ -1329,6 +1616,12 @@ export class TaprootRepository {
   ): Promise<WriteResult> {
     const started = performance.now();
     validateEntity(entity);
+    if (metadata.authorization || metadata.authorizationContext)
+      await this.#preauthorizeCanonicalWrite(
+        entity.id,
+        metadata.authorization,
+        metadata.authorizationContext,
+      );
     if (await this.#loadRow(entity.id))
       throw new EntityAlreadyExistsError(`Entity ${entity.id} already exists`);
     await this.#validatePropertyDatatypes(entity);
@@ -1343,6 +1636,14 @@ export class TaprootRepository {
       eventType,
       lifecycle,
     );
+    const authorization = metadata.authorization
+      ? await this.#prepareAuthorizationWrite(
+          entity,
+          metadata.authorization,
+          metadata.authorizationContext,
+          undefined,
+        )
+      : undefined;
     const newQuads = this.#lifecycleQuads(entity, lifecycle);
     const marker = revisionQuad(entity, this.#options);
     const patch = this.#preparePatch({ forbid: [marker], insert: newQuads });
@@ -1386,9 +1687,19 @@ export class TaprootRepository {
           entity.modified,
         ),
       this.#revisionInsert(entity, json, metadata, context),
-      this.#auditInsert(entity, metadata, context),
+      this.#auditInsert(entity, metadata, context, authorization),
       this.#termsInsert(entity),
     );
+    if (authorization)
+      statements.push(
+        ...this.#authorizationWriteStatements(
+          entity,
+          lifecycle,
+          context,
+          authorization,
+          undefined,
+        ),
+      );
     const patchOffset = statements.length;
     statements.push(...patch.statements);
     const ownership = this.#ownershipPatch(entity.id, [], newQuads);
@@ -1407,6 +1718,12 @@ export class TaprootRepository {
         },
         eventId: context.eventId,
         contentHash: context.contentHash,
+        ...(authorization
+          ? {
+              authorizationRevision: authorization.authorizationRevision,
+              searchGeneration: authorization.searchGeneration,
+            }
+          : {}),
       };
       this.#emitObservation(
         eventType,
@@ -1446,9 +1763,11 @@ export class TaprootRepository {
           'Generated audit event id already exists',
           { cause: mapped },
         );
-      if (allocated && isAssertionError(mapped))
+      if (isAssertionError(mapped))
         throw new RevisionConflictError(
-          `ID allocation for ${entity.id} was stale`,
+          allocated
+            ? `ID allocation for ${entity.id} was stale`
+            : `Authorization state changed while creating ${entity.id}`,
           { cause: mapped },
         );
       throw mapped;
@@ -1463,6 +1782,13 @@ export class TaprootRepository {
     eventType: AuditEventType = 'update',
   ): Promise<WriteResult> {
     const started = performance.now();
+    if (edit.authorization || edit.authorizationContext)
+      await this.#preauthorizeCanonicalWrite(
+        id,
+        edit.authorization,
+        edit.authorizationContext,
+        edit.expectedRevision,
+      );
     const row = await this.#loadRow(id);
     if (!row) throw new EntityNotFoundError(`Entity ${id} was not found`);
     const stored = storedFromRow(row);
@@ -1505,6 +1831,14 @@ export class TaprootRepository {
       eventType,
       newLifecycle,
     );
+    const authorization = edit.authorization
+      ? await this.#prepareAuthorizationWrite(
+          next,
+          edit.authorization,
+          edit.authorizationContext,
+          previous,
+        )
+      : undefined;
     const oldQuads = this.#lifecycleQuads(stored.entity, oldLifecycle);
     const newQuads = this.#lifecycleQuads(next, newLifecycle);
     const patch = this.#preparePatch({
@@ -1533,12 +1867,22 @@ export class TaprootRepository {
         next.lastrevid,
       ),
       this.#revisionInsert(next, json, edit, context),
-      this.#auditInsert(next, edit, context),
+      this.#auditInsert(next, edit, context, authorization),
       this.#db
         .prepare('DELETE FROM taproot_terms WHERE entity_id = ?')
         .bind(id),
       this.#termsInsert(next),
     ];
+    if (authorization)
+      statements.push(
+        ...this.#authorizationWriteStatements(
+          next,
+          newLifecycle,
+          context,
+          authorization,
+          previous,
+        ),
+      );
     const patchOffset = statements.length;
     statements.push(...patch.statements);
     const ownership = this.#ownershipPatch(id, oldQuads, newQuads);
@@ -1557,6 +1901,12 @@ export class TaprootRepository {
         },
         eventId: context.eventId,
         contentHash: context.contentHash,
+        ...(authorization
+          ? {
+              authorizationRevision: authorization.authorizationRevision,
+              searchGeneration: authorization.searchGeneration,
+            }
+          : {}),
       };
       this.#emitObservation(eventType, started, 'success', id, next.lastrevid);
       return result;
@@ -1593,6 +1943,568 @@ export class TaprootRepository {
         );
       throw mapped;
     }
+  }
+
+  async #prepareAuthorizationWrite(
+    entity: WikibaseEntity,
+    rawPolicy: CanonicalAuthorizationPolicyInput,
+    rawContext: AuthorizationContext | undefined,
+    previousRevision: number | undefined,
+  ): Promise<PreparedAuthorizationWrite> {
+    const policy = normalizeCanonicalAuthorizationPolicy(rawPolicy);
+    if (!rawContext)
+      throw new InvalidEntityError(
+        'Guarded canonical writes require AuthorizationContext',
+      );
+    const caller = normalizeAuthorizationContext(rawContext);
+    if (!caller.capabilities.includes(KNOWLEDGE_WRITE_CAPABILITY))
+      throw new InvalidEntityError(
+        `Canonical writes require ${KNOWLEDGE_WRITE_CAPABILITY}`,
+      );
+    const expectedStatementIds = statementIds(entity);
+    const providedStatementIds = Object.keys(policy.statementRestrictions).sort(
+      compareCodeUnits,
+    );
+    if (
+      JSON.stringify(expectedStatementIds) !==
+      JSON.stringify(providedStatementIds)
+    )
+      throw new InvalidEntityError(
+        'statementRestrictions must explicitly and exactly cover the post-mutation statements',
+      );
+
+    const state = await this.#db
+      .prepare(
+        `SELECT installation_id, authorization_revision, search_generation,
+              last_advance_id
+         FROM taproot_installation_authorization WHERE singleton = 1`,
+      )
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        search_generation: number;
+        last_advance_id: string;
+      }>();
+    const installation = state.results[0];
+    if (
+      !installation ||
+      installation.installation_id !== policy.installationId ||
+      Number(installation.authorization_revision) !==
+        policy.expectedAuthorizationRevision ||
+      caller.installationId !== policy.installationId ||
+      caller.authorizationRevision !== policy.expectedAuthorizationRevision
+    )
+      throw new RevisionConflictError(
+        'Installation authorization revision is stale or mismatched',
+      );
+
+    if (
+      policy.workspaceId !== null &&
+      !caller.workspaceIds.includes(policy.workspaceId)
+    )
+      throw new InvalidEntityError(
+        'Canonical policy workspace must belong to the caller context',
+      );
+    if (!isVisibleTo(policy.visibility, caller))
+      throw new InvalidEntityError(
+        'Canonical policy must remain visible to its creating or updating caller',
+      );
+    if (
+      previousRevision === undefined &&
+      policy.ownerPrincipalId !== caller.principalId &&
+      !caller.capabilities.includes(KNOWLEDGE_POLICY_CAPABILITY)
+    )
+      throw new InvalidEntityError(
+        `Creating policy for another owner requires ${KNOWLEDGE_POLICY_CAPABILITY}`,
+      );
+
+    const statementRows = expectedStatementIds.map((statementId) => {
+      const restrictions = policy.statementRestrictions[statementId]!;
+      return {
+        statementId,
+        restrictionsJson: JSON.stringify(restrictions),
+        effectiveVisibilityJson: serializeVisibilityScope(
+          intersectVisibilityScopes(policy.visibility, ...restrictions),
+        ),
+      };
+    });
+    const effectiveVisibilityJson = serializeVisibilityScope(
+      intersectVisibilityScopes(
+        policy.visibility,
+        ...statementRows.map(
+          ({ effectiveVisibilityJson: serialized }) =>
+            JSON.parse(serialized) as VisibilityScopeV1,
+        ),
+      ),
+    );
+
+    let action: PreparedAuthorizationWrite['action'] = 'create';
+    if (previousRevision !== undefined) {
+      const current = await this.#db
+        .prepare(
+          `SELECT installation_id, source_revision, visibility_json,
+                  effective_visibility_json, workspace_id, owner_principal_id
+           FROM taproot_entity_authorization WHERE entity_id = ?`,
+        )
+        .bind(entity.id)
+        .all<{
+          installation_id: string;
+          source_revision: number;
+          visibility_json: string;
+          effective_visibility_json: string;
+          workspace_id: string | null;
+          owner_principal_id: string;
+        }>();
+      const previousPolicy = current.results[0];
+      if (
+        !previousPolicy ||
+        previousPolicy.installation_id !== policy.installationId ||
+        Number(previousPolicy.source_revision) !== previousRevision
+      )
+        throw new RevisionConflictError(
+          'Canonical entity policy is missing, quarantined, or stale',
+        );
+      assertScopeDoesNotWiden(
+        policy.visibility,
+        JSON.parse(previousPolicy.visibility_json) as VisibilityScopeV1,
+        'entity visibility',
+      );
+      if (
+        !isVisibleTo(
+          JSON.parse(
+            previousPolicy.effective_visibility_json,
+          ) as VisibilityScopeV1,
+          caller,
+        )
+      )
+        throw new InvalidEntityError(
+          'Caller is not authorized for the current canonical policy',
+        );
+      const previousStatements = await this.#db
+        .prepare(
+          `SELECT statement_id, restrictions_json, effective_visibility_json
+           FROM taproot_statement_authorization
+           WHERE entity_id = ? AND source_revision = ?`,
+        )
+        .bind(entity.id, previousRevision)
+        .all<{
+          statement_id: string;
+          restrictions_json: string;
+          effective_visibility_json: string;
+        }>();
+      const nextById = new Map(
+        statementRows.map((row) => [row.statementId, row]),
+      );
+      const previousRestrictions: Record<string, VisibilityScopeV1[]> =
+        Object.fromEntries(
+          previousStatements.results
+            .map((row): [string, VisibilityScopeV1[]] => {
+              const parsed = JSON.parse(row.restrictions_json) as unknown;
+              if (!Array.isArray(parsed))
+                throw new InvalidEntityError(
+                  `Stored statement ${row.statement_id} restrictions are invalid`,
+                );
+              return [
+                row.statement_id,
+                parsed.map((scope) =>
+                  normalizeVisibilityScope(scope as VisibilityScopeV1),
+                ),
+              ];
+            })
+            .sort(([left], [right]) =>
+              compareCodeUnits(String(left), String(right)),
+            ),
+        );
+      for (const previous of previousStatements.results) {
+        const next = nextById.get(previous.statement_id);
+        if (!next) continue;
+        assertScopeDoesNotWiden(
+          JSON.parse(next.effectiveVisibilityJson) as VisibilityScopeV1,
+          JSON.parse(previous.effective_visibility_json) as VisibilityScopeV1,
+          `statement ${previous.statement_id} visibility`,
+        );
+      }
+      const changed =
+        previousPolicy.workspace_id !== policy.workspaceId ||
+        previousPolicy.owner_principal_id !== policy.ownerPrincipalId ||
+        previousPolicy.visibility_json !==
+          serializeVisibilityScope(policy.visibility) ||
+        JSON.stringify(previousRestrictions) !==
+          JSON.stringify(policy.statementRestrictions);
+      action = changed ? 'policy-change' : 'unchanged';
+      if (changed && !caller.capabilities.includes(KNOWLEDGE_POLICY_CAPABILITY))
+        throw new InvalidEntityError(
+          `Canonical policy changes require ${KNOWLEDGE_POLICY_CAPABILITY}`,
+        );
+    }
+
+    const authorizationRevision = policy.expectedAuthorizationRevision + 1;
+    const searchGeneration = Number(installation.search_generation) + 1;
+    if (
+      !Number.isSafeInteger(authorizationRevision) ||
+      !Number.isSafeInteger(searchGeneration)
+    )
+      throw new RevisionConflictError(
+        'Installation authorization counters are exhausted',
+      );
+    return {
+      policy,
+      previousAdvanceId: installation.last_advance_id,
+      authorizationRevision,
+      searchGeneration,
+      effectiveVisibilityJson,
+      action,
+      statementRows,
+    };
+  }
+
+  async #preauthorizeCanonicalWrite(
+    entityId: EntityId,
+    rawPolicy: CanonicalAuthorizationPolicyInput | undefined,
+    rawContext: AuthorizationContext | undefined,
+    expectedRevision?: number,
+  ): Promise<number | null> {
+    if (!rawPolicy || !rawContext)
+      throw new AuthorizationDeniedError('Authorization denied');
+    let policy: CanonicalAuthorizationPolicyInput;
+    let caller: AuthorizationContext;
+    try {
+      policy = normalizeCanonicalAuthorizationPolicy(rawPolicy);
+      caller = normalizeAuthorizationContext(rawContext);
+    } catch {
+      throw new AuthorizationDeniedError('Authorization denied');
+    }
+    if (!caller.capabilities.includes(KNOWLEDGE_WRITE_CAPABILITY))
+      throw new AuthorizationDeniedError('Authorization denied');
+    const result = await this.#db
+      .prepare(
+        `SELECT s.installation_id, s.authorization_revision,
+                e.entity_id, e.revision,
+                p.installation_id AS policy_installation_id,
+                p.source_revision AS policy_source_revision,
+                p.effective_visibility_json
+         FROM taproot_installation_authorization s
+         LEFT JOIN taproot_entities e ON e.entity_id = ?
+         LEFT JOIN taproot_entity_authorization p
+           ON p.entity_id = e.entity_id AND p.source_revision = e.revision
+         WHERE s.singleton = 1`,
+      )
+      .bind(entityId)
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        entity_id: string | null;
+        revision: number | null;
+        policy_installation_id: string | null;
+        policy_source_revision: number | null;
+        effective_visibility_json: string | null;
+      }>();
+    const row = result.results[0];
+    if (
+      !row ||
+      row.installation_id !== policy.installationId ||
+      row.installation_id !== caller.installationId ||
+      Number(row.authorization_revision) !==
+        policy.expectedAuthorizationRevision ||
+      Number(row.authorization_revision) !== caller.authorizationRevision
+    )
+      throw new AuthorizationDeniedError('Authorization denied');
+    if (row.entity_id === null) {
+      if (expectedRevision !== undefined)
+        throw new AuthorizationDeniedError('Authorization denied');
+      if (
+        (policy.workspaceId !== null &&
+          !caller.workspaceIds.includes(policy.workspaceId)) ||
+        !isVisibleTo(policy.visibility, caller) ||
+        (policy.ownerPrincipalId !== caller.principalId &&
+          !caller.capabilities.includes(KNOWLEDGE_POLICY_CAPABILITY))
+      )
+        throw new AuthorizationDeniedError('Authorization denied');
+      return null;
+    }
+    if (
+      row.policy_installation_id !== row.installation_id ||
+      row.policy_source_revision === null ||
+      row.effective_visibility_json === null ||
+      !isVisibleTo(
+        JSON.parse(row.effective_visibility_json) as VisibilityScopeV1,
+        caller,
+      )
+    )
+      throw new AuthorizationDeniedError('Authorization denied');
+    if (
+      expectedRevision !== undefined &&
+      Number(row.policy_source_revision) !== expectedRevision
+    )
+      throw new RevisionConflictError('Canonical revision is stale');
+    return Number(row.policy_source_revision);
+  }
+
+  async #authorizedLifecycle(
+    entityId: EntityId,
+    rawContext: AuthorizationContext,
+  ): Promise<{
+    type: WikibaseEntity['type'];
+    deletedAt: string | null;
+    redirectTo: EntityId | null;
+  }> {
+    const caller = normalizeAuthorizationContext(rawContext);
+    if (!caller.capabilities.includes(KNOWLEDGE_WRITE_CAPABILITY))
+      throw new AuthorizationDeniedError('Authorization denied');
+    const result = await this.#db
+      .prepare(
+        `SELECT e.entity_type, e.deleted_at, e.redirect_to,
+                p.effective_visibility_json
+         FROM taproot_installation_authorization s
+         JOIN taproot_entities e ON e.entity_id = ?
+         JOIN taproot_entity_authorization p
+           ON p.entity_id = e.entity_id AND p.source_revision = e.revision
+         WHERE s.singleton = 1
+           AND s.installation_id = ? AND s.authorization_revision = ?
+           AND p.installation_id = s.installation_id`,
+      )
+      .bind(entityId, caller.installationId, caller.authorizationRevision)
+      .all<{
+        entity_type: WikibaseEntity['type'];
+        deleted_at: string | null;
+        redirect_to: EntityId | null;
+        effective_visibility_json: string;
+      }>();
+    const row = result.results[0];
+    if (
+      !row ||
+      !isVisibleTo(
+        JSON.parse(row.effective_visibility_json) as VisibilityScopeV1,
+        caller,
+      )
+    )
+      throw new AuthorizationDeniedError('Authorization denied');
+    return {
+      type: row.entity_type,
+      deletedAt: row.deleted_at,
+      redirectTo: row.redirect_to,
+    };
+  }
+
+  async #validateRedirectTarget(
+    sourceId: EntityId,
+    targetId: EntityId,
+    sourceType: WikibaseEntity['type'],
+    authorizationContext: AuthorizationContext | undefined,
+  ): Promise<void> {
+    const seen = new Set<EntityId>([sourceId]);
+    let cursor: EntityId | null = targetId;
+    for (let depth = 0; cursor && depth < 100; depth += 1) {
+      if (seen.has(cursor))
+        throw new InvalidEntityError('Redirect would create a cycle');
+      seen.add(cursor);
+      const target: {
+        type: WikibaseEntity['type'];
+        deletedAt: string | null;
+        redirectTo: EntityId | null;
+      } = authorizationContext
+        ? await this.#authorizedLifecycle(cursor, authorizationContext)
+        : await this.getEntity(cursor).then(
+            ({ entity, deletedAt, redirectTo }) => ({
+              type: entity.type,
+              deletedAt,
+              redirectTo,
+            }),
+          );
+      if (target.type !== sourceType)
+        throw new InvalidEntityError(
+          'Redirect source and target must have the same entity type',
+        );
+      if (target.deletedAt)
+        throw new InvalidEntityError(
+          'An entity cannot redirect to a deleted target',
+        );
+      cursor = target.redirectTo;
+    }
+    if (cursor)
+      throw new InvalidEntityError('Redirect chain exceeds 100 entities');
+  }
+
+  #authorizationWriteStatements(
+    entity: WikibaseEntity,
+    lifecycle: Lifecycle,
+    context: WriteContext,
+    prepared: PreparedAuthorizationWrite,
+    previousRevision: number | undefined,
+  ): SqlitePreparedStatementLike[] {
+    const {
+      policy,
+      authorizationRevision,
+      searchGeneration,
+      effectiveVisibilityJson,
+      statementRows,
+      previousAdvanceId,
+    } = prepared;
+    const visibilityJson = serializeVisibilityScope(policy.visibility);
+    const rowsJson = JSON.stringify(statementRows);
+    const statements: SqlitePreparedStatementLike[] = [
+      this.#db
+        .prepare(
+          `UPDATE taproot_installation_authorization
+           SET authorization_revision = ?, search_generation = ?, updated_at = ?
+               , last_advance_id = ?
+           WHERE singleton = 1 AND installation_id = ?
+             AND authorization_revision = ? AND search_generation = ?
+             AND last_advance_id = ?`,
+        )
+        .bind(
+          authorizationRevision,
+          searchGeneration,
+          context.createdAt,
+          context.eventId,
+          policy.installationId,
+          policy.expectedAuthorizationRevision,
+          searchGeneration - 1,
+          previousAdvanceId,
+        ),
+      this.#assertion(
+        `EXISTS (
+           SELECT 1 FROM taproot_installation_authorization
+           WHERE singleton = 1 AND installation_id = ?
+             AND authorization_revision = ? AND search_generation = ?
+             AND last_advance_id = ?
+         )`,
+        policy.installationId,
+        authorizationRevision,
+        searchGeneration,
+        context.eventId,
+      ),
+    ];
+    if (previousRevision === undefined) {
+      statements.push(
+        this.#db
+          .prepare(
+            `INSERT INTO taproot_entity_authorization(
+               entity_id, installation_id, workspace_id, owner_principal_id,
+               visibility_json, effective_visibility_json, source_revision, authorization_revision,
+               deleted_at, event_id, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            entity.id,
+            policy.installationId,
+            policy.workspaceId,
+            policy.ownerPrincipalId,
+            visibilityJson,
+            effectiveVisibilityJson,
+            entity.lastrevid,
+            authorizationRevision,
+            lifecycle.deletedAt,
+            context.eventId,
+            context.createdAt,
+          ),
+      );
+    } else {
+      statements.push(
+        this.#db
+          .prepare(
+            `UPDATE taproot_entity_authorization
+             SET workspace_id = ?, owner_principal_id = ?, visibility_json = ?,
+                 effective_visibility_json = ?, source_revision = ?, authorization_revision = ?, deleted_at = ?,
+                 event_id = ?, updated_at = ?
+             WHERE entity_id = ? AND installation_id = ? AND source_revision = ?`,
+          )
+          .bind(
+            policy.workspaceId,
+            policy.ownerPrincipalId,
+            visibilityJson,
+            effectiveVisibilityJson,
+            entity.lastrevid,
+            authorizationRevision,
+            lifecycle.deletedAt,
+            context.eventId,
+            context.createdAt,
+            entity.id,
+            policy.installationId,
+            previousRevision,
+          ),
+        this.#assertion(
+          `EXISTS (
+             SELECT 1 FROM taproot_entity_authorization
+             WHERE entity_id = ? AND installation_id = ?
+               AND source_revision = ? AND authorization_revision = ?
+           )`,
+          entity.id,
+          policy.installationId,
+          entity.lastrevid,
+          authorizationRevision,
+        ),
+      );
+    }
+    statements.push(
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_entity_authorization_revisions(
+             entity_id, source_revision, installation_id, workspace_id,
+             owner_principal_id, visibility_json, effective_visibility_json, authorization_revision,
+             deleted_at, event_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          entity.id,
+          entity.lastrevid,
+          policy.installationId,
+          policy.workspaceId,
+          policy.ownerPrincipalId,
+          visibilityJson,
+          effectiveVisibilityJson,
+          authorizationRevision,
+          lifecycle.deletedAt,
+          context.eventId,
+          context.createdAt,
+        ),
+      this.#db
+        .prepare(
+          `DELETE FROM taproot_statement_authorization WHERE entity_id = ?`,
+        )
+        .bind(entity.id),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_statement_authorization(
+             entity_id, statement_id, source_revision, restrictions_json,
+             effective_visibility_json, authorization_revision
+           )
+           SELECT ?, json_extract(value, '$.statementId'), ?,
+             json_extract(value, '$.restrictionsJson'),
+             json_extract(value, '$.effectiveVisibilityJson'), ?
+           FROM json_each(?)`,
+        )
+        .bind(entity.id, entity.lastrevid, authorizationRevision, rowsJson),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_statement_authorization_revisions(
+             entity_id, source_revision, statement_id, restrictions_json,
+             effective_visibility_json, authorization_revision
+           )
+           SELECT ?, ?, json_extract(value, '$.statementId'),
+             json_extract(value, '$.restrictionsJson'),
+             json_extract(value, '$.effectiveVisibilityJson'), ?
+           FROM json_each(?)`,
+        )
+        .bind(entity.id, entity.lastrevid, authorizationRevision, rowsJson),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_authorization_projection_outbox(
+             event_id, entity_id, source_revision, authorization_revision,
+             search_generation, operation, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          context.eventId,
+          entity.id,
+          entity.lastrevid,
+          authorizationRevision,
+          searchGeneration,
+          lifecycle.deletedAt ? 'delete' : 'upsert',
+          context.createdAt,
+        ),
+    );
+    return statements;
   }
 
   #preparePatch(patch: Parameters<typeof prepareQuadPatch>[1]) {
@@ -1798,6 +2710,7 @@ export class TaprootRepository {
     entity: WikibaseEntity,
     metadata: EditMetadata,
     context: WriteContext,
+    authorization?: PreparedAuthorizationWrite,
   ): SqlitePreparedStatementLike {
     return this.#db
       .prepare(
@@ -1817,7 +2730,18 @@ export class TaprootRepository {
         metadata.requestId ?? null,
         context.contentHash,
         context.parentHash,
-        JSON.stringify(context.lifecycle),
+        JSON.stringify({
+          ...context.lifecycle,
+          ...(authorization
+            ? {
+                authorization: {
+                  action: authorization.action,
+                  authorizationRevision: authorization.authorizationRevision,
+                  searchGeneration: authorization.searchGeneration,
+                },
+              }
+            : {}),
+        }),
         context.createdAt,
       );
   }
@@ -2312,14 +3236,18 @@ function isUniqueEntityError(cause: Error): boolean {
 }
 
 function isRevisionUniqueError(cause: Error): boolean {
-  return /UNIQUE constraint failed: taproot_entity_revisions\.entity_id, taproot_entity_revisions\.revision/iu.test(
-    cause.message,
+  return (
+    /UNIQUE constraint failed: taproot_entity_revisions\.entity_id, taproot_entity_revisions\.revision/iu.test(
+      cause.message,
+    ) || /taproot revisions cannot be replaced/iu.test(cause.message)
   );
 }
 
 function isEventIdUniqueError(cause: Error): boolean {
-  return /UNIQUE constraint failed: taproot_audit_events\.event_id/iu.test(
-    cause.message,
+  return (
+    /UNIQUE constraint failed: taproot_audit_events\.event_id/iu.test(
+      cause.message,
+    ) || /taproot audit events cannot be replaced/iu.test(cause.message)
   );
 }
 
@@ -2460,6 +3388,28 @@ function sameQuads(left: RDF.Quad[], right: RDF.Quad[]): boolean {
   const a = [...new Set(left.map(quadKeyValue))].sort();
   const b = [...new Set(right.map(quadKeyValue))].sort();
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function statementIds(entity: WikibaseEntity): string[] {
+  return Object.values(entity.claims)
+    .flatMap((statements) => statements.map(({ id }) => id))
+    .sort(compareCodeUnits);
+}
+
+function assertScopeDoesNotWiden(
+  next: VisibilityScopeV1,
+  previous: VisibilityScopeV1,
+  field: string,
+): void {
+  const intersection = serializeVisibilityScope(
+    intersectVisibilityScopes(next, previous),
+  );
+  if (intersection !== serializeVisibilityScope(next))
+    throw new InvalidEntityError(`${field} cannot widen canonical policy`);
+}
+
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function toError(error: unknown): Error {

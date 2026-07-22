@@ -9,11 +9,13 @@ import { buildEntityQuads } from './rdf.js';
 import type { EntityId, WikibaseEntity } from './types.js';
 import { SchemaMismatchError } from './errors.js';
 
-export const TAPROOT_SCHEMA_VERSION = '2';
+export const TAPROOT_SCHEMA_VERSION = '3';
 export const TAPROOT_JSON_VERSION = '2';
 export const TAPROOT_RDF_VERSION = '2';
 
-export const taprootSchemaStatements = [
+const PRE_AUTHORIZATION_SCHEMA_VERSION = '2';
+
+const preAuthorizationTaprootSchemaStatements = [
   `CREATE TABLE IF NOT EXISTS taproot_entities (
     entity_id TEXT PRIMARY KEY,
     entity_type TEXT NOT NULL CHECK (entity_type IN ('item', 'property')),
@@ -120,7 +122,7 @@ export const taprootSchemaStatements = [
     ON CONFLICT(entity_type) DO NOTHING`,
   `INSERT INTO taproot_metadata(metadata_key, metadata_value)
     VALUES
-      ('schema_version', '${TAPROOT_SCHEMA_VERSION}'),
+      ('schema_version', '${PRE_AUTHORIZATION_SCHEMA_VERSION}'),
       ('canonical_json_version', '${TAPROOT_JSON_VERSION}'),
       ('rdf_mapping_version', '${TAPROOT_RDF_VERSION}')
     ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
@@ -128,9 +130,218 @@ export const taprootSchemaStatements = [
     ON CONFLICT(version) DO NOTHING`,
 ] as const;
 
+/** Additive canonical authorization catalog introduced by migration 0004. */
+export const taprootAuthorizationSchemaStatements = [
+  `CREATE TABLE IF NOT EXISTS taproot_installation_authorization (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    installation_id TEXT NOT NULL UNIQUE,
+    authorization_revision INTEGER NOT NULL CHECK (authorization_revision >= 1),
+    search_generation INTEGER NOT NULL CHECK (search_generation >= 1),
+    last_advance_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_entity_authorization (
+    entity_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL,
+    workspace_id TEXT,
+    owner_principal_id TEXT NOT NULL,
+    visibility_json TEXT NOT NULL CHECK (json_valid(visibility_json)),
+    effective_visibility_json TEXT NOT NULL CHECK (json_valid(effective_visibility_json)),
+    source_revision INTEGER NOT NULL,
+    authorization_revision INTEGER NOT NULL,
+    deleted_at TEXT,
+    event_id TEXT NOT NULL UNIQUE,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (entity_id) REFERENCES taproot_entities(entity_id),
+    FOREIGN KEY (event_id) REFERENCES taproot_audit_events(event_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_entity_authorization_revisions (
+    entity_id TEXT NOT NULL,
+    source_revision INTEGER NOT NULL,
+    installation_id TEXT NOT NULL,
+    workspace_id TEXT,
+    owner_principal_id TEXT NOT NULL,
+    visibility_json TEXT NOT NULL CHECK (json_valid(visibility_json)),
+    effective_visibility_json TEXT NOT NULL CHECK (json_valid(effective_visibility_json)),
+    authorization_revision INTEGER NOT NULL,
+    deleted_at TEXT,
+    event_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (entity_id, source_revision),
+    FOREIGN KEY (entity_id, source_revision)
+      REFERENCES taproot_entity_revisions(entity_id, revision),
+    FOREIGN KEY (event_id) REFERENCES taproot_audit_events(event_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_statement_authorization (
+    entity_id TEXT NOT NULL,
+    statement_id TEXT NOT NULL,
+    source_revision INTEGER NOT NULL,
+    restrictions_json TEXT NOT NULL CHECK (json_valid(restrictions_json)),
+    effective_visibility_json TEXT NOT NULL CHECK (json_valid(effective_visibility_json)),
+    authorization_revision INTEGER NOT NULL,
+    PRIMARY KEY (entity_id, statement_id),
+    FOREIGN KEY (entity_id) REFERENCES taproot_entities(entity_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_statement_authorization_revisions (
+    entity_id TEXT NOT NULL,
+    source_revision INTEGER NOT NULL,
+    statement_id TEXT NOT NULL,
+    restrictions_json TEXT NOT NULL CHECK (json_valid(restrictions_json)),
+    effective_visibility_json TEXT NOT NULL CHECK (json_valid(effective_visibility_json)),
+    authorization_revision INTEGER NOT NULL,
+    PRIMARY KEY (entity_id, source_revision, statement_id),
+    FOREIGN KEY (entity_id, source_revision)
+      REFERENCES taproot_entity_revisions(entity_id, revision)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_authorization_projection_outbox (
+    event_id TEXT PRIMARY KEY,
+    entity_id TEXT NOT NULL,
+    source_revision INTEGER NOT NULL,
+    authorization_revision INTEGER NOT NULL,
+    search_generation INTEGER NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete', 'repair', 'backfill')),
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'claimed', 'complete')),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (event_id) REFERENCES taproot_audit_events(event_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_authorization_backfill_plans (
+    plan_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL,
+    base_authorization_revision INTEGER NOT NULL,
+    manifest_json TEXT NOT NULL CHECK (json_valid(manifest_json)),
+    manifest_hash TEXT NOT NULL,
+    entity_count INTEGER NOT NULL CHECK (entity_count > 0 AND entity_count <= 100),
+    revision_count INTEGER NOT NULL CHECK (revision_count > 0),
+    status TEXT NOT NULL CHECK (status IN ('planned', 'applying', 'complete')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_authorization_admin_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    audit_id TEXT NOT NULL UNIQUE,
+    event_type TEXT NOT NULL CHECK (event_type IN ('backfill-plan', 'backfill-apply')),
+    principal_id TEXT NOT NULL,
+    plan_id TEXT NOT NULL,
+    authorization_revision INTEGER NOT NULL,
+    details_json TEXT NOT NULL CHECK (json_valid(details_json)),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (plan_id) REFERENCES taproot_authorization_backfill_plans(plan_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_installation_authorization_advances (
+    advance_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL,
+    from_revision INTEGER NOT NULL,
+    to_revision INTEGER NOT NULL,
+    search_generation INTEGER NOT NULL,
+    domain TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK (to_revision = from_revision + 1)
+  ) STRICT`,
+  `CREATE INDEX IF NOT EXISTS taproot_entity_authorization_candidate_idx
+    ON taproot_entity_authorization(installation_id, deleted_at, entity_id)`,
+  `CREATE INDEX IF NOT EXISTS taproot_entity_authorization_revision_idx
+    ON taproot_entity_authorization_revisions(entity_id, source_revision DESC)`,
+  `CREATE INDEX IF NOT EXISTS taproot_statement_authorization_candidate_idx
+    ON taproot_statement_authorization(entity_id, source_revision, statement_id)`,
+  `CREATE INDEX IF NOT EXISTS taproot_authorization_outbox_state_idx
+    ON taproot_authorization_projection_outbox(state, authorization_revision, event_id)`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_revisions_no_replace
+    BEFORE INSERT ON taproot_entity_revisions
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_entity_revisions
+      WHERE entity_id = NEW.entity_id AND revision = NEW.revision
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot revisions cannot be replaced'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_audit_no_replace
+    BEFORE INSERT ON taproot_audit_events
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_audit_events WHERE event_id = NEW.event_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot audit events cannot be replaced'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_installation_identity_no_update
+    BEFORE UPDATE OF installation_id ON taproot_installation_authorization
+    BEGIN SELECT RAISE(ABORT, 'taproot installation identity is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_no_delete
+    BEFORE DELETE ON taproot_installation_authorization
+    BEGIN SELECT RAISE(ABORT, 'taproot installation authorization is durable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_no_replace
+    BEFORE INSERT ON taproot_installation_authorization
+    WHEN EXISTS (SELECT 1 FROM taproot_installation_authorization WHERE singleton = NEW.singleton)
+    BEGIN SELECT RAISE(ABORT, 'taproot installation authorization cannot be replaced'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_entity_authorization_revisions_no_update
+    BEFORE UPDATE ON taproot_entity_authorization_revisions
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_entity_authorization_revisions_no_delete
+    BEFORE DELETE ON taproot_entity_authorization_revisions
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_entity_authorization_revisions_no_replace
+    BEFORE INSERT ON taproot_entity_authorization_revisions
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_entity_authorization_revisions
+      WHERE (entity_id = NEW.entity_id AND source_revision = NEW.source_revision)
+         OR event_id = NEW.event_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization revisions cannot be replaced'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_update
+    BEFORE UPDATE ON taproot_statement_authorization_revisions
+    BEGIN SELECT RAISE(ABORT, 'taproot statement authorization revisions are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_delete
+    BEFORE DELETE ON taproot_statement_authorization_revisions
+    BEGIN SELECT RAISE(ABORT, 'taproot statement authorization revisions are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_statement_authorization_revisions_no_replace
+    BEFORE INSERT ON taproot_statement_authorization_revisions
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_statement_authorization_revisions
+      WHERE entity_id = NEW.entity_id AND source_revision = NEW.source_revision
+        AND statement_id = NEW.statement_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot statement authorization revisions cannot be replaced'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_authorization_admin_audit_no_update
+    BEFORE UPDATE ON taproot_authorization_admin_audit
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization administration audit is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_authorization_admin_audit_no_delete
+    BEFORE DELETE ON taproot_authorization_admin_audit
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization administration audit is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_authorization_admin_audit_no_replace
+    BEFORE INSERT ON taproot_authorization_admin_audit
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_authorization_admin_audit
+      WHERE sequence = NEW.sequence OR audit_id = NEW.audit_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization administration audit cannot be replaced'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_advances_no_update
+    BEFORE UPDATE ON taproot_installation_authorization_advances
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization advances are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_advances_no_delete
+    BEFORE DELETE ON taproot_installation_authorization_advances
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization advances are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_installation_authorization_advances_no_replace
+    BEFORE INSERT ON taproot_installation_authorization_advances
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_installation_authorization_advances
+      WHERE advance_id = NEW.advance_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization advances cannot be replaced'); END`,
+  `INSERT INTO taproot_metadata(metadata_key, metadata_value)
+    VALUES ('schema_version', '${TAPROOT_SCHEMA_VERSION}')
+    ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
+  `INSERT INTO taproot_migrations(version, name)
+    VALUES (4, 'canonical-authorization-policy')
+    ON CONFLICT(version) DO NOTHING`,
+] as const;
+
+export const taprootSchemaStatements = [
+  ...preAuthorizationTaprootSchemaStatements,
+  ...taprootAuthorizationSchemaStatements,
+] as const;
+
 /** Exact package-created schema before authored statement text became required. */
 export const preStatementTextTaprootSchemaStatements =
-  taprootSchemaStatements.map((sql) =>
+  preAuthorizationTaprootSchemaStatements.map((sql) =>
     sql
       .replace(
         "('canonical_json_version', '2')",
@@ -140,7 +351,7 @@ export const preStatementTextTaprootSchemaStatements =
   );
 
 const schemaStatement = (prefix: string): string => {
-  const statement = taprootSchemaStatements.find((sql) =>
+  const statement = preAuthorizationTaprootSchemaStatements.find((sql) =>
     sql.trimStart().startsWith(prefix),
   );
   if (!statement)
@@ -185,19 +396,20 @@ const transitionalRevisionStatement = currentRevisionStatement
   .replace('event_id TEXT NOT NULL', 'event_id TEXT')
   .replace('content_hash TEXT NOT NULL', 'content_hash TEXT');
 
-export const taprootUpgradeCatalogStatements = taprootSchemaStatements
-  .filter(
-    (sql) =>
-      /^\s*CREATE\s+(?:TABLE|INDEX)\s+/iu.test(sql) &&
-      !/^\s*CREATE\s+TRIGGER\s+/iu.test(sql) &&
-      !sql.includes('taproot_audit'),
-  )
-  .map((sql) =>
-    sql === currentRevisionStatement ? transitionalRevisionStatement : sql,
-  );
+export const taprootUpgradeCatalogStatements =
+  preAuthorizationTaprootSchemaStatements
+    .filter(
+      (sql) =>
+        /^\s*CREATE\s+(?:TABLE|INDEX)\s+/iu.test(sql) &&
+        !/^\s*CREATE\s+TRIGGER\s+/iu.test(sql) &&
+        !sql.includes('taproot_audit'),
+    )
+    .map((sql) =>
+      sql === currentRevisionStatement ? transitionalRevisionStatement : sql,
+    );
 
 export const taprootPreFinalizeCatalogStatements =
-  taprootSchemaStatements.filter(
+  preAuthorizationTaprootSchemaStatements.filter(
     (sql) =>
       /^\s*CREATE\s+(?:TABLE|INDEX)\s+/iu.test(sql) &&
       !/^\s*CREATE\s+TRIGGER\s+/iu.test(sql),
@@ -235,12 +447,17 @@ export const legacyRevisionFinalizeStatements = [
   schemaStatement('CREATE INDEX IF NOT EXISTS taproot_audit_request_idx'),
 ] as const;
 
-export const taprootFinalizeStatements = taprootSchemaStatements.filter(
-  (sql) =>
-    /^\s*CREATE\s+TRIGGER\s+/iu.test(sql) ||
-    sql.includes(`('schema_version', '${TAPROOT_SCHEMA_VERSION}')`) ||
-    sql.includes('INSERT INTO taproot_migrations'),
-);
+export const taprootFinalizeStatements = [
+  ...preAuthorizationTaprootSchemaStatements.filter(
+    (sql) =>
+      /^\s*CREATE\s+TRIGGER\s+/iu.test(sql) ||
+      sql.includes(
+        `('schema_version', '${PRE_AUTHORIZATION_SCHEMA_VERSION}')`,
+      ) ||
+      sql.includes('INSERT INTO taproot_migrations'),
+  ),
+  ...taprootAuthorizationSchemaStatements,
+] as const;
 
 export interface TaprootSchemaInspection {
   valid: boolean;
@@ -518,9 +735,11 @@ export async function backfillTaprootAudit(
        SELECT event_id, entity_id, revision, 'import',
          attribution_json, edit_summary, tags_json, content_hash, parent_hash,
          json_object('source', 'legacy-v1'), created_at
-       FROM taproot_entity_revisions
-       WHERE true
-       ON CONFLICT(event_id) DO NOTHING`,
+       FROM taproot_entity_revisions revision
+       WHERE NOT EXISTS (
+         SELECT 1 FROM taproot_audit_events audit
+         WHERE audit.event_id = revision.event_id
+       )`,
     ),
   ]);
 }
@@ -734,15 +953,16 @@ export async function verifyTaprootPackageSeeds(
       `SELECT COUNT(*) AS count FROM taproot_migrations
        WHERE (version = 1 AND name = 'initial')
           OR (version = 2 AND name = 'audit-and-operations')
-          OR (version = 3 AND name = 'canonical-statement-text')`,
+          OR (version = 3 AND name = 'canonical-statement-text')
+          OR (version = 4 AND name = 'canonical-authorization-policy')`,
     )
     .all<{ count: number }>();
   const migrationSeedTotal = await db
     .prepare(`SELECT COUNT(*) AS count FROM taproot_migrations`)
     .all<{ count: number }>();
   if (
-    Number(migrationSeeds.results[0]?.count ?? 0) !== 3 ||
-    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 3
+    Number(migrationSeeds.results[0]?.count ?? 0) !== 4 ||
+    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 4
   )
     throw new SchemaMismatchError(
       'Taproot package migration seeds are incomplete',
@@ -772,6 +992,15 @@ export async function inspectTaprootSchema(
     'taproot_audit_events',
     'taproot_migrations',
     'taproot_rdf_ownership',
+    'taproot_installation_authorization',
+    'taproot_entity_authorization',
+    'taproot_entity_authorization_revisions',
+    'taproot_statement_authorization',
+    'taproot_statement_authorization_revisions',
+    'taproot_authorization_projection_outbox',
+    'taproot_authorization_backfill_plans',
+    'taproot_authorization_admin_audit',
+    'taproot_installation_authorization_advances',
   ];
   const tables = await db
     .prepare(
@@ -825,6 +1054,128 @@ export async function inspectTaprootSchema(
   const missingColumns = requiredRevisionColumns.filter(
     (name) => !presentColumns.has(name),
   );
+  const authorizationColumns: Readonly<Record<string, readonly string[]>> = {
+    taproot_installation_authorization: [
+      'singleton',
+      'installation_id',
+      'authorization_revision',
+      'search_generation',
+      'last_advance_id',
+      'created_at',
+      'updated_at',
+    ],
+    taproot_entity_authorization: [
+      'entity_id',
+      'installation_id',
+      'workspace_id',
+      'owner_principal_id',
+      'visibility_json',
+      'effective_visibility_json',
+      'source_revision',
+      'authorization_revision',
+      'deleted_at',
+      'event_id',
+      'updated_at',
+    ],
+    taproot_entity_authorization_revisions: [
+      'entity_id',
+      'source_revision',
+      'installation_id',
+      'workspace_id',
+      'owner_principal_id',
+      'visibility_json',
+      'effective_visibility_json',
+      'authorization_revision',
+      'deleted_at',
+      'event_id',
+      'created_at',
+    ],
+    taproot_statement_authorization: [
+      'entity_id',
+      'statement_id',
+      'source_revision',
+      'restrictions_json',
+      'effective_visibility_json',
+      'authorization_revision',
+    ],
+    taproot_statement_authorization_revisions: [
+      'entity_id',
+      'source_revision',
+      'statement_id',
+      'restrictions_json',
+      'effective_visibility_json',
+      'authorization_revision',
+    ],
+    taproot_authorization_projection_outbox: [
+      'event_id',
+      'entity_id',
+      'source_revision',
+      'authorization_revision',
+      'search_generation',
+      'operation',
+      'state',
+      'created_at',
+    ],
+    taproot_authorization_backfill_plans: [
+      'plan_id',
+      'installation_id',
+      'base_authorization_revision',
+      'manifest_json',
+      'manifest_hash',
+      'entity_count',
+      'revision_count',
+      'status',
+      'created_by',
+      'created_at',
+      'completed_at',
+    ],
+    taproot_authorization_admin_audit: [
+      'sequence',
+      'audit_id',
+      'event_type',
+      'principal_id',
+      'plan_id',
+      'authorization_revision',
+      'details_json',
+      'created_at',
+    ],
+    taproot_installation_authorization_advances: [
+      'advance_id',
+      'installation_id',
+      'from_revision',
+      'to_revision',
+      'search_generation',
+      'domain',
+      'principal_id',
+      'reason',
+      'created_at',
+    ],
+  };
+  for (const [table, expectedColumns] of Object.entries(authorizationColumns)) {
+    if (!names.has(table)) continue;
+    const columns = await db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all<{ name: string }>();
+    const actualColumns = columns.results.map(({ name }) => name);
+    if (JSON.stringify(actualColumns) !== JSON.stringify(expectedColumns)) {
+      errors.push(
+        `${table} columns are ${actualColumns.join(',')}, expected ${expectedColumns.join(',')}`,
+      );
+    }
+    const actualSql = tables.results.find(({ name }) => name === table)?.sql;
+    const expectedSql = taprootAuthorizationSchemaStatements.find((sql) =>
+      new RegExp(
+        `^\\s*CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${table}\\b`,
+        'iu',
+      ).test(sql),
+    );
+    if (
+      actualSql == null ||
+      expectedSql === undefined ||
+      normalizeCatalogSql(actualSql) !== normalizeCatalogSql(expectedSql)
+    )
+      errors.push(`${table} definition does not match the package catalog`);
+  }
   const requiredIndexes = [
     'taproot_entities_type_idx',
     'taproot_entities_modified_idx',
@@ -833,6 +1184,10 @@ export async function inspectTaprootSchema(
     'taproot_audit_entity_idx',
     'taproot_audit_request_idx',
     'taproot_rdf_ownership_quad_idx',
+    'taproot_entity_authorization_candidate_idx',
+    'taproot_entity_authorization_revision_idx',
+    'taproot_statement_authorization_candidate_idx',
+    'taproot_authorization_outbox_state_idx',
   ];
   const indexRows = await db
     .prepare(
@@ -848,16 +1203,51 @@ export async function inspectTaprootSchema(
     'taproot_revisions_no_delete',
     'taproot_audit_no_update',
     'taproot_audit_no_delete',
+    'taproot_revisions_no_replace',
+    'taproot_audit_no_replace',
+    'taproot_installation_identity_no_update',
+    'taproot_installation_authorization_no_delete',
+    'taproot_installation_authorization_no_replace',
+    'taproot_entity_authorization_revisions_no_update',
+    'taproot_entity_authorization_revisions_no_delete',
+    'taproot_entity_authorization_revisions_no_replace',
+    'taproot_statement_authorization_revisions_no_update',
+    'taproot_statement_authorization_revisions_no_delete',
+    'taproot_statement_authorization_revisions_no_replace',
+    'taproot_authorization_admin_audit_no_update',
+    'taproot_authorization_admin_audit_no_delete',
+    'taproot_authorization_admin_audit_no_replace',
+    'taproot_installation_authorization_advances_no_update',
+    'taproot_installation_authorization_advances_no_delete',
+    'taproot_installation_authorization_advances_no_replace',
   ];
   const triggerRows = await db
     .prepare(
-      `SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'taproot_%'`,
+      `SELECT name, sql FROM sqlite_schema
+       WHERE type = 'trigger' AND name LIKE 'taproot_%'`,
     )
-    .all<{ name: string }>();
+    .all<{ name: string; sql: string | null }>();
   const presentTriggers = new Set(triggerRows.results.map(({ name }) => name));
   const missingTriggers = requiredTriggers.filter(
     (name) => !presentTriggers.has(name),
   );
+  for (const trigger of requiredTriggers) {
+    const actualSql = triggerRows.results.find(
+      ({ name }) => name === trigger,
+    )?.sql;
+    if (actualSql == null) continue;
+    const expectedSql = taprootSchemaStatements.find((sql) =>
+      new RegExp(
+        `^\\s*CREATE\\s+TRIGGER\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${trigger}\\b`,
+        'iu',
+      ).test(sql),
+    );
+    if (
+      expectedSql === undefined ||
+      normalizeCatalogSql(actualSql) !== normalizeCatalogSql(expectedSql)
+    )
+      errors.push(`${trigger} definition does not match the package catalog`);
+  }
   errors.push(
     ...missingColumns.map(
       (name) => `taproot_entity_revisions.${name} is missing`,
@@ -891,6 +1281,13 @@ export async function isExactTaprootSchema(
   db: SqliteDatabaseLike,
 ): Promise<boolean> {
   return matchesExactCatalog(db, taprootSchemaStatements);
+}
+
+/** Exact package catalog immediately before canonical authorization migration 0004. */
+export async function isExactPreAuthorizationTaprootSchema(
+  db: SqliteDatabaseLike,
+): Promise<boolean> {
+  return matchesExactCatalog(db, preAuthorizationTaprootSchemaStatements);
 }
 
 export async function isExactTaprootUpgradeSchema(

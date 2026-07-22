@@ -52,6 +52,8 @@ import {
   createAuthorizationCursorCodec,
   createAuthorizedTaproot,
   createItem,
+  bootstrapTaprootAuthorization,
+  createInstallationAuthorizationGuard,
   createTaprootHostWriteCapability,
   initializeTaproot,
   setLabel,
@@ -66,21 +68,33 @@ const writeCapability = createTaprootHostWriteCapability(
   options,
   nonExtractableHmacSha256Key,
 );
+await bootstrapTaprootAuthorization(
+  env.DB,
+  options,
+  writeCapability,
+  'installation-1',
+);
+const guard = await createInstallationAuthorizationGuard(
+  env.DB,
+  options,
+  writeCapability,
+);
 
-const item = await createItem(env.DB, options, writeCapability, {
+const item = await createItem(env.DB, options, guard, writeContext, {
   labels: { en: { language: 'en', value: 'Ada Lovelace' } },
+  authorization: canonicalPolicy,
 });
 
-// The host derives context only from authenticated state and supplies current
-// canonical policy records. The cursor key is durable and host-held.
-const knowledge = createAuthorizedTaproot(env.DB, options, context, policies, {
+// The host derives context only from authenticated state. Taproot loads its
+// persisted canonical policy itself. The cursor key is durable and host-held.
+const knowledge = createAuthorizedTaproot(env.DB, options, readContext, {
   cursorCodec: createAuthorizationCursorCodec(nonExtractableAesGcmKey),
 });
 const canonical = await knowledge.getEntity(item.entityId);
 ```
 
-Never accept either host key, the write capability, authorization context, or
-policy source from a request, MCP argument, prompt, or query.
+Never accept either host key, host capability, authorization guard, context, or
+policy from a request, MCP argument, prompt, or query.
 
 Use Taproot's `planTaprootMigrations`, `applyTaprootMigrations`, and
 `initializeTaproot` APIs for schema changes. The numbered SQL files document
@@ -101,7 +115,8 @@ batch back.
 const edited = await setLabel(
   env.DB,
   options,
-  writeCapability,
+  guard,
+  currentWriteContext,
   item.entityId,
   'fr',
   'Ada Lovelace',
@@ -115,18 +130,32 @@ const edited = await setLabel(
     editSummary: 'add French label',
     tags: ['agent'],
     requestId: 'mcp-request-123',
+    authorization: currentCanonicalPolicy,
   },
 );
 ```
 
 The public API exposes canonical reads only on `AuthorizedTaprootReader`.
 Entity/history/list/term-search/audit/export and integrity operations require a
-host-created authorization context and current policy source. Public mutation
-helpers require the DB/installation-bound host write capability and return only
-entity ID, previous/new revision, and committed status;
+host-created authorization context and Taproot's persisted policy source.
+Public mutation helpers require the DB/installation-bound opaque authorization
+guard, a current context with exact `knowledge:write`, and canonical policy
+input. Policy changes additionally require exact `knowledge:policy`. They
+return only entity ID, previous/new revision, authorization/search generation,
+and committed status;
 they do not return canonical JSON, text, RDF counts, hashes, or audit bodies.
 `TaprootRepository` and raw read helpers are intentionally absent from package
 exports in the breaking 0.3 line.
+
+The opaque guard also owns execution of ordered cross-package batches that
+need an exact authorization-revision fence or advance. It does not expose raw
+counter-update statements that a caller could separate from the corresponding
+audit, assertion, or domain writes.
+Hosts issue a distinct fence-only domain guard for each exact non-Knowledge
+domain capability, such as Task or Memory writes. The capability is bound at
+issuance, cannot be supplied at the call site, and an ordinary domain fence
+does not advance authorization or search counters. Knowledge authorization
+advances additionally require `knowledge:policy`.
 
 Statement creation and replacement include `text` on the `Statement` itself.
 Rank, qualifier, and reference mutation methods require authored text for the
@@ -158,8 +187,10 @@ that as `QuadPatchTooLargeError`. Store PDFs, images, audio, OCR, transcripts,
 and article bodies externally and represent them as knowledge Items.
 
 Bulk imports default to create-only, can opt into `upsert`, are capped at 100
-entities by default, and commit one entity atomically at a time. Multi-command
-edits apply up to 100 commands in one revision. All list limits are capped at 500.
+entities by default, and commit one entity atomically at a time. Authorized
+bulk policies use sequential expected authorization revisions; Taproot carries
+each successful advance into the next entity's context. Multi-command edits
+apply up to 100 commands in one revision. All list limits are capped at 500.
 
 See the [local D1 and Diamond interoperability example](examples/d1-diamond-interop/README.md),
 [`COMPATIBILITY.md`](COMPATIBILITY.md), and the architecture, API, operations,

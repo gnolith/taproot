@@ -21,6 +21,7 @@ import {
   backfillTaprootAudit,
   inspectTaprootSchema,
   isExactTaprootPreFinalizeSchema,
+  isExactPreAuthorizationTaprootSchema,
   isExactTaprootSchema,
   isExactTaprootUpgradeSchema,
   isRecognizedLegacyV1,
@@ -28,6 +29,7 @@ import {
   legacyTaprootStructureStatements,
   preStatementTextTaprootSchemaStatements,
   taprootFinalizeStatements,
+  taprootAuthorizationSchemaStatements,
   taprootSchemaStatements,
   verifyTaprootPackageSeeds,
   verifyPersistedStatementText,
@@ -76,6 +78,10 @@ export const taprootMigrations = [
        VALUES (3, 'canonical-statement-text')
        ON CONFLICT(version) DO NOTHING`,
     ],
+  },
+  {
+    id: '0004-canonical-authorization-policy',
+    statements: taprootAuthorizationSchemaStatements,
   },
 ] as const satisfies readonly NamespacedMigration[];
 
@@ -260,26 +266,35 @@ export async function applyTaprootMigrations(
     applied.length > 0 &&
     applied.length < expected.length
   ) {
-    if (!(await isExactTaprootSchema(db)))
+    if (!(await isExactPreAuthorizationTaprootSchema(db)))
       throw new TaprootMigrationStateError(
         'Pending Taproot migrations require the exact prior package catalog',
       );
     const pending = expected.slice(applied.length);
     if (
-      pending.length !== 1 ||
-      pending[0]?.migration.id !== '0003-canonical-statement-text'
+      pending.some(
+        ({ migration }) =>
+          migration.id !== '0003-canonical-statement-text' &&
+          migration.id !== '0004-canonical-authorization-policy',
+      )
     )
       throw new TaprootMigrationStateError(
         'Taproot migration ledger is partial and has no supported upgrade path',
       );
     const appliedAt = new Date().toISOString();
-    try {
-      await verifyPersistedStatementText(db);
-    } catch (cause) {
-      throw new TaprootMigrationStateError(
-        'Existing Taproot statements lack explicitly authored nonblank text; migration refused without rewriting or inventing historical text',
-        { cause },
-      );
+    if (
+      pending.some(
+        ({ migration }) => migration.id === '0003-canonical-statement-text',
+      )
+    ) {
+      try {
+        await verifyPersistedStatementText(db);
+      } catch (cause) {
+        throw new TaprootMigrationStateError(
+          'Existing Taproot statements lack explicitly authored nonblank text; migration refused without rewriting or inventing historical text',
+          { cause },
+        );
+      }
     }
     try {
       await db.batch([
@@ -551,7 +566,7 @@ async function finalizeRecovery(
     db.prepare(
       `INSERT INTO taproot_assertions(assertion_key)
        SELECT NULL WHERE
-         (SELECT COUNT(*) FROM taproot_migrations) != 3
+         (SELECT COUNT(*) FROM taproot_migrations) != 4
          OR NOT EXISTS (
            SELECT 1 FROM taproot_migrations
            WHERE version = 1 AND name = 'initial'
@@ -563,6 +578,10 @@ async function finalizeRecovery(
          OR NOT EXISTS (
            SELECT 1 FROM taproot_migrations
            WHERE version = 3 AND name = 'canonical-statement-text'
+         )
+         OR NOT EXISTS (
+           SELECT 1 FROM taproot_migrations
+           WHERE version = 4 AND name = 'canonical-authorization-policy'
          )`,
     ),
     db.prepare(

@@ -1,5 +1,9 @@
 # Operations
 
+Migration compatibility is defined from released Taproot catalogs only.
+Databases created by unmerged draft branches or intermediate pull-request
+heads are development artifacts and are not supported upgrade predecessors.
+
 ## Initialize and migrate
 
 Run `initializeTaproot(db, { baseIri })` before using a new database. The
@@ -26,6 +30,14 @@ does not infer a fallback from structured statement fields.
 The validation scans current entities and immutable history with deterministic
 100-row keyset pages, so migration does not require an unbounded D1 result set.
 
+Migration 4 adds package-owned canonical authorization policy. Fresh
+installations call `bootstrapTaprootAuthorization` once. Existing canonical
+rows remain quarantined until an exact `search:admin` caller plans and applies
+a bounded full-history backfill manifest containing every revision content hash
+and explicit entity/statement policy. No visibility is inferred, and policy,
+outbox, audit, authorization revision, and search generation publish in one
+batch.
+
 Hosts can call `planTaprootMigrations(db)`,
 `inspectTaprootPersistence(db)`, and
 `applyTaprootMigrations(db, { baseIri })`. Planning and inspection are
@@ -40,9 +52,10 @@ parent link, the chain head, and corresponding audit events.
 `inspectEntityIntegrity(id)` also compares current JSON, revision JSON, terms,
 RDF, and ownership. `inspectTaprootIntegrity` scans by cursor.
 
-Authorized, `search:admin`-gated `repairEntityProjection` atomically rebuilds terms, RDF, and ownership without
+Authorized, exact `search:admin`-gated `repairEntityProjection` atomically rebuilds terms, RDF, and ownership without
 changing canonical content or inventing a new content revision. It appends a
-`repair` audit event. It does not rewrite damaged immutable history; restore
+`repair` audit event, requires current policy plus an authorization-revision
+CAS, and advances search generation. It does not rewrite damaged immutable history; restore
 such data from backup and investigate if hash verification fails.
 
 ## Backup and restore

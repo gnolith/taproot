@@ -172,7 +172,50 @@ export interface EditMetadata {
   editSummary?: string;
   tags?: string[];
   requestId?: string;
+  /** Canonical authorization policy for the exact post-mutation revision. */
+  authorization?: CanonicalAuthorizationPolicyInput;
+  /** Package-internal normalized caller context injected by the guarded surface. */
+  authorizationContext?: AuthorizationContext;
 }
+
+export interface AuthorizationContext {
+  installationId: string;
+  principalId: string;
+  activeWorkspaceId: string | null;
+  workspaceIds: readonly string[];
+  capabilities: readonly string[];
+  authorizationRevision: number;
+}
+
+export type VisibilityAtomV1 =
+  | { kind: 'public' }
+  | { kind: 'principal'; principalId: string }
+  | { kind: 'workspace'; workspaceId: string }
+  | { kind: 'capability'; capability: string };
+
+export interface VisibilityScopeV1 {
+  version: 1;
+  /** AND of clauses; each clause is an OR of its atoms. Empty means public. */
+  clauses: readonly (readonly VisibilityAtomV1[])[];
+}
+
+/**
+ * Explicit complete policy for the exact post-mutation entity revision.
+ * Statement keys must exactly match the statements in that revision. Each
+ * value is a list of additional restrictions intersected with the entity.
+ */
+export interface CanonicalAuthorizationPolicyInput {
+  installationId: string;
+  workspaceId: string | null;
+  ownerPrincipalId: string;
+  visibility: VisibilityScopeV1;
+  statementRestrictions: Readonly<Record<string, readonly VisibilityScopeV1[]>>;
+  expectedAuthorizationRevision: number;
+}
+
+export type AuthorizedEditMetadata = Omit<EditMetadata, 'authorization'> & {
+  authorization: CanonicalAuthorizationPolicyInput;
+};
 
 export interface ExpectedRevision extends EditMetadata {
   expectedRevision: number;
@@ -191,6 +234,8 @@ export interface WriteResult {
   quadPatch: { deleted: number; inserted: number };
   eventId: string;
   contentHash: string;
+  authorizationRevision?: number;
+  searchGeneration?: number;
 }
 
 export interface StoredEntity {

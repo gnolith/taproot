@@ -4,15 +4,17 @@ Taproot exists so a D1-backed application can own a Wikibase-style knowledge gra
 and query it through Diamond without operating MediaWiki or another external
 knowledge service.
 
-Version 0.1 is complete for the package's declared entity domain: Wikibase
+Version 0.3 covers the package's declared entity domain: Wikibase
 core Items and Properties, canonical JSON interchange, statements and all
 their components, supported datatypes, revision/lifecycle history,
 attribution and audit, search, RDF/SPARQL projection, bulk workflows,
-migration, integrity, repair, policy hooks, and operational documentation.
+migration, integrity, repair, canonical entity authorization policy, and
+operational documentation.
 
 The following are separate products or future compatibility domains rather
 than missing Taproot implementation: MCP transport, agent orchestration,
-authentication/authorization, UI, wiki pages, media bytes, MediaWiki APIs,
+authentication, principal/membership/session management, UI, wiki pages,
+media bytes, MediaWiki APIs,
 Lexeme/Form/Sense, MediaInfo, and EntitySchema entity storage.
 
 Complete-Site assembly, resource provisioning, remote migration execution,

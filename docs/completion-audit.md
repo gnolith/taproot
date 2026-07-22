@@ -9,14 +9,14 @@ This audit covers the complete Taproot package boundary defined in
 | Complete edits             | Typed individual commands, `applyCommands`, optimistic revisions, all term/sitelink/statement/qualifier/reference/rank paths                                          |
 | Lifecycle                  | Soft delete, restore, same-type acyclic redirects, bounded resolution, lifecycle snapshots in every revision/event                                                    |
 | Attribution/audit          | Structured actors, legacy normalization, summaries, tags, request IDs, immutable events/revisions, SHA-256 parent chains                                              |
-| D1 atomicity               | One batch for current JSON, revision, audit, terms, RDF, and ownership; rollback and competing-edit Workerd tests                                                     |
+| D1 atomicity               | One batch for JSON, revision, audit, terms, RDF, policy/history, outbox, and shared auth/search counters; rollback and competing-write Workerd tests                  |
 | RDF/SPARQL                 | Wikibase paths, truthy/best rank, all snak types, full values, standard statement/provenance types, mapping v2 fixtures                                               |
 | Shared RDF safety          | Per-entity quad ownership and behavioral regression covering a shared full-value node during another entity's edit                                                    |
 | Search/read scale          | Authorization-required entity/revision/audit pages, bounded candidate scans, and fixed-size opaque caller/query/auth-revision/revision-audit-generation-bound cursors |
 | Bulk/agent workflows       | Multi-command single revision, bounded create/upsert import with indexed errors, NDJSON export, request correlation                                                   |
-| Migration                  | Versioned SQL, programmatic v1 hash/audit backfill, resumable v1-to-v2 RDF reprojection and ownership creation                                                        |
+| Migration                  | Checksummed migrations through v4, v1 hash/audit recovery, statement-text gate, and explicit bounded authorization-policy backfill                                    |
 | Integrity/repair           | Schema inspection, audit-chain verification, JSON/revision/term/RDF comparison, cursor scan, audited reprojection repair                                              |
-| Extension points           | DB/installation-bound host write capability, required attribution, isolated observations, injected clock and IDs; no state-observing public write callbacks           |
+| Extension points           | Host bootstrap capability plus DB/installation-bound normal-write guard, required attribution, isolated observations, injected clock/IDs; no observing callbacks      |
 | Package operations/release | Architecture/API/persistence/scope/security/testing docs, Node 22/24 CI, packed consumer, license and release gates                                                   |
 
 ## Reproduction

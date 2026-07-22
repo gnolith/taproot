@@ -15,11 +15,35 @@
 - Public mutation helpers now return minimal receipts and reject validator/RDF
   factory callbacks and configurable entity-size probes, so write configuration
   cannot observe preexisting canonical content. They require a process-local
-  host capability bound to the exact database object and installation base IRI.
-  Raw repository internals are not package-exported.
+  opaque installation authorization guard bound to the exact database object
+  and installation base IRI. Normal writes require current `knowledge:write`;
+  policy changes require orthogonal `knowledge:policy`. Raw repository
+  internals are not package-exported.
 - Added host-created authorization contexts, canonical CNF visibility scopes,
   lossless scope intersection, portable fingerprints, explicit `search:admin`
   checks, and fail-closed pre/post-hydration canonical reads.
+- Added checksummed migration 4 with immutable installation authorization
+  state, current and per-revision entity/statement policy, atomic projection
+  outbox and counter advances, fail-closed legacy quarantine, and bounded
+  hash-attested `search:admin` backfill. Unique durable advance IDs prevent
+  same-target ABA races for canonical and cross-package ordered batches.
+- Runtime JavaScript writes now fail closed when authorization metadata is
+  omitted, authorize before loading existing canonical state, validate redirect
+  targets and historical reverts against current policy, and preserve generic
+  denial behavior for missing, stale, or inaccessible targets.
+- Cross-package authorization fencing is guard-executed and inseparable from
+  the ordered database batch. Authorization singleton/audit rows reject
+  replacement, readiness verifies current and historical statement-policy
+  coverage, and authorized bulk import advances its context between entities.
+- Added host-issued fence-only domain guards bound to one exact non-Knowledge
+  capability. Task/Memory-style writes can share the installation revision
+  without borrowing Knowledge authority or advancing counters; Knowledge
+  advances require orthogonal policy authority and bind the prior durable
+  advance ID.
+- Authorization readiness and persisted sources now require exact parity
+  between mutable current policy and its immutable matching revision, and
+  recompute historical statement coverage/effective visibility before use.
+  Operational inspection also validates exact trigger definitions.
 
 - Added required, explicitly authored nonblank `Statement.text` to canonical
   JSON and to every logical statement mutation.

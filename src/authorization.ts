@@ -19,6 +19,10 @@ import type {
   StoredEntity,
   TaprootOptions,
   EditMetadata,
+  VisibilityAtomV1,
+  VisibilityScopeV1,
+  CanonicalAuthorizationPolicyInput,
+  AuthorizationContext,
 } from './types.js';
 import type {
   ListAuditOptions,
@@ -27,37 +31,22 @@ import type {
 } from './repository.js';
 
 export const SEARCH_ADMIN_CAPABILITY = 'search:admin' as const;
-
-export interface AuthorizationContext {
-  installationId: string;
-  principalId: string;
-  activeWorkspaceId: string | null;
-  workspaceIds: readonly string[];
-  capabilities: readonly string[];
-  authorizationRevision: number;
-}
-
-export type VisibilityAtomV1 =
-  | { kind: 'public' }
-  | { kind: 'principal'; principalId: string }
-  | { kind: 'workspace'; workspaceId: string }
-  | { kind: 'capability'; capability: string };
-
-export interface VisibilityScopeV1 {
-  version: 1;
-  /** AND of clauses; each clause is an OR of its atoms. Empty means public. */
-  clauses: readonly (readonly VisibilityAtomV1[])[];
-}
+export const KNOWLEDGE_WRITE_CAPABILITY = 'knowledge:write' as const;
+export const KNOWLEDGE_POLICY_CAPABILITY = 'knowledge:policy' as const;
 
 export interface CanonicalAuthorizationRecord {
   installationId: string;
   authorizationRevision: number;
   visibility: VisibilityScopeV1;
+  workspaceId: string | null;
+  ownerPrincipalId: string;
+  sourceRevision: number;
 }
 
 export interface InstallationAuthorizationState {
   installationId: string;
   authorizationRevision: number;
+  searchGeneration: number;
 }
 
 /**
@@ -74,6 +63,11 @@ export interface EntityAuthorizationSource {
   getEntityRevisionAuthorization(
     entityId: EntityId,
     revision: number,
+  ): Promise<CanonicalAuthorizationRecord | null>;
+  /** Current effective statement scope (parent policy intersected with restrictions). */
+  getStatementAuthorization(
+    entityId: EntityId,
+    statementId: string,
   ): Promise<CanonicalAuthorizationRecord | null>;
 }
 
@@ -242,6 +236,53 @@ export function intersectVisibilityScopes(
   });
 }
 
+export function normalizeCanonicalAuthorizationPolicy(
+  value: CanonicalAuthorizationPolicyInput,
+): CanonicalAuthorizationPolicyInput {
+  if (!isRecord(value)) invalid('authorization policy must be an object');
+  exactKeys(value, [
+    'installationId',
+    'workspaceId',
+    'ownerPrincipalId',
+    'visibility',
+    'statementRestrictions',
+    'expectedAuthorizationRevision',
+  ]);
+  if (!isRecord(value.statementRestrictions))
+    invalid('statementRestrictions must be an object');
+  const statementRestrictions: Record<string, VisibilityScopeV1[]> = {};
+  for (const [statementId, scopes] of Object.entries(
+    value.statementRestrictions,
+  ).sort(([left], [right]) => compareCodeUnits(left, right))) {
+    identifier(statementId, 'statementId');
+    if (!Array.isArray(scopes))
+      invalid(`statementRestrictions.${statementId} must be an array`);
+    const normalizedScopes: VisibilityScopeV1[] = [];
+    for (let index = 0; index < scopes.length; index += 1) {
+      if (!Object.hasOwn(scopes, index))
+        invalid(`statementRestrictions.${statementId} must be dense`);
+      normalizedScopes.push(
+        normalizeVisibilityScope(scopes[index] as VisibilityScopeV1),
+      );
+    }
+    statementRestrictions[statementId] = normalizedScopes;
+  }
+  return {
+    installationId: identifier(value.installationId, 'installationId'),
+    workspaceId:
+      value.workspaceId === null
+        ? null
+        : identifier(value.workspaceId, 'workspaceId'),
+    ownerPrincipalId: identifier(value.ownerPrincipalId, 'ownerPrincipalId'),
+    visibility: normalizeVisibilityScope(value.visibility),
+    statementRestrictions,
+    expectedAuthorizationRevision: revision(
+      value.expectedAuthorizationRevision,
+      'expectedAuthorizationRevision',
+    ),
+  };
+}
+
 export function isVisibleTo(
   rawScope: VisibilityScopeV1,
   rawContext: AuthorizationContext,
@@ -296,15 +337,12 @@ export class AuthorizedTaprootReader {
     db: SqliteDatabaseLike,
     options: TaprootOptions,
     context: AuthorizationContext,
-    authorization: EntityAuthorizationSource,
     authorizedOptions: AuthorizedTaprootOptions,
   ) {
     this.#db = db;
     this.#repository = new TaprootRepository(db, options);
     this.#context = normalizeAuthorizationContext(context);
-    if (!authorization || typeof authorization !== 'object')
-      invalid('authorization source is required');
-    this.#authorization = authorization;
+    this.#authorization = new PersistedEntityAuthorizationSource(db);
     if (!isRecord(authorizedOptions))
       invalid('authorized options are required');
     exactKeys(authorizedOptions, ['cursorCodec']);
@@ -814,21 +852,30 @@ export class AuthorizedTaprootReader {
       .prepare(
         `SELECT
            COALESCE((SELECT MAX(rowid) FROM taproot_entity_revisions), 0) AS revision_generation,
-           COALESCE((SELECT MAX(rowid) FROM taproot_audit_events), 0) AS audit_generation`,
+           COALESCE((SELECT MAX(rowid) FROM taproot_audit_events), 0) AS audit_generation,
+           COALESCE((SELECT search_generation FROM taproot_installation_authorization
+                     WHERE singleton = 1), 0) AS search_generation`,
       )
-      .all<{ revision_generation: number; audit_generation: number }>();
+      .all<{
+        revision_generation: number;
+        audit_generation: number;
+        search_generation: number;
+      }>();
     const revisionGeneration = Number(
       result.results[0]?.revision_generation ?? 0,
     );
     const auditGeneration = Number(result.results[0]?.audit_generation ?? 0);
+    const searchGeneration = Number(result.results[0]?.search_generation ?? 0);
     if (
       !Number.isSafeInteger(revisionGeneration) ||
       revisionGeneration < 0 ||
       !Number.isSafeInteger(auditGeneration) ||
-      auditGeneration < 0
+      auditGeneration < 0 ||
+      !Number.isSafeInteger(searchGeneration) ||
+      searchGeneration < 1
     )
       throw new AuthorizationDeniedError('Authorization denied');
-    return `${revisionGeneration}:${auditGeneration}`;
+    return `${revisionGeneration}:${auditGeneration}:${searchGeneration}`;
   }
 
   async #assertGeneration(expected: string): Promise<void> {
@@ -991,33 +1038,438 @@ export class AuthorizedTaprootReader {
   }
 }
 
+/** Taproot-owned, fail-closed canonical policy source. */
+export class PersistedEntityAuthorizationSource implements EntityAuthorizationSource {
+  readonly #db: SqliteDatabaseLike;
+
+  constructor(db: SqliteDatabaseLike) {
+    this.#db = db;
+  }
+
+  async getInstallationAuthorizationState(): Promise<InstallationAuthorizationState> {
+    const result = await this.#db
+      .prepare(
+        `SELECT installation_id, authorization_revision, search_generation
+         FROM taproot_installation_authorization WHERE singleton = 1`,
+      )
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        search_generation: number;
+      }>();
+    const row = result.results[0];
+    if (!row) throw new AuthorizationDeniedError('Authorization denied');
+    return {
+      installationId: row.installation_id,
+      authorizationRevision: Number(row.authorization_revision),
+      searchGeneration: Number(row.search_generation),
+    };
+  }
+
+  async getEntityAuthorization(
+    entityId: EntityId,
+  ): Promise<CanonicalAuthorizationRecord | null> {
+    const result = await this.#db
+      .prepare(
+        `SELECT p.installation_id, p.authorization_revision,
+                p.effective_visibility_json AS visibility_json,
+                p.visibility_json AS declared_visibility_json,
+                p.workspace_id, p.owner_principal_id, p.source_revision
+         FROM taproot_entity_authorization p
+         JOIN taproot_entity_authorization_revisions history
+           ON history.entity_id = p.entity_id
+          AND history.source_revision = p.source_revision
+          AND history.installation_id IS p.installation_id
+          AND history.workspace_id IS p.workspace_id
+          AND history.owner_principal_id IS p.owner_principal_id
+          AND history.visibility_json IS p.visibility_json
+          AND history.effective_visibility_json IS p.effective_visibility_json
+          AND history.authorization_revision IS p.authorization_revision
+          AND history.deleted_at IS p.deleted_at
+          AND history.event_id IS p.event_id
+          AND history.created_at IS p.updated_at
+         JOIN taproot_entities e ON e.entity_id = p.entity_id
+           AND e.revision = p.source_revision
+         JOIN taproot_installation_authorization state ON state.singleton = 1
+           AND state.installation_id = p.installation_id
+           AND p.authorization_revision BETWEEN 1 AND state.authorization_revision
+         WHERE p.entity_id = ? AND p.deleted_at IS NULL
+           AND e.deleted_at IS NULL`,
+      )
+      .bind(entityId)
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        visibility_json: string;
+        declared_visibility_json: string;
+        workspace_id: string | null;
+        owner_principal_id: string;
+        source_revision: number;
+      }>();
+    const row = result.results[0];
+    if (!row) return null;
+    const declared = parseCanonicalVisibilityScope(
+      row.declared_visibility_json,
+    );
+    const effective = parseCanonicalVisibilityScope(row.visibility_json);
+    if (!declared || !effective) return null;
+    const statements = await this.#db
+      .prepare(
+        `SELECT taproot_statement_authorization.restrictions_json,
+                taproot_statement_authorization.effective_visibility_json,
+                taproot_statement_authorization.authorization_revision
+         FROM taproot_statement_authorization
+         JOIN taproot_statement_authorization_revisions history
+           ON history.entity_id = taproot_statement_authorization.entity_id
+          AND history.source_revision = taproot_statement_authorization.source_revision
+          AND history.statement_id = taproot_statement_authorization.statement_id
+          AND history.restrictions_json IS taproot_statement_authorization.restrictions_json
+          AND history.effective_visibility_json IS taproot_statement_authorization.effective_visibility_json
+          AND history.authorization_revision IS taproot_statement_authorization.authorization_revision
+         WHERE taproot_statement_authorization.entity_id = ?
+           AND taproot_statement_authorization.source_revision = ?
+         ORDER BY taproot_statement_authorization.statement_id`,
+      )
+      .bind(entityId, row.source_revision)
+      .all<{
+        restrictions_json: string;
+        effective_visibility_json: string;
+        authorization_revision: number;
+      }>();
+    let expectedEffective = declared;
+    for (const statement of statements.results) {
+      const restrictions = parseCanonicalVisibilityRestrictions(
+        statement.restrictions_json,
+      );
+      const statementEffective = parseCanonicalVisibilityScope(
+        statement.effective_visibility_json,
+      );
+      if (
+        !restrictions ||
+        !statementEffective ||
+        Number(statement.authorization_revision) !==
+          Number(row.authorization_revision)
+      )
+        return null;
+      const expectedStatement = intersectVisibilityScopes(
+        declared,
+        ...restrictions,
+      );
+      if (
+        serializeVisibilityScope(statementEffective) !==
+        serializeVisibilityScope(expectedStatement)
+      )
+        return null;
+      expectedEffective = intersectVisibilityScopes(
+        expectedEffective,
+        expectedStatement,
+      );
+    }
+    if (
+      serializeVisibilityScope(effective) !==
+      serializeVisibilityScope(expectedEffective)
+    )
+      return null;
+    return authorizationRecordFromRow(row);
+  }
+
+  async getEntityRevisionAuthorization(
+    entityId: EntityId,
+    revisionNumber: number,
+  ): Promise<CanonicalAuthorizationRecord | null> {
+    const current = await this.getEntityAuthorization(entityId);
+    if (!current) return null;
+    const result = await this.#db
+      .prepare(
+        `SELECT history.installation_id, history.authorization_revision,
+                history.effective_visibility_json AS historical_visibility_json,
+                history.visibility_json AS historical_declared_visibility_json,
+                history.workspace_id, history.owner_principal_id,
+                history.source_revision
+         FROM taproot_entity_authorization_revisions history
+         JOIN taproot_installation_authorization state ON state.singleton = 1
+           AND state.installation_id = history.installation_id
+           AND history.authorization_revision BETWEEN 1 AND state.authorization_revision
+         WHERE history.entity_id = ? AND history.source_revision = ?
+           AND history.deleted_at IS NULL`,
+      )
+      .bind(entityId, revisionNumber)
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        historical_visibility_json: string;
+        historical_declared_visibility_json: string;
+        workspace_id: string | null;
+        owner_principal_id: string;
+        source_revision: number;
+      }>();
+    const row = result.results[0];
+    if (!row || row.installation_id !== current.installationId) return null;
+    const declared = parseCanonicalVisibilityScope(
+      row.historical_declared_visibility_json,
+    );
+    const effective = parseCanonicalVisibilityScope(
+      row.historical_visibility_json,
+    );
+    if (!declared || !effective) return null;
+    const coverage = await this.#db
+      .prepare(
+        `WITH expected(statement_id) AS (
+           SELECT json_extract(statement.value, '$.id')
+           FROM taproot_entity_revisions revision,
+             json_each(revision.entity_json, '$.claims') claim,
+             json_each(claim.value) statement
+           WHERE revision.entity_id = ? AND revision.revision = ?
+         )
+         SELECT
+           (SELECT COUNT(*) FROM expected) AS expected_count,
+           (SELECT COUNT(*) FROM taproot_statement_authorization_revisions policy
+             WHERE policy.entity_id = ? AND policy.source_revision = ?) AS actual_count,
+           (SELECT COUNT(*) FROM expected WHERE NOT EXISTS (
+             SELECT 1 FROM taproot_statement_authorization_revisions policy
+             WHERE policy.entity_id = ? AND policy.source_revision = ?
+               AND policy.statement_id = expected.statement_id
+           )) AS missing_count`,
+      )
+      .bind(
+        entityId,
+        revisionNumber,
+        entityId,
+        revisionNumber,
+        entityId,
+        revisionNumber,
+      )
+      .all<{
+        expected_count: number;
+        actual_count: number;
+        missing_count: number;
+      }>();
+    const coverageRow = coverage.results[0];
+    if (
+      !coverageRow ||
+      Number(coverageRow.expected_count) !== Number(coverageRow.actual_count) ||
+      Number(coverageRow.missing_count) !== 0
+    )
+      return null;
+    const statements = await this.#db
+      .prepare(
+        `SELECT restrictions_json, effective_visibility_json,
+                authorization_revision
+         FROM taproot_statement_authorization_revisions
+         WHERE entity_id = ? AND source_revision = ?
+         ORDER BY statement_id`,
+      )
+      .bind(entityId, revisionNumber)
+      .all<{
+        restrictions_json: string;
+        effective_visibility_json: string;
+        authorization_revision: number;
+      }>();
+    let expectedEffective = declared;
+    for (const statement of statements.results) {
+      const restrictions = parseCanonicalVisibilityRestrictions(
+        statement.restrictions_json,
+      );
+      const statementEffective = parseCanonicalVisibilityScope(
+        statement.effective_visibility_json,
+      );
+      if (
+        !restrictions ||
+        !statementEffective ||
+        Number(statement.authorization_revision) !==
+          Number(row.authorization_revision)
+      )
+        return null;
+      const expectedStatement = intersectVisibilityScopes(
+        declared,
+        ...restrictions,
+      );
+      if (
+        serializeVisibilityScope(statementEffective) !==
+        serializeVisibilityScope(expectedStatement)
+      )
+        return null;
+      expectedEffective = intersectVisibilityScopes(
+        expectedEffective,
+        expectedStatement,
+      );
+    }
+    if (
+      serializeVisibilityScope(effective) !==
+      serializeVisibilityScope(expectedEffective)
+    )
+      return null;
+    return {
+      installationId: row.installation_id,
+      authorizationRevision: Math.max(
+        current.authorizationRevision,
+        Number(row.authorization_revision),
+      ),
+      visibility: intersectVisibilityScopes(current.visibility, effective),
+      workspaceId: row.workspace_id,
+      ownerPrincipalId: row.owner_principal_id,
+      sourceRevision: Number(row.source_revision),
+    };
+  }
+
+  async getStatementAuthorization(
+    entityId: EntityId,
+    statementId: string,
+  ): Promise<CanonicalAuthorizationRecord | null> {
+    const result = await this.#db
+      .prepare(
+        `SELECT p.installation_id, s.authorization_revision,
+                s.effective_visibility_json AS visibility_json,
+                s.restrictions_json, p.visibility_json AS parent_visibility_json,
+                p.effective_visibility_json AS parent_effective_visibility_json,
+                p.authorization_revision AS parent_authorization_revision,
+                p.workspace_id, p.owner_principal_id, s.source_revision
+         FROM taproot_statement_authorization s
+         JOIN taproot_statement_authorization_revisions history
+           ON history.entity_id = s.entity_id
+          AND history.source_revision = s.source_revision
+          AND history.statement_id = s.statement_id
+          AND history.restrictions_json IS s.restrictions_json
+          AND history.effective_visibility_json IS s.effective_visibility_json
+          AND history.authorization_revision IS s.authorization_revision
+         JOIN taproot_entity_authorization p ON p.entity_id = s.entity_id
+            AND p.source_revision = s.source_revision
+         JOIN taproot_entity_authorization_revisions parent_history
+           ON parent_history.entity_id = p.entity_id
+          AND parent_history.source_revision = p.source_revision
+          AND parent_history.installation_id IS p.installation_id
+          AND parent_history.workspace_id IS p.workspace_id
+          AND parent_history.owner_principal_id IS p.owner_principal_id
+          AND parent_history.visibility_json IS p.visibility_json
+          AND parent_history.effective_visibility_json IS p.effective_visibility_json
+          AND parent_history.authorization_revision IS p.authorization_revision
+          AND parent_history.deleted_at IS p.deleted_at
+          AND parent_history.event_id IS p.event_id
+          AND parent_history.created_at IS p.updated_at
+         JOIN taproot_entities e ON e.entity_id = s.entity_id
+            AND e.revision = s.source_revision
+         JOIN taproot_installation_authorization state ON state.singleton = 1
+           AND state.installation_id = p.installation_id
+           AND p.authorization_revision BETWEEN 1 AND state.authorization_revision
+           AND s.authorization_revision BETWEEN 1 AND state.authorization_revision
+         WHERE s.entity_id = ? AND s.statement_id = ?
+           AND p.deleted_at IS NULL AND e.deleted_at IS NULL`,
+      )
+      .bind(entityId, statementId)
+      .all<{
+        installation_id: string;
+        authorization_revision: number;
+        visibility_json: string;
+        restrictions_json: string;
+        parent_visibility_json: string;
+        parent_effective_visibility_json: string;
+        parent_authorization_revision: number;
+        workspace_id: string | null;
+        owner_principal_id: string;
+        source_revision: number;
+      }>();
+    const row = result.results[0];
+    if (
+      !row ||
+      Number(row.authorization_revision) !==
+        Number(row.parent_authorization_revision)
+    )
+      return null;
+    const declaredParent = parseCanonicalVisibilityScope(
+      row.parent_visibility_json,
+    );
+    const restrictions = parseCanonicalVisibilityRestrictions(
+      row.restrictions_json,
+    );
+    const effective = parseCanonicalVisibilityScope(row.visibility_json);
+    if (
+      !declaredParent ||
+      !restrictions ||
+      !effective ||
+      serializeVisibilityScope(effective) !==
+        serializeVisibilityScope(
+          intersectVisibilityScopes(declaredParent, ...restrictions),
+        )
+    )
+      return null;
+    return authorizationRecordFromRow(row);
+  }
+}
+
+function parseCanonicalVisibilityRestrictions(
+  raw: string,
+): readonly VisibilityScopeV1[] | null {
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!Array.isArray(value)) return null;
+    const restrictions = value.map((scope) =>
+      normalizeVisibilityScope(scope as VisibilityScopeV1),
+    );
+    return JSON.stringify(restrictions) === raw ? restrictions : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseCanonicalVisibilityScope(raw: string): VisibilityScopeV1 | null {
+  try {
+    const scope = normalizeVisibilityScope(
+      JSON.parse(raw) as VisibilityScopeV1,
+    );
+    return serializeVisibilityScope(scope) === raw ? scope : null;
+  } catch {
+    return null;
+  }
+}
+
+function authorizationRecordFromRow(
+  row:
+    | {
+        installation_id: string;
+        authorization_revision: number;
+        visibility_json: string;
+        workspace_id: string | null;
+        owner_principal_id: string;
+        source_revision: number;
+      }
+    | undefined,
+): CanonicalAuthorizationRecord | null {
+  if (!row) return null;
+  return {
+    installationId: row.installation_id,
+    authorizationRevision: Number(row.authorization_revision),
+    visibility: JSON.parse(row.visibility_json) as VisibilityScopeV1,
+    workspaceId: row.workspace_id,
+    ownerPrincipalId: row.owner_principal_id,
+    sourceRevision: Number(row.source_revision),
+  };
+}
+
 export function createAuthorizedTaproot(
   db: SqliteDatabaseLike,
   options: TaprootOptions,
   context: AuthorizationContext,
-  authorization: EntityAuthorizationSource,
   authorizedOptions: AuthorizedTaprootOptions,
 ): AuthorizedTaprootReader {
-  return new AuthorizedTaprootReader(
-    db,
-    options,
-    context,
-    authorization,
-    authorizedOptions,
-  );
+  return new AuthorizedTaprootReader(db, options, context, authorizedOptions);
 }
 
 function normalizeInstallationState(
   value: InstallationAuthorizationState,
 ): InstallationAuthorizationState {
   if (!isRecord(value)) invalid('authorization state must be an object');
-  exactKeys(value, ['installationId', 'authorizationRevision']);
+  exactKeys(value, [
+    'installationId',
+    'authorizationRevision',
+    'searchGeneration',
+  ]);
   return {
     installationId: identifier(value.installationId, 'installationId'),
     authorizationRevision: revision(
       value.authorizationRevision,
       'authorizationRevision',
     ),
+    searchGeneration: revision(value.searchGeneration, 'searchGeneration'),
   };
 }
 
@@ -1025,7 +1477,14 @@ function normalizeAuthorizationRecord(
   value: CanonicalAuthorizationRecord | null,
 ): CanonicalAuthorizationRecord {
   if (!isRecord(value)) invalid('authorization record must be an object');
-  exactKeys(value, ['installationId', 'authorizationRevision', 'visibility']);
+  exactKeys(value, [
+    'installationId',
+    'authorizationRevision',
+    'visibility',
+    'workspaceId',
+    'ownerPrincipalId',
+    'sourceRevision',
+  ]);
   return {
     installationId: identifier(value.installationId, 'installationId'),
     authorizationRevision: revision(
@@ -1033,6 +1492,12 @@ function normalizeAuthorizationRecord(
       'authorizationRevision',
     ),
     visibility: normalizeVisibilityScope(value.visibility),
+    workspaceId:
+      value.workspaceId === null
+        ? null
+        : identifier(value.workspaceId, 'workspaceId'),
+    ownerPrincipalId: identifier(value.ownerPrincipalId, 'ownerPrincipalId'),
+    sourceRevision: revision(value.sourceRevision, 'sourceRevision'),
   };
 }
 

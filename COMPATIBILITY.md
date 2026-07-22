@@ -26,8 +26,9 @@ Intentional differences:
 - Search is a deterministic D1 term projection using case-insensitive
   substring matching. FTS5 is not required.
 - Taproot stores attribution claims but does not authenticate them. Normal
-  canonical reads require a host-created authorization context and current
-  policy source. Authentication and agent/MCP transport remain host concerns.
+  canonical reads require a host-created authorization context and use
+  Taproot's persisted canonical policy. Authentication, principals,
+  memberships, sessions, and agent/MCP transport remain host concerns.
 - The compatibility target is Wikibase core Items and Properties. Lexemes,
   Forms, Senses, EntitySchemas, MediaInfo, MediaWiki page metadata, and
   normalized external-ID formatter URLs are not claimed as supported entity
