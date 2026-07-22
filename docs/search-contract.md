@@ -74,11 +74,12 @@ text.
 
 ## Explicit nonclaims
 
-This contract does not implement search execution, candidate retrieval,
-ranking, snippets, cursor issuance, hydration, persistence, a migration,
-projection queues/outboxes, health, rebuild, provider adapters, or complete
-system acceptance. Migration number `0005` is reserved for a later persistence
-slice and is not present here. Existing `searchEntities`, `SearchOptions`,
-`SearchResult`, RDF mapping, and SPARQL behavior remain separate and unchanged.
-No hosted Site is assembled, provisioned, deployed, or accepted by this
-package.
+The pure projection contract does not implement search execution, candidate
+retrieval, ranking, snippets, cursor issuance, hydration, or provider adapters.
+The package's separate migrations 0005 and 0006 persist source events and a
+dormant guarded materialization lifecycle as documented in
+[search-source-events.md](search-source-events.md) and
+[search-materialization.md](search-materialization.md). Existing
+`searchEntities`, `SearchOptions`, `SearchResult`, RDF mapping, and SPARQL
+behavior remain separate and unchanged. No hosted Site is assembled,
+provisioned, deployed, or accepted by this package.

@@ -55,6 +55,7 @@ for (const required of [
   'docs/api.md',
   'docs/architecture.md',
   'docs/search-source-events.md',
+  'docs/search-materialization.md',
   'docs/threat-model.md',
   'examples/d1-diamond-interop/README.md',
   'examples/d1-diamond-interop/demo.ts',
@@ -63,6 +64,7 @@ for (const required of [
   'migrations/0003_canonical_statement_text.sql',
   'migrations/0004_canonical_authorization_policy.sql',
   'migrations/0005_unified_search_source_events.sql',
+  'migrations/0006_unified_search_materialization_lifecycle.sql',
 ]) {
   assert.ok(files.has(required), `packed artifact is missing ${required}`);
 }

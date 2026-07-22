@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   InvalidSearchContractError,
   MixedSearchProjectionScopeError,
+  SearchProjectionLimitError,
   PersistedEntityAuthorizationSource,
   UNIFIED_SEARCH_KINDS,
   UNIFIED_SEARCH_LIMITS,
@@ -387,8 +388,8 @@ describe('pure Taproot Statement and Item projection planning', () => {
       mixedScope: 'partition',
       maxChunkBytes: 16,
     });
-    expect(plan.documents).toHaveLength(1);
-    const text = plan.documents[0]!.text;
+    expect(plan.documents).toHaveLength(3);
+    const text = plan.documents.map(({ text }) => text).join('\n');
     for (const expected of [
       'Kiln',
       'Four',
@@ -399,9 +400,13 @@ describe('pure Taproot Statement and Item projection planning', () => {
       'other statement text 🔥',
     ])
       expect(occurrences(text, expected)).toBe(1);
-    expect(plan.chunks.map(({ text: chunkText }) => chunkText).join('')).toBe(
-      text,
-    );
+    for (const document of plan.documents)
+      expect(
+        plan.chunks
+          .filter(({ documentId }) => documentId === document.id)
+          .map(({ text: chunkText }) => chunkText)
+          .join(''),
+      ).toBe(document.text);
     expect(
       plan.chunks.every(
         ({ text: chunkText }) =>
@@ -409,7 +414,9 @@ describe('pure Taproot Statement and Item projection planning', () => {
       ),
     ).toBe(true);
     expect(
-      plan.documents[0]!.segments.filter(({ field }) => field === 'statement'),
+      plan.documents.flatMap(({ segments }) =>
+        segments.filter(({ field }) => field === 'statement'),
+      ),
     ).toHaveLength(2);
   });
 
@@ -448,6 +455,62 @@ describe('pure Taproot Statement and Item projection planning', () => {
     expect(plan.chunks.map(({ text }) => text).join('')).toBe(oversizedText);
   });
 
+  it('pins the 1.8MB document and 512-chunk fences without truncation', async () => {
+    const exactChunks = makeStatement('Q1$S1', 'x'.repeat(2048));
+    const source = sourceEvent('statement', exactChunks.id, '1');
+    const authorization = await envelope(
+      'statement',
+      exactChunks.id,
+      '1',
+      PUBLIC,
+    );
+    const plan = await projectStatementForUnifiedSearchV1({
+      source,
+      itemId: 'Q1',
+      statement: exactChunks,
+      authorization,
+      maxChunkBytes: 4,
+    });
+    expect(plan.chunks).toHaveLength(512);
+    expect(plan.chunks.map(({ text }) => text).join('')).toBe(exactChunks.text);
+    const tooMany = makeStatement('Q1$S1', 'x'.repeat(2049));
+    await expect(
+      projectStatementForUnifiedSearchV1({
+        source,
+        itemId: 'Q1',
+        statement: tooMany,
+        authorization,
+        maxChunkBytes: 4,
+      }),
+    ).rejects.toBeInstanceOf(SearchProjectionLimitError);
+
+    const maximum = makeStatement(
+      'Q1$S2',
+      'x'.repeat(UNIFIED_SEARCH_LIMITS.maxProjectionTextBytes),
+    );
+    const maximumPlan = await projectStatementForUnifiedSearchV1({
+      source: sourceEvent('statement', maximum.id, '1'),
+      itemId: 'Q1',
+      statement: maximum,
+      authorization: await envelope('statement', maximum.id, '1', PUBLIC),
+    });
+    expect(maximumPlan.documents[0]?.text.length).toBe(
+      UNIFIED_SEARCH_LIMITS.maxProjectionTextBytes,
+    );
+    const tooLarge = makeStatement(
+      'Q1$S2',
+      'x'.repeat(UNIFIED_SEARCH_LIMITS.maxProjectionTextBytes + 1),
+    );
+    await expect(
+      projectStatementForUnifiedSearchV1({
+        source: sourceEvent('statement', tooLarge.id, '1'),
+        itemId: 'Q1',
+        statement: tooLarge,
+        authorization: await envelope('statement', tooLarge.id, '1', PUBLIC),
+      }),
+    ).rejects.toBeInstanceOf(InvalidSearchContractError);
+  });
+
   it('attributes separator-only chunks to the following source segment', async () => {
     const item: Item = {
       ...makeItem(),
@@ -484,8 +547,13 @@ describe('pure Taproot Statement and Item projection planning', () => {
       statementAuthorizations: allPublic,
       mixedScope: 'partition',
     });
-    expect(hostile.documents).toHaveLength(1);
-    expect(hostile.documents[0]!.authorization.visibility).toEqual(PRIVATE);
+    expect(hostile.documents).toHaveLength(3);
+    expect(
+      hostile.documents.every(
+        ({ authorization }) =>
+          JSON.stringify(authorization.visibility) === JSON.stringify(PRIVATE),
+      ),
+    ).toBe(true);
 
     const mixed = await statementEnvelopeMap(item, PUBLIC);
     mixed['Q1$S2'] = await envelope('statement', 'Q1$S2', '3', WORKSPACE);
@@ -496,7 +564,7 @@ describe('pure Taproot Statement and Item projection planning', () => {
       statementAuthorizations: mixed,
       mixedScope: 'partition',
     });
-    expect(partitioned.documents).toHaveLength(2);
+    expect(partitioned.documents).toHaveLength(3);
     expect(
       partitioned.documents.flatMap(({ segments }) =>
         segments.filter(({ field }) => field === 'statement'),

@@ -31,6 +31,7 @@ import {
   restoreEntity,
   setLabel,
   softDeleteEntity,
+  taprootSearchMaterializationSchemaStatements,
   type AuthorizationContext,
   type CanonicalAuthorizationPolicyInput,
   type TaprootHostWriteCapability,
@@ -87,6 +88,10 @@ describe('unified-search source-event migration 0005', () => {
       { id: '0003-canonical-statement-text', status: 'applied' },
       { id: '0004-canonical-authorization-policy', status: 'applied' },
       { id: '0005-unified-search-source-events', status: 'pending' },
+      {
+        id: '0006-unified-search-materialization-lifecycle',
+        status: 'pending',
+      },
     ]);
     await applyTaprootMigrations(db, options);
     expect((await inspectTaprootSchema(db)).valid).toBe(true);
@@ -244,7 +249,7 @@ describe('opaque InstallationSearchSourceGuardV1', () => {
         searchGeneration: 2,
         replayed: false,
       });
-      expect(receipt.results).toHaveLength(6);
+      expect(receipt.results).toHaveLength(11);
       const replay = await guard.batchWithSourceEvent(taskContext(), first, [
         env.db.prepare(
           `INSERT INTO test_domain_values(value) VALUES ('replay-must-not-run')`,
@@ -956,18 +961,38 @@ async function migrationCount(db: D1DatabaseLike, id: string): Promise<number> {
 }
 
 async function downgradeTo0004(db: D1DatabaseLike): Promise<void> {
+  await dropSearchMaterializationSchema(db);
   await db.batch([
     db.prepare(`DROP TABLE taproot_unified_search_source_registry`),
     db.prepare(`DROP TABLE taproot_unified_search_source_events`),
-    db.prepare(`DELETE FROM taproot_migrations WHERE version = 5`),
+    db.prepare(`DELETE FROM taproot_migrations WHERE version >= 5`),
     db.prepare(
       `DELETE FROM _gnolith_migrations
        WHERE namespace = '@gnolith/taproot'
-         AND migration_id = '0005-unified-search-source-events'`,
+         AND migration_id IN (
+           '0005-unified-search-source-events',
+           '0006-unified-search-materialization-lifecycle'
+         )`,
     ),
     db.prepare(
       `UPDATE taproot_metadata SET metadata_value = '3'
        WHERE metadata_key = 'schema_version'`,
     ),
   ]);
+}
+
+async function dropSearchMaterializationSchema(
+  db: D1DatabaseLike,
+): Promise<void> {
+  const objects = taprootSearchMaterializationSchemaStatements
+    .map((sql) =>
+      /^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS ([a-z0-9_]+)/iu.exec(sql),
+    )
+    .filter((match): match is RegExpExecArray => match !== null)
+    .reverse();
+  await db.batch(
+    objects.map((match) =>
+      db.prepare(`DROP ${match[1]!.toUpperCase()} IF EXISTS ${match[2]}`),
+    ),
+  );
 }

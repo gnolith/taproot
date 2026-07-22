@@ -43,8 +43,17 @@ source registry. The only supported predecessor is the exact released
 migration-0004 catalog. The migration is DDL-only and performs no backfill;
 existing canonical rows receive a first root event only on a later authorized
 mutation. Event and registry publication share the authoritative domain write
-transaction and generation CAS. These tables are not a job queue and do not
-provide leasing, health, rebuild, or materialization.
+transaction and generation CAS. These tables are not themselves a job queue.
+
+Migration 6 accepts only the exact migration-5 catalog and is DDL-only. It adds
+persisted corpora, checkpoints, bounded projection jobs, immutable transitions,
+invisible stages, complete manifests, root heads/tombstones, shadow rebuild
+enumeration, and administrative audit. It does not backfill source events or
+start a worker. A host-created exact `search:admin` context can initialize and
+run bounded work through `createSearchMaterializationAdminGuardV1`; ordinary
+request data cannot construct that guard. Process hosts may repeatedly invoke
+the same runner, while D1 hosts may drain bounded pages per request or scheduled
+event. See [search-materialization.md](search-materialization.md).
 
 Hosts can call `planTaprootMigrations(db)`,
 `inspectTaprootPersistence(db)`, and

@@ -7,7 +7,15 @@ term-search types or SPARQL surface and do not execute a search.
 
 The metadata-only persistence boundary is documented in
 [search-source-events.md](search-source-events.md). It records authoritative
-source changes but does not materialize or query an index.
+source changes. The separately guarded dormant lifecycle in
+[search-materialization.md](search-materialization.md) materializes Taproot
+Item roots but still does not expose a query surface.
+
+`createSearchMaterializationAdminGuardV1` requires the host-only Taproot write
+capability and returns only bounded `initialize`, `run`, redacted `health`,
+audited dead-work retry, and shadow-rebuild maintenance operations. Each call
+also requires the exact current `search:admin` authorization context. No raw
+job, document, claim token, indexed text, or query method is public.
 
 ## Persistence and migrations
 

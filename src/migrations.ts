@@ -22,6 +22,7 @@ import {
   inspectTaprootSchema,
   isExactTaprootPreFinalizeSchema,
   isExactPreAuthorizationTaprootSchema,
+  isExactPreSearchMaterializationTaprootSchema,
   isExactPreSearchSourceEventTaprootSchema,
   isExactTaprootSchema,
   isExactTaprootUpgradeSchema,
@@ -32,6 +33,7 @@ import {
   taprootFinalizeStatements,
   taprootAuthorizationSchemaStatements,
   taprootSearchSourceEventSchemaStatements,
+  taprootSearchMaterializationSchemaStatements,
   taprootSchemaStatements,
   verifyTaprootPackageSeeds,
   verifyPersistedStatementText,
@@ -88,6 +90,10 @@ export const taprootMigrations = [
   {
     id: '0005-unified-search-source-events',
     statements: taprootSearchSourceEventSchemaStatements,
+  },
+  {
+    id: '0006-unified-search-materialization-lifecycle',
+    statements: taprootSearchMaterializationSchemaStatements,
   },
 ] as const satisfies readonly NamespacedMigration[];
 
@@ -273,9 +279,11 @@ export async function applyTaprootMigrations(
     applied.length < expected.length
   ) {
     const exactPredecessor =
-      applied.length === 4
-        ? await isExactPreSearchSourceEventTaprootSchema(db)
-        : await isExactPreAuthorizationTaprootSchema(db);
+      applied.length === 5
+        ? await isExactPreSearchMaterializationTaprootSchema(db)
+        : applied.length === 4
+          ? await isExactPreSearchSourceEventTaprootSchema(db)
+          : await isExactPreAuthorizationTaprootSchema(db);
     if (!exactPredecessor)
       throw new TaprootMigrationStateError(
         'Pending Taproot migrations require the exact prior package catalog',
@@ -286,7 +294,8 @@ export async function applyTaprootMigrations(
         ({ migration }) =>
           migration.id !== '0003-canonical-statement-text' &&
           migration.id !== '0004-canonical-authorization-policy' &&
-          migration.id !== '0005-unified-search-source-events',
+          migration.id !== '0005-unified-search-source-events' &&
+          migration.id !== '0006-unified-search-materialization-lifecycle',
       )
     )
       throw new TaprootMigrationStateError(
@@ -577,7 +586,7 @@ async function finalizeRecovery(
     db.prepare(
       `INSERT INTO taproot_assertions(assertion_key)
        SELECT NULL WHERE
-         (SELECT COUNT(*) FROM taproot_migrations) != 5
+         (SELECT COUNT(*) FROM taproot_migrations) != 6
          OR NOT EXISTS (
            SELECT 1 FROM taproot_migrations
            WHERE version = 1 AND name = 'initial'
@@ -597,6 +606,10 @@ async function finalizeRecovery(
          OR NOT EXISTS (
            SELECT 1 FROM taproot_migrations
            WHERE version = 5 AND name = 'unified-search-source-events'
+         )
+         OR NOT EXISTS (
+           SELECT 1 FROM taproot_migrations
+           WHERE version = 6 AND name = 'unified-search-materialization-lifecycle'
          )`,
     ),
     db.prepare(
