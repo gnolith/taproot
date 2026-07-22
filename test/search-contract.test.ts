@@ -160,6 +160,15 @@ describe('unified search V1 contract', () => {
     expect(() => canonicalSearchBytesV1({ value: Number.NaN })).toThrow(
       InvalidSearchContractError,
     );
+    expect(() => canonicalSearchBytesV1(Array(1))).toThrow(
+      InvalidSearchContractError,
+    );
+    expect(() => canonicalSearchBytesV1([undefined])).toThrow(
+      InvalidSearchContractError,
+    );
+    expect(await canonicalSearchHashV1([])).not.toBe(
+      await canonicalSearchHashV1([null]),
+    );
   });
 
   it('normalizes kind-aware results, matches, pages, and public errors strictly', () => {
@@ -439,6 +448,30 @@ describe('pure Taproot Statement and Item projection planning', () => {
     expect(plan.chunks.map(({ text }) => text).join('')).toBe(oversizedText);
   });
 
+  it('attributes separator-only chunks to the following source segment', async () => {
+    const item: Item = {
+      ...makeItem(),
+      id: 'Q9',
+      labels: { en: { language: 'en', value: 'aaaa' } },
+      aliases: { en: [{ language: 'en', value: '🔥' }] },
+      descriptions: {},
+      claims: {},
+    };
+    const plan = await projectItemForUnifiedSearchV1({
+      source: sourceEvent('item', item.id, '3'),
+      item,
+      authorization: await envelope('item', item.id, '3', PUBLIC),
+      statementAuthorizations: {},
+      mixedScope: 'partition',
+      maxChunkBytes: 4,
+    });
+    expect(plan.chunks.map(({ text }) => text)).toEqual(['aaaa', '\n', '🔥']);
+    expect(plan.chunks.every(({ trace }) => trace.length > 0)).toBe(true);
+    expect(plan.chunks[1]!.trace).toEqual([
+      expect.objectContaining({ field: 'alias', chunkStart: 0, chunkEnd: 1 }),
+    ]);
+  });
+
   it('partitions mixed scopes, can reject them explicitly, and never widens a private Item', async () => {
     const item = makeItem();
     const source = sourceEvent('item', item.id, '3');
@@ -514,7 +547,7 @@ function sourceEvent(
 ) {
   return {
     version: 1 as const,
-    eventId: `event-${sourceId.replace('$', '-')}`,
+    eventId: `event-${sourceId.replaceAll('$', '-')}`,
     operation: 'upsert' as const,
     installationId: 'installation-1',
     kind,

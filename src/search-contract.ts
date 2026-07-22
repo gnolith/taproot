@@ -1050,8 +1050,8 @@ async function buildDocument(
   const segments: SearchProjectionSegmentV1[] = [];
   let text = '';
   for (const raw of rawSegments) {
-    if (text.length > 0) text += '\n';
     const documentStart = text.length;
+    if (text.length > 0) text += '\n';
     text += raw.text;
     segments.push({ ...raw, documentStart, documentEnd: text.length });
   }
@@ -1186,7 +1186,12 @@ function canonicalJson(value: unknown): string {
       invalid('canonical search values require finite numbers');
     return JSON.stringify(Object.is(value, -0) ? 0 : value);
   }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1)
+      if (!Object.hasOwn(value, index))
+        invalid('canonical search arrays must be dense');
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
   if (!isRecord(value))
     invalid('canonical search values must be JSON-compatible');
   const normalizedKeys = new Map<string, string>();

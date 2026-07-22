@@ -67,6 +67,8 @@ documents or rejected explicitly, according to caller-selected policy.
 Documents split into UTF-8-bounded chunks without omission or reordering.
 Every chunk traces its source fields and document offsets and declares
 `canonical: false`; canonical domain content remains the Item or Statement.
+The deterministic newline between adjacent fields is attributed to the
+following field's trace, so even a separator-only chunk retains a source.
 Crossing the explicit chunk-count bound fails instead of silently dropping
 text.
 

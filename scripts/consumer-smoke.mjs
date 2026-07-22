@@ -75,6 +75,7 @@ writeFileSync(
       KNOWLEDGE_POLICY_CAPABILITY,
       KNOWLEDGE_WRITE_CAPABILITY,
       PersistedEntityAuthorizationSource,
+      projectItemForUnifiedSearchV1,
       projectStatementForUnifiedSearchV1,
     } from '@gnolith/taproot';
     import { Miniflare } from 'miniflare';
@@ -311,6 +312,58 @@ writeFileSync(
           '{"a":"é","z":null}'
       ) {
         throw new Error('packed unified search projection contract failed');
+      }
+      let sparseCanonicalRejected = false;
+      try {
+        canonicalSearchBytesV1(Array(1));
+      } catch {
+        sparseCanonicalRejected = true;
+      }
+      if (!sparseCanonicalRejected) {
+        throw new Error('packed canonical search bytes accepted a sparse array');
+      }
+      const itemAuthorization = await createTrustedSearchAuthorizationEnvelopeV1(
+        projectionAuthority,
+        {
+          ...statementAuthorizationInput,
+          sourceKind: 'item',
+          sourceId: 'Q9',
+        },
+      );
+      const separatorPlan = await projectItemForUnifiedSearchV1({
+        source: {
+          version: 1,
+          eventId: 'packed-item-event',
+          operation: 'upsert',
+          installationId,
+          kind: 'item',
+          sourceId: 'Q9',
+          sourceRevision: '2',
+          sourceHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          authorizationRevision: 2,
+          searchGeneration: 2,
+        },
+        item: {
+          id: 'Q9',
+          type: 'item',
+          labels: { en: { language: 'en', value: 'aaaa' } },
+          aliases: { en: [{ language: 'en', value: '🔥' }] },
+          descriptions: {},
+          claims: {},
+          sitelinks: {},
+          lastrevid: 2,
+          modified: '2026-07-22T00:00:00.000Z',
+        },
+        authorization: itemAuthorization,
+        statementAuthorizations: {},
+        mixedScope: 'partition',
+        maxChunkBytes: 4,
+      });
+      if (
+        separatorPlan.chunks.map(({ text }) => text).join('|') !== 'aaaa|\\n|🔥' ||
+        separatorPlan.chunks.some(({ trace }) => trace.length === 0)
+      ) {
+        throw new Error('packed projection emitted an untraced separator chunk');
       }
       if (
         'prepareAuthorizationAdvance' in localGuard ||
