@@ -229,6 +229,9 @@ for (const runtime of environments) {
         expect(
           attempts.filter(({ status }) => status === 'rejected'),
         ).toHaveLength(1);
+        const rejection = attempts.find(({ status }) => status === 'rejected');
+        if (rejection?.status === 'rejected')
+          expect(rejection.reason).toBeInstanceOf(RevisionConflictError);
         const state = await environment.db
           .prepare(
             `SELECT
