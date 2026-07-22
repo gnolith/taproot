@@ -35,6 +35,9 @@ capability, and a process-local `node:sqlite` adapter.
 - Cursor reads, bounded import/upsert and NDJSON export, multi-command edits,
   redirect resolution, integrity verification, deterministic repair, schema/RDF
   migrations, validation policies, and write observations.
+- A versioned unified-search contract with deterministic serialization and pure
+  authorization-preserving Statement/Item projection planning; it does not yet
+  execute or persist unified search. See `docs/search-contract.md`.
 
 It does not own authentication, MCP, agents, tasks, UI, wiki articles, media
 bytes, or arbitrary SPARQL Update. Canonical entity JSON is authoritative;

@@ -203,6 +203,7 @@ export * from './authorization.js';
 export * from './errors.js';
 export * from './migrations.js';
 export * from './rdf.js';
+export * from './search-contract.js';
 export * from './schema.js';
 export * from './types.js';
 
