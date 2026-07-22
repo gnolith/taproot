@@ -1,7 +1,12 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { D1DatabaseLike, SqliteDatabaseLike } from '@gnolith/diamond';
+import type {
+  D1DatabaseLike,
+  SqliteDatabaseLike,
+  SqlitePreparedStatementLike,
+  SqliteResultLike,
+} from '@gnolith/diamond';
 import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
 import { Miniflare } from 'miniflare';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -14,6 +19,7 @@ import {
   createAuthorizationCursorCodec,
   createAuthorizedTaproot,
   createItem,
+  createTaprootHostWriteCapability,
   initializeTaproot,
   type AuthorizationContext,
   type CanonicalAuthorizationRecord,
@@ -61,6 +67,54 @@ class Policies implements EntityAuthorizationSource {
   }
 }
 
+class HookedStatement implements SqlitePreparedStatementLike {
+  constructor(
+    readonly sql: string,
+    readonly inner: SqlitePreparedStatementLike,
+    readonly hook: () => Promise<void>,
+  ) {}
+
+  bind(...values: unknown[]) {
+    return new HookedStatement(this.sql, this.inner.bind(...values), this.hook);
+  }
+
+  run<T = Record<string, unknown>>() {
+    return this.inner.run<T>();
+  }
+
+  async all<T = Record<string, unknown>>(): Promise<SqliteResultLike<T>> {
+    if (
+      this.sql.includes('entity_json, actor') &&
+      this.sql.includes('ORDER BY revision')
+    )
+      await this.hook();
+    return this.inner.all<T>();
+  }
+}
+
+class HookedDatabase implements SqliteDatabaseLike {
+  constructor(
+    readonly inner: SqliteDatabaseLike,
+    readonly hook: () => Promise<void>,
+  ) {}
+
+  prepare(sql: string) {
+    return new HookedStatement(sql, this.inner.prepare(sql), this.hook);
+  }
+
+  batch<T = Record<string, unknown>>(
+    statements: SqlitePreparedStatementLike[],
+  ): Promise<Array<SqliteResultLike<T>>> {
+    return this.inner.batch<T>(
+      statements.map((statement) => {
+        if (!(statement instanceof HookedStatement))
+          throw new Error('Expected a hooked statement');
+        return statement.inner;
+      }),
+    );
+  }
+}
+
 const context = (
   overrides: Partial<AuthorizationContext> = {},
 ): AuthorizationContext => ({
@@ -80,6 +134,12 @@ async function codec() {
       'decrypt',
     ]),
   );
+}
+
+async function writeKey() {
+  return crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, false, [
+    'sign',
+  ]);
 }
 
 async function exercise(db: SqliteDatabaseLike) {
@@ -144,7 +204,6 @@ async function exercise(db: SqliteDatabaseLike) {
   const listed = await reader.listEntities({ limit: 1 });
   expect(listed.items.map((entry) => entry.entityId)).toEqual(['Q1']);
   expect(listed.cursor).toBeTypeOf('string');
-  expect(listed.cursor).not.toContain('Q1');
   const listedNext = await reader.listEntities({
     limit: 1,
     cursor: listed.cursor!,
@@ -154,7 +213,7 @@ async function exercise(db: SqliteDatabaseLike) {
   const searched = await reader.searchEntities('needle', { limit: 1 });
   expect(searched.items.map((entry) => entry.value)).toEqual(['needle alpha']);
   expect(searched.cursor).toBeTypeOf('string');
-  expect(searched.cursor).not.toContain('needle');
+  expect(searched.cursor!.length).toBe(listed.cursor!.length);
   const searchedNext = await reader.searchEntities('needle', {
     limit: 1,
     cursor: searched.cursor!,
@@ -230,6 +289,38 @@ async function exercise(db: SqliteDatabaseLike) {
   await expect(admin.verifyAuditChain('Q1')).resolves.toMatchObject({
     valid: true,
   });
+  const auditCursorBeforeRepair = await reader.listAuditEvents({ limit: 1 });
+  expect(auditCursorBeforeRepair.cursor).toBeTypeOf('string');
+  await expect(admin.repairEntityProjection('Q1')).resolves.toMatchObject({
+    valid: true,
+  });
+  await expect(
+    reader.searchEntities('needle', { cursor: searched.cursor! }),
+  ).rejects.toBeInstanceOf(InvalidCursorError);
+  await expect(
+    reader.listAuditEvents({ cursor: auditCursorBeforeRepair.cursor! }),
+  ).rejects.toBeInstanceOf(InvalidCursorError);
+
+  let appendedDuringVerification = false;
+  const concurrentDb = new HookedDatabase(db, async () => {
+    if (appendedDuringVerification) return;
+    appendedDuringVerification = true;
+    await raw.setDescription('Q1', 'en', 'changed during verification', {
+      expectedRevision: firstEdited.newRevision,
+    });
+    policies.historical.set('Q1@3', denied);
+  });
+  const concurrentAdmin = createAuthorizedTaproot(
+    concurrentDb,
+    options,
+    context({ capabilities: [SEARCH_ADMIN_CAPABILITY] }),
+    policies,
+    { cursorCodec },
+  );
+  await expect(concurrentAdmin.verifyAuditChain('Q1')).rejects.toBeInstanceOf(
+    AuthorizationDeniedError,
+  );
+  expect(appendedDuringVerification).toBe(true);
 
   let searchPolicyReads = 0;
   const changingSearchSource: EntityAuthorizationSource = {
@@ -295,16 +386,71 @@ describe('authorized public canonical surface', () => {
     const db = new NodeSqliteDatabase(':memory:');
     try {
       await initializeTaproot(db, options);
+      const writeCapability = createTaprootHostWriteCapability(
+        db,
+        options,
+        await writeKey(),
+      );
       expect(() =>
-        createItem(db, { ...options, validators: [] } as never, { id: 'Q1' }),
+        createItem(
+          db,
+          { ...options, validators: [] } as never,
+          writeCapability,
+          { id: 'Q1' },
+        ),
       ).toThrow(InvalidAuthorizationError);
       expect(() =>
-        createItem(db, { ...options, maxEntityBytes: 1 } as never, {
+        createItem(
+          db,
+          { ...options, maxEntityBytes: 1 } as never,
+          writeCapability,
+          { id: 'Q1' },
+        ),
+      ).toThrow(InvalidAuthorizationError);
+      expect(() =>
+        createItem(db, { ...options, factory: {} } as never, writeCapability, {
           id: 'Q1',
         }),
       ).toThrow(InvalidAuthorizationError);
+      const otherDb = new NodeSqliteDatabase(':memory:');
+      try {
+        expect(() =>
+          createItem(otherDb, options, writeCapability, { id: 'Q1' }),
+        ).toThrow(InvalidAuthorizationError);
+      } finally {
+        await otherDb.close();
+      }
+      let forgedObservationCount = 0;
+      const forgedOptions = {
+        ...options,
+        observe: () => {
+          forgedObservationCount += 1;
+        },
+      };
+      for (const forged of [
+        undefined,
+        { kind: 'taproot-host-write-v1' },
+        JSON.parse(JSON.stringify(writeCapability)),
+      ])
+        expect(() =>
+          createItem(db, forgedOptions, forged as never, { id: 'Q1' }),
+        ).toThrow(InvalidAuthorizationError);
+      expect(forgedObservationCount).toBe(0);
       expect(() =>
-        createItem(db, { ...options, factory: {} } as never, { id: 'Q1' }),
+        createItem(
+          db,
+          { baseIri: 'https://other-installation.example' },
+          writeCapability,
+          { id: 'Q1' },
+        ),
+      ).toThrow(InvalidAuthorizationError);
+      const wrongKey = await crypto.subtle.generateKey(
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt'],
+      );
+      expect(() =>
+        createTaprootHostWriteCapability(db, options, wrongKey),
       ).toThrow(InvalidAuthorizationError);
       expect(() =>
         createAuthorizedTaproot(db, options, context(), new Policies(), {

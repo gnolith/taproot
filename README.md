@@ -52,15 +52,22 @@ import {
   createAuthorizationCursorCodec,
   createAuthorizedTaproot,
   createItem,
+  createTaprootHostWriteCapability,
   initializeTaproot,
+  setLabel,
 } from '@gnolith/taproot';
 
 await initializeTaproot(env.DB, { baseIri: 'https://knowledge.example' });
 const options = {
   baseIri: 'https://knowledge.example',
 };
+const writeCapability = createTaprootHostWriteCapability(
+  env.DB,
+  options,
+  nonExtractableHmacSha256Key,
+);
 
-const item = await createItem(env.DB, options, {
+const item = await createItem(env.DB, options, writeCapability, {
   labels: { en: { language: 'en', value: 'Ada Lovelace' } },
 });
 
@@ -72,8 +79,8 @@ const knowledge = createAuthorizedTaproot(env.DB, options, context, policies, {
 const canonical = await knowledge.getEntity(item.entityId);
 ```
 
-Never accept the AES-GCM key, authorization context, or policy source from a
-request, MCP argument, prompt, or query.
+Never accept either host key, the write capability, authorization context, or
+policy source from a request, MCP argument, prompt, or query.
 
 Use Taproot's `planTaprootMigrations`, `applyTaprootMigrations`, and
 `initializeTaproot` APIs for schema changes. The numbered SQL files document
@@ -91,23 +98,32 @@ Diamond patch together. A stale guard or any SQL/RDF failure rolls the whole
 batch back.
 
 ```ts
-const edited = await knowledge.setLabel(item.entityId, 'fr', 'Ada Lovelace', {
-  expectedRevision: item.newRevision,
-  attribution: {
-    id: 'agent:cataloguer',
-    kind: 'agent',
-    tool: 'gnolith-mcp',
+const edited = await setLabel(
+  env.DB,
+  options,
+  writeCapability,
+  item.entityId,
+  'fr',
+  'Ada Lovelace',
+  {
+    expectedRevision: item.newRevision,
+    attribution: {
+      id: 'agent:cataloguer',
+      kind: 'agent',
+      tool: 'gnolith-mcp',
+    },
+    editSummary: 'add French label',
+    tags: ['agent'],
+    requestId: 'mcp-request-123',
   },
-  editSummary: 'add French label',
-  tags: ['agent'],
-  requestId: 'mcp-request-123',
-});
+);
 ```
 
 The public API exposes canonical reads only on `AuthorizedTaprootReader`.
 Entity/history/list/term-search/audit/export and integrity operations require a
 host-created authorization context and current policy source. Public mutation
-helpers return only entity ID, previous/new revision, and committed status;
+helpers require the DB/installation-bound host write capability and return only
+entity ID, previous/new revision, and committed status;
 they do not return canonical JSON, text, RDF counts, hashes, or audit bodies.
 `TaprootRepository` and raw read helpers are intentionally absent from package
 exports in the breaking 0.3 line.

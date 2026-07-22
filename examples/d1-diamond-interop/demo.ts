@@ -6,6 +6,7 @@ import {
   createAuthorizedTaproot,
   createItem,
   createProperty,
+  createTaprootHostWriteCapability,
   exportEntityJson,
   initializeTaproot,
   setLabel,
@@ -21,21 +22,28 @@ import { createSparqlHandler } from '@gnolith/diamond';
 export async function runTaprootInteropDemo(db: D1DatabaseLike) {
   await initializeTaproot(db, { baseIri: 'https://knowledge.example' });
   const options = { baseIri: 'https://knowledge.example' };
+  const writeCapability = createTaprootHostWriteCapability(
+    db,
+    options,
+    await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, false, [
+      'sign',
+    ]),
+  );
 
-  await createProperty(db, options, {
+  await createProperty(db, options, writeCapability, {
     datatype: 'string',
     labels: { en: { language: 'en', value: 'occupation' } },
   });
-  await createProperty(db, options, {
+  await createProperty(db, options, writeCapability, {
     datatype: 'time',
     labels: { en: { language: 'en', value: 'point in time' } },
   });
-  await createProperty(db, options, {
+  await createProperty(db, options, writeCapability, {
     datatype: 'url',
     labels: { en: { language: 'en', value: 'reference URL' } },
   });
 
-  const created = await createItem(db, options, {
+  const created = await createItem(db, options, writeCapability, {
     labels: { en: { language: 'en', value: 'Ada Lovelace' } },
     descriptions: {
       en: { language: 'en', value: 'English mathematician' },
@@ -99,12 +107,20 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
       },
     ],
   };
-  const added = await addStatement(db, options, created.entityId, occupation, {
-    expectedRevision: created.newRevision,
-  });
+  const added = await addStatement(
+    db,
+    options,
+    writeCapability,
+    created.entityId,
+    occupation,
+    {
+      expectedRevision: created.newRevision,
+    },
+  );
   const preferred = await setStatementRank(
     db,
     options,
+    writeCapability,
     created.entityId,
     occupation.id,
     'preferred',
@@ -125,9 +141,16 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
     'qualifiers-order': [],
     references: [],
   };
-  await addStatement(db, options, created.entityId, unknownOccupation, {
-    expectedRevision: preferred.newRevision,
-  });
+  await addStatement(
+    db,
+    options,
+    writeCapability,
+    created.entityId,
+    unknownOccupation,
+    {
+      expectedRevision: preferred.newRevision,
+    },
+  );
 
   const sparql = createSparqlHandler({ db });
   const query = `SELECT ?occupation WHERE {
@@ -143,9 +166,17 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
 
   let staleRevisionRejected = false;
   try {
-    await setLabel(db, options, created.entityId, 'en', 'stale edit', {
-      expectedRevision: created.newRevision,
-    });
+    await setLabel(
+      db,
+      options,
+      writeCapability,
+      created.entityId,
+      'en',
+      'stale edit',
+      {
+        expectedRevision: created.newRevision,
+      },
+    );
   } catch (cause) {
     staleRevisionRejected = cause instanceof RevisionConflictError;
   }

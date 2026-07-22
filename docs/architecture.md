@@ -7,7 +7,9 @@ rebuildable projections and never become a competing statement model.
 
 Every write performs the same transaction:
 
-1. Load the current entity and enforce its expected revision.
+1. Validate the host write capability against the exact database binding and
+   installation before database access, then load the current entity and
+   enforce its expected revision.
 2. Apply commands and validate the whole document, referenced Property
    datatypes, fixed size limits, attribution, and lifecycle rules. Public write
    configuration cannot install callbacks over preexisting canonical state.

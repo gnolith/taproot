@@ -13,7 +13,13 @@ Hosts create `AuthorizationContext` values only from authenticated state and
 supply current canonical policies to `AuthorizedTaprootReader`; Taproot checks
 them before and after hydration. The normal package export has no raw canonical
 repository. Callers reaching mutations must already have write authority from
-the host; mutation receipts do not disclose canonical bodies.
+the host. Every public mutation requires a runtime-branded capability bound to
+the exact database object and normalized installation base IRI; invalid
+capabilities fail before database work or observers. Mutation receipts do not
+disclose canonical bodies. Host assembly withholds the database binding,
+capability, and host keys from request, user, agent, and MCP code. Because code
+holding the database binding can mint a capability in the same JavaScript realm,
+this is a host-process authority boundary rather than per-entity authorization.
 Attribution is a stored claim, not proof of identity. Diamond executes
 the RDF patch prepared by Taproot and exposes read-only SPARQL querying; hosts
 must not give untrusted callers an independent write path to Taproot or Diamond
@@ -37,8 +43,9 @@ tables.
   during hydration, and malformed CNF visibility. Denials have a generic body.
 - Search administration requires the exact `search:admin` capability; personas
   and generic administrator labels do not imply it.
-- Page cursors require a non-extractable host AES-GCM key and bind caller,
-  grants, operation, query/filter, auth revision, and canonical generation.
+- Page cursors require a non-extractable host AES-GCM key, use fixed-size
+  plaintext padding, and bind caller, grants, operation, query/filter, auth
+  revision, and canonical revision/audit generation.
 - Dependency and release compromise is reduced through locked installs, pinned
   GitHub Actions, dependency review, CodeQL, secret scanning, license checks,
   OIDC npm publishing, provenance, SBOMs, checksums, and attestations.

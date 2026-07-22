@@ -63,6 +63,7 @@ writeFileSync(
       addStatement,
       createItem,
       createProperty,
+      createTaprootHostWriteCapability,
       initializeTaproot,
       inspectTaprootSchema,
     } from '@gnolith/taproot';
@@ -75,12 +76,20 @@ writeFileSync(
       compatibilityFlags: ['nodejs_compat'],
       d1Databases: { DB: crypto.randomUUID() },
     });
+    let d1WriteCapability;
     try {
       const db = await miniflare.getD1Database('DB');
       const options = { baseIri: 'https://knowledge.example' };
       await initializeTaproot(db, options);
-      await createProperty(db, options, { id: 'P1', datatype: 'string' });
-      const item = await createItem(db, options, {
+      d1WriteCapability = createTaprootHostWriteCapability(
+        db,
+        options,
+        await crypto.subtle.generateKey(
+          { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+        ),
+      );
+      await createProperty(db, options, d1WriteCapability, { id: 'P1', datatype: 'string' });
+      const item = await createItem(db, options, d1WriteCapability, {
         id: 'Q1',
         labels: { en: { language: 'en', value: 'clean consumer' } },
       });
@@ -90,6 +99,7 @@ writeFileSync(
       await addStatement(
         db,
         options,
+        d1WriteCapability,
         'Q1',
         {
           id: 'Q1$consumer',
@@ -128,7 +138,14 @@ writeFileSync(
     try {
       const options = { baseIri: 'https://local.example' };
       await initializeTaproot(local, options);
-      await createItem(local, options, {
+      const localWriteCapability = createTaprootHostWriteCapability(
+        local,
+        options,
+        await crypto.subtle.generateKey(
+          { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+        ),
+      );
+      await createItem(local, options, localWriteCapability, {
         id: 'Q1',
         labels: { en: { language: 'en', value: 'packed local consumer' } },
       });
@@ -141,7 +158,7 @@ writeFileSync(
       }
       let validatorsRejected = false;
       try {
-        await createItem(local, { ...options, validators: [] }, { id: 'Q2' });
+        await createItem(local, { ...options, validators: [] }, localWriteCapability, { id: 'Q2' });
       } catch {
         validatorsRejected = true;
       }
@@ -152,12 +169,38 @@ writeFileSync(
       ]) {
         let rejected = false;
         try {
-          await createItem(local, forbiddenOptions, { id: 'Q2' });
+          await createItem(local, forbiddenOptions, localWriteCapability, { id: 'Q2' });
         } catch {
           rejected = true;
         }
         if (!rejected) throw new Error('write configuration read bypass remained');
       }
+      for (const forbiddenCapability of [
+        undefined,
+        { kind: 'taproot-host-write-v1' },
+        JSON.parse(JSON.stringify(localWriteCapability)),
+        d1WriteCapability,
+      ]) {
+        let rejected = false;
+        try {
+          await createItem(local, options, forbiddenCapability, { id: 'Q2' });
+        } catch {
+          rejected = true;
+        }
+        if (!rejected) throw new Error('write capability boundary was forgeable');
+      }
+      let crossInstallationRejected = false;
+      try {
+        await createItem(
+          local,
+          { baseIri: 'https://other.example' },
+          localWriteCapability,
+          { id: 'Q2' },
+        );
+      } catch {
+        crossInstallationRejected = true;
+      }
+      if (!crossInstallationRejected) throw new Error('write capability crossed installation');
       let deepImportRejected = false;
       try {
         await import('@gnolith/taproot/dist/repository.js');

@@ -127,11 +127,12 @@ const MAX_ATOMS_PER_CLAUSE = 64;
 const CURSOR_AAD = new TextEncoder().encode(
   'taproot-authorized-cursor-v1',
 ).buffer;
+const CURSOR_PLAINTEXT_BYTES = 1024;
 
 interface AuthorizationCursorPayload {
   version: 1;
   binding: string;
-  generation: number;
+  generation: string;
   position: unknown;
 }
 
@@ -752,6 +753,7 @@ export class AuthorizedTaprootReader {
   async verifyAuditChain(id: EntityId): Promise<EntityIntegrityReport> {
     requireSearchAdministration(this.#context);
     return this.#authorizedHydration(id, undefined, async () => {
+      const generation = await this.#generation();
       const revisions = await this.#db
         .prepare(
           `SELECT revision FROM taproot_entity_revisions
@@ -779,6 +781,7 @@ export class AuthorizedTaprootReader {
         )
           throw new AuthorizationDeniedError('Authorization denied');
       }
+      await this.#assertGeneration(generation);
       return report;
     });
   }
@@ -806,19 +809,29 @@ export class AuthorizedTaprootReader {
     });
   }
 
-  async #generation(): Promise<number> {
+  async #generation(): Promise<string> {
     const result = await this.#db
       .prepare(
-        `SELECT COALESCE(MAX(rowid), 0) AS generation FROM taproot_entity_revisions`,
+        `SELECT
+           COALESCE((SELECT MAX(rowid) FROM taproot_entity_revisions), 0) AS revision_generation,
+           COALESCE((SELECT MAX(rowid) FROM taproot_audit_events), 0) AS audit_generation`,
       )
-      .all<{ generation: number }>();
-    const generation = Number(result.results[0]?.generation ?? 0);
-    if (!Number.isSafeInteger(generation) || generation < 0)
+      .all<{ revision_generation: number; audit_generation: number }>();
+    const revisionGeneration = Number(
+      result.results[0]?.revision_generation ?? 0,
+    );
+    const auditGeneration = Number(result.results[0]?.audit_generation ?? 0);
+    if (
+      !Number.isSafeInteger(revisionGeneration) ||
+      revisionGeneration < 0 ||
+      !Number.isSafeInteger(auditGeneration) ||
+      auditGeneration < 0
+    )
       throw new AuthorizationDeniedError('Authorization denied');
-    return generation;
+    return `${revisionGeneration}:${auditGeneration}`;
   }
 
-  async #assertGeneration(expected: number): Promise<void> {
+  async #assertGeneration(expected: string): Promise<void> {
     if ((await this.#generation()) !== expected)
       throw new AuthorizationDeniedError('Authorization denied');
   }
@@ -846,14 +859,19 @@ export class AuthorizedTaprootReader {
 
   async #encodeCursor(
     binding: string,
-    generation: number,
+    generation: string,
     position: unknown,
   ): Promise<string> {
     const key = cursorCodecs.get(this.#cursorCodec)!;
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const plaintext = new TextEncoder().encode(
+    const serialized = new TextEncoder().encode(
       JSON.stringify({ version: 1, binding, generation, position }),
     );
+    if (serialized.length > CURSOR_PLAINTEXT_BYTES)
+      throw new AuthorizationDeniedError('Authorization denied');
+    const plaintext = new Uint8Array(CURSOR_PLAINTEXT_BYTES);
+    plaintext.fill(0x20);
+    plaintext.set(serialized);
     const encrypted = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv, additionalData: CURSOR_AAD },
       key,
@@ -865,7 +883,7 @@ export class AuthorizedTaprootReader {
   async #decodeCursor(
     encoded: string,
     binding: string,
-    generation: number,
+    generation: string,
   ): Promise<AuthorizationCursorPayload> {
     try {
       if (encoded.length > 4096) throw new Error('invalid cursor');

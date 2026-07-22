@@ -40,9 +40,12 @@ and repair additionally require the exact `search:admin` capability.
 - `repairEntityProjection`
 
 All updates require `expectedRevision`. Public write helpers return a minimal
-`MutationReceipt`, never canonical content. Redirects must target a live entity of
-the same type and cannot create a cycle. `resolveEntity` follows a bounded
-chain and reports every hop.
+`MutationReceipt`, never canonical content, and require a
+`TaprootHostWriteCapability` created with a non-extractable HMAC-SHA-256 host
+key. The capability is process-local and bound to the exact database object and
+normalized base IRI; it cannot be serialized or reused across bindings or
+installations. Redirects must target a live entity of the same type and cannot
+create a cycle. `resolveEntity` follows a bounded chain and reports every hop.
 
 `createStatement` and `createReference` build correctly shaped values. Import
 accepts trusted explicit Q/P IDs and advances counters. `importEntities`
@@ -69,7 +72,8 @@ Public `TaprootWriteOptions` support `requireAttribution`, `clock`, `createId`,
 and a caller-selected entity-size limit because those can observe preexisting
 canonical content during a mutation. Hosts perform domain validation over
 separately authorized input. Observers cannot fail or roll back committed
-writes.
+writes. Host assembly must not expose the database binding or write capability
+to request, user, agent, or MCP code.
 
 All domain failures extend `TaprootError` and expose a stable uppercase
 snake-case `code` in addition to their exported class for `instanceof` checks.
