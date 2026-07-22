@@ -202,7 +202,7 @@ describe('legacy migration interruption recovery', () => {
       await initializeTaproot(db, { baseIri });
       await db.batch([db.prepare(`DELETE FROM taproot_rdf_ownership`)]);
 
-      expect(await taprootLedgerCount(db)).toBe(4);
+      expect(await taprootLedgerCount(db)).toBe(5);
       await expect(inspectTaprootPersistence(db)).resolves.toMatchObject({
         current: false,
       });
@@ -238,7 +238,7 @@ describe('legacy migration interruption recovery', () => {
         ),
       ]);
 
-      expect(await taprootLedgerCount(db)).toBe(4);
+      expect(await taprootLedgerCount(db)).toBe(5);
       expect(
         await scalar(db, `SELECT COUNT(*) AS count FROM taproot_rdf_ownership`),
       ).toBe(ownershipBefore);
@@ -483,7 +483,7 @@ async function expectCurrentRecoveredState(
   expect(await metadata(db, 'migration_source')).toBeUndefined();
   expect(await metadata(db, 'migration_source_rdf_version')).toBeUndefined();
   expect(await metadata(db, 'migration_source_base_iri')).toBeUndefined();
-  expect(await taprootLedgerCount(db)).toBe(4);
+  expect(await taprootLedgerCount(db)).toBe(5);
   expect(
     await scalar(
       db,
@@ -504,9 +504,10 @@ async function expectCurrentRecoveredState(
        WHERE (version = 1 AND name = 'initial')
            OR (version = 2 AND name = 'audit-and-operations')
            OR (version = 3 AND name = 'canonical-statement-text')
-           OR (version = 4 AND name = 'canonical-authorization-policy')`,
+           OR (version = 4 AND name = 'canonical-authorization-policy')
+           OR (version = 5 AND name = 'unified-search-source-events')`,
     ),
-  ).toBe(4);
+  ).toBe(5);
 }
 
 async function metadata(

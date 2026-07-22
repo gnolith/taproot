@@ -38,6 +38,14 @@ and explicit entity/statement policy. No visibility is inferred, and policy,
 outbox, audit, authorization revision, and search generation publish in one
 batch.
 
+Migration 5 adds the immutable unified-search source-event log and current
+source registry. The only supported predecessor is the exact released
+migration-0004 catalog. The migration is DDL-only and performs no backfill;
+existing canonical rows receive a first root event only on a later authorized
+mutation. Event and registry publication share the authoritative domain write
+transaction and generation CAS. These tables are not a job queue and do not
+provide leasing, health, rebuild, or materialization.
+
 Hosts can call `planTaprootMigrations(db)`,
 `inspectTaprootPersistence(db)`, and
 `applyTaprootMigrations(db, { baseIri })`. Planning and inspection are

@@ -14,6 +14,15 @@ unsupported errors for deferred projectors. The packed consumer repeats the
 public serialization, pure projection, and forged-authority checks from the
 installed tarball.
 
+`test/search-source-events.test.ts` qualifies migration 0005 on persisted
+Node SQLite and real Workerd D1: exact predecessor, drift, no backfill, restart,
+immutable catalog rules, seven-kind validation, opaque guard authority, exact
+and divergent replay, predecessor races, rollback, generation cardinality,
+Item-root statement/authorization/lifecycle events, disclosure canaries,
+bounded payloads, and indexed lookup. The packed consumer repeats guard
+nonconstructibility and one atomic source event from the installed tarball.
+The reproducible capped 100k artifact records latency without imposing an SLA.
+
 The Workerd suite exercises successful edits, malformed and oversized input,
 optimistic conflicts, concurrent writers, migration, immutable history,
 projection repair, shared RDF values, and injected RDF failures. The injected

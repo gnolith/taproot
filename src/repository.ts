@@ -37,6 +37,10 @@ import { withoutTrailingSlashes } from './iri.js';
 import { canonicalizeTaprootBaseIri } from './migrations.js';
 import { TAPROOT_RDF_VERSION } from './schema.js';
 import {
+  prepareUnifiedSearchSourceEventStatementsV1,
+  readPersistedSearchSourceRegistryV1,
+} from './search-source-events.js';
+import {
   intersectVisibilityScopes,
   isVisibleTo,
   normalizeCanonicalAuthorizationPolicy,
@@ -1700,6 +1704,15 @@ export class TaprootRepository {
           undefined,
         ),
       );
+    if (authorization && entity.type === 'item')
+      statements.push(
+        ...(await this.#itemSearchSourceEventStatements(
+          entity,
+          lifecycle,
+          context,
+          authorization,
+        )),
+      );
     const patchOffset = statements.length;
     statements.push(...patch.statements);
     const ownership = this.#ownershipPatch(entity.id, [], newQuads);
@@ -1882,6 +1895,15 @@ export class TaprootRepository {
           authorization,
           previous,
         ),
+      );
+    if (authorization && next.type === 'item')
+      statements.push(
+        ...(await this.#itemSearchSourceEventStatements(
+          next,
+          newLifecycle,
+          context,
+          authorization,
+        )),
       );
     const patchOffset = statements.length;
     statements.push(...patch.statements);
@@ -2505,6 +2527,57 @@ export class TaprootRepository {
         ),
     );
     return statements;
+  }
+
+  async #itemSearchSourceEventStatements(
+    entity: Item,
+    lifecycle: Lifecycle,
+    context: WriteContext,
+    authorization: PreparedAuthorizationWrite,
+  ): Promise<readonly SqlitePreparedStatementLike[]> {
+    const predecessor = await readPersistedSearchSourceRegistryV1(
+      this.#db,
+      authorization.policy.installationId,
+      'item',
+      entity.id,
+    );
+    if (predecessor && predecessor.domain !== 'knowledge')
+      throw new AuthorizationDeniedError(
+        'Item search source is owned by another domain',
+      );
+    const changeClass =
+      authorization.action === 'policy-change'
+        ? 'authorization'
+        : lifecycle.deletedAt ||
+            lifecycle.redirectTo ||
+            context.eventType === 'restore'
+          ? 'eligibility'
+          : 'canonical';
+    const prepared = await prepareUnifiedSearchSourceEventStatementsV1(
+      this.#db,
+      {
+        installationId: authorization.policy.installationId,
+        domain: 'knowledge',
+        sourceKind: 'item',
+        authorizationRevision: authorization.authorizationRevision,
+        searchGeneration: authorization.searchGeneration,
+        createdAt: context.createdAt,
+      },
+      {
+        eventId: context.eventId,
+        sourceId: entity.id,
+        operation:
+          lifecycle.deletedAt || lifecycle.redirectTo ? 'delete' : 'upsert',
+        changeClass,
+        sourceRevision: String(entity.lastrevid),
+        sourceHash: context.contentHash,
+        predecessor: predecessor
+          ? { eventId: predecessor.eventId, sequence: predecessor.sequence }
+          : null,
+      },
+      ['canonical', 'authorization', 'eligibility'],
+    );
+    return prepared.statements;
   }
 
   #preparePatch(patch: Parameters<typeof prepareQuadPatch>[1]) {

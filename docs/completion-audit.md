@@ -14,7 +14,7 @@ This audit covers the complete Taproot package boundary defined in
 | Shared RDF safety          | Per-entity quad ownership and behavioral regression covering a shared full-value node during another entity's edit                                                    |
 | Search/read scale          | Authorization-required entity/revision/audit pages, bounded candidate scans, and fixed-size opaque caller/query/auth-revision/revision-audit-generation-bound cursors |
 | Bulk/agent workflows       | Multi-command single revision, bounded create/upsert import with indexed errors, NDJSON export, request correlation                                                   |
-| Migration                  | Checksummed migrations through v4, v1 hash/audit recovery, statement-text gate, and explicit bounded authorization-policy backfill                                    |
+| Migration                  | Checksummed migrations through v5, v1 hash/audit recovery, statement-text gate, bounded authorization-policy backfill, and DDL-only source-event catalog              |
 | Integrity/repair           | Schema inspection, audit-chain verification, JSON/revision/term/RDF comparison, cursor scan, audited reprojection repair                                              |
 | Extension points           | Host bootstrap capability plus DB/installation-bound normal-write guard, required attribution, isolated observations, injected clock/IDs; no observing callbacks      |
 | Package operations/release | Architecture/API/persistence/scope/security/testing docs, Node 22/24 CI, packed consumer, license and release gates                                                   |

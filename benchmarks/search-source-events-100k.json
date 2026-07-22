@@ -1,0 +1,24 @@
+{
+  "artifactVersion": 1,
+  "recordedAt": "2026-07-22T10:36:26.522Z",
+  "runtime": {
+    "node": "v24.14.0",
+    "sqliteAdapter": "@gnolith/diamond/node-sqlite"
+  },
+  "workload": {
+    "sourceEvents": 100000,
+    "sourceKinds": ["task"],
+    "sourcesPerBatch": 50,
+    "statementsPerSource": 2,
+    "payloadShape": "metadata-only-v1"
+  },
+  "result": {
+    "events": 100000,
+    "registry": 100000,
+    "elapsedMs": 12440.665,
+    "eventsPerSecond": 8038.155,
+    "databaseBytes": 91348992,
+    "replayLookupPlan": "SEARCH taproot_unified_search_source_events USING INDEX sqlite_autoindex_taproot_unified_search_source_events_2 (installation_id=? AND source_kind=? AND source_id=? AND source_revision=?)"
+  },
+  "sla": null
+}

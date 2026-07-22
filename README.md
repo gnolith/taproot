@@ -36,8 +36,10 @@ capability, and a process-local `node:sqlite` adapter.
   redirect resolution, integrity verification, deterministic repair, schema/RDF
   migrations, validation policies, and write observations.
 - A versioned unified-search contract with deterministic serialization and pure
-  authorization-preserving Statement/Item projection planning; it does not yet
-  execute or persist unified search. See `docs/search-contract.md`.
+  authorization-preserving Statement/Item projection planning, plus an atomic
+  metadata-only source-event boundary for later materialization. It does not
+  execute search. See `docs/search-contract.md` and
+  `docs/search-source-events.md`.
 
 It does not own authentication, MCP, agents, tasks, UI, wiki articles, media
 bytes, or arbitrary SPARQL Update. Canonical entity JSON is authoritative;
@@ -104,6 +106,10 @@ Use Taproot's `planTaprootMigrations`, `applyTaprootMigrations`, and
 the historical 0.1 layout and are not an operator migration interface in 0.3.
 The package APIs own checksums, conservative adoption, application-level
 SHA-256 backfills, and RDF reprojection.
+
+Migration 0005 is DDL-only and creates an empty immutable unified-search source
+event log plus current registry. It does not backfill canonical rows or start a
+worker. Item mutations emit one root event in their canonical transaction.
 
 ## Editing
 

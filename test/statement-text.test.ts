@@ -10,6 +10,7 @@ import {
   initializeTaproot,
   legacyTaprootV1Statements,
   taprootAuthorizationSchemaStatements,
+  taprootSearchSourceEventSchemaStatements,
   type EntityCommand,
   type SqliteDatabaseLike,
   type SqlitePreparedStatementLike,
@@ -416,7 +417,8 @@ async function downgradeStatementTextMigration(
        WHERE namespace = '@gnolith/taproot'
          AND migration_id IN (
            '0003-canonical-statement-text',
-           '0004-canonical-authorization-policy'
+           '0004-canonical-authorization-policy',
+           '0005-unified-search-source-events'
          )`,
     ),
     db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),
@@ -428,7 +430,10 @@ async function downgradeStatementTextMigration(
 }
 
 async function dropAuthorizationSchema(db: SqliteDatabaseLike): Promise<void> {
-  const objects = taprootAuthorizationSchemaStatements
+  const objects = [
+    ...taprootAuthorizationSchemaStatements,
+    ...taprootSearchSourceEventSchemaStatements,
+  ]
     .map((sql) =>
       /^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS ([a-z0-9_]+)/iu.exec(sql),
     )

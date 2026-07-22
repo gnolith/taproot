@@ -5,6 +5,10 @@ serialization utilities, and pure Statement/Item projectors are documented in
 [search-contract.md](search-contract.md). They do not replace the legacy
 term-search types or SPARQL surface and do not execute a search.
 
+The metadata-only persistence boundary is documented in
+[search-source-events.md](search-source-events.md). It records authoritative
+source changes but does not materialize or query an index.
+
 ## Persistence and migrations
 
 Taproot accepts Diamond's runtime-neutral `SqliteDatabaseLike`; the exported
@@ -95,6 +99,12 @@ guard bound at host assembly to one exact non-Knowledge domain and capability.
 Its batches return only the domain-statement results plus the fenced counters;
 they do not advance either counter. Knowledge advances require both
 `knowledge:write` and `knowledge:policy`.
+`createInstallationSearchSourceGuardV1` issues an opaque non-Knowledge guard
+bound to one database, installation, domain, source kind, capability, and set
+of change classes. Its `batchWithSourceEvent` method atomically commits sibling
+domain SQL, one persisted search-generation advance, one immutable source
+event, and the current source registry. Exact replay is a no-op; divergent or
+stale-predecessor replay fails.
 `inspectTaprootAuthorizationReadiness`,
 `planTaprootAuthorizationBackfill`, and
 `applyTaprootAuthorizationBackfill` are host-controlled, exact
