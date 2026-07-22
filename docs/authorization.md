@@ -45,9 +45,10 @@ other personas do not imply it.
 from the package export. Normal consumers cannot hydrate canonical entities,
 history, lists, term matches, audit payloads, exports, or integrity diagnostics
 without `AuthorizedTaprootReader`. Public writes return minimal receipts and
-reject validator callbacks, preventing writes from becoming an implicit read
-channel. Package migrations and schema inspection remain host operations but
-do not return canonical content.
+reject validator/RDF-factory callbacks and configurable entity-size probes,
+preventing writes from becoming an implicit read channel. Package migrations
+and schema inspection remain host operations but do not return canonical
+content.
 
 Authorized page cursors are AES-GCM encrypted/authenticated with a branded
 codec created from a durable, non-extractable host key. Taproot binds each

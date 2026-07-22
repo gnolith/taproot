@@ -8,8 +8,9 @@ rebuildable projections and never become a competing statement model.
 Every write performs the same transaction:
 
 1. Load the current entity and enforce its expected revision.
-2. Apply commands, validate the whole document, referenced Property
-   datatypes, host validators, size limits, attribution, and lifecycle rules.
+2. Apply commands and validate the whole document, referenced Property
+   datatypes, fixed size limits, attribution, and lifecycle rules. Public write
+   configuration cannot install callbacks over preexisting canonical state.
 3. Serialize canonical JSON and compute its SHA-256 content/parent hashes.
 4. Build the complete RDF closure and search-term projection.
 5. Commit the current row, immutable revision, audit event, terms, RDF patch,

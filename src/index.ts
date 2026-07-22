@@ -50,9 +50,13 @@ function repository(
   db: D1DatabaseLike,
   options: TaprootWriteOptions,
 ): TaprootRepository {
-  if ('validators' in options)
+  if (
+    'validators' in options ||
+    'factory' in options ||
+    'maxEntityBytes' in options
+  )
     throw new InvalidAuthorizationError(
-      'write options cannot install canonical-state validators',
+      'write options cannot install canonical-state observers or size probes',
     );
   return new TaprootRepository(db, options);
 }
@@ -65,8 +69,13 @@ export interface MutationReceipt {
 }
 
 /** Write configuration cannot install a callback that observes canonical state. */
-export type TaprootWriteOptions = Omit<TaprootOptions, 'validators'> & {
+export type TaprootWriteOptions = Omit<
+  TaprootOptions,
+  'validators' | 'factory' | 'maxEntityBytes'
+> & {
   validators?: never;
+  factory?: never;
+  maxEntityBytes?: never;
 };
 
 export interface BulkMutationReceipt {

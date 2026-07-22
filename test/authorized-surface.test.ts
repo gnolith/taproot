@@ -299,6 +299,14 @@ describe('authorized public canonical surface', () => {
         createItem(db, { ...options, validators: [] } as never, { id: 'Q1' }),
       ).toThrow(InvalidAuthorizationError);
       expect(() =>
+        createItem(db, { ...options, maxEntityBytes: 1 } as never, {
+          id: 'Q1',
+        }),
+      ).toThrow(InvalidAuthorizationError);
+      expect(() =>
+        createItem(db, { ...options, factory: {} } as never, { id: 'Q1' }),
+      ).toThrow(InvalidAuthorizationError);
+      expect(() =>
         createAuthorizedTaproot(db, options, context(), new Policies(), {
           cursorCodec: { kind: 'taproot-aes-gcm-v1' },
         }),

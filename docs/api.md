@@ -64,9 +64,12 @@ An edit can contain structured `attribution`, `editSummary`, sorted/deduplicated
 `system`. The legacy `actor` string remains accepted and is normalized to a
 human attribution record.
 
-Set `requireAttribution`, `validators`, `clock`, `createId`, `observe`, entity
-size, and bulk limits in `TaprootOptions`. Validators run before the D1 batch.
-Observers cannot fail or roll back committed writes.
+Public `TaprootWriteOptions` support `requireAttribution`, `clock`, `createId`,
+`observe`, and bulk limits. They deliberately reject validators, RDF factories,
+and a caller-selected entity-size limit because those can observe preexisting
+canonical content during a mutation. Hosts perform domain validation over
+separately authorized input. Observers cannot fail or roll back committed
+writes.
 
 All domain failures extend `TaprootError` and expose a stable uppercase
 snake-case `code` in addition to their exported class for `instanceof` checks.

@@ -146,6 +146,18 @@ writeFileSync(
         validatorsRejected = true;
       }
       if (!validatorsRejected) throw new Error('write validator read bypass remained');
+      for (const forbiddenOptions of [
+        { ...options, factory: {} },
+        { ...options, maxEntityBytes: 1 },
+      ]) {
+        let rejected = false;
+        try {
+          await createItem(local, forbiddenOptions, { id: 'Q2' });
+        } catch {
+          rejected = true;
+        }
+        if (!rejected) throw new Error('write configuration read bypass remained');
+      }
       let deepImportRejected = false;
       try {
         await import('@gnolith/taproot/dist/repository.js');

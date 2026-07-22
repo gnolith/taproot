@@ -118,9 +118,11 @@ new logical statement revision. `replaceEntity` and `revertEntity` require an
 exact `statementTexts` map for every statement they carry forward. Reusing old
 wording is allowed only when the caller deliberately supplies it again.
 
-Set `requireAttribution: true` to reject unattributed writes. `validators`
-provide host policy checks without coupling Taproot to authentication, and
-`observe` receives isolated success/error timing records for committed writes.
+Set `requireAttribution: true` to reject unattributed writes. `observe` receives
+isolated success/error timing records. Public write options cannot install
+validators or RDF factories over canonical state and cannot vary the canonical
+entity-size limit; hosts perform domain validation before invoking the write
+using separately authorized input.
 
 ## SPARQL prefixes
 

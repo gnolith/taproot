@@ -16,7 +16,7 @@ This audit covers the complete Taproot package boundary defined in
 | Bulk/agent workflows       | Multi-command single revision, bounded create/upsert import with indexed errors, NDJSON export, request correlation                         |
 | Migration                  | Versioned SQL, programmatic v1 hash/audit backfill, resumable v1-to-v2 RDF reprojection and ownership creation                              |
 | Integrity/repair           | Schema inspection, audit-chain verification, JSON/revision/term/RDF comparison, cursor scan, audited reprojection repair                    |
-| Extension points           | Required attribution, async host validators, isolated observations, injected clock and IDs                                                  |
+| Extension points           | Required attribution, isolated observations, injected clock and IDs; no state-observing public write callbacks                              |
 | Package operations/release | Architecture/API/persistence/scope/security/testing docs, Node 22/24 CI, packed consumer, license and release gates                         |
 
 ## Reproduction
