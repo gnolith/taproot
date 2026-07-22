@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - **Breaking 0.3 API:** removed `TaprootRepository`, `createTaproot`, and every
   unscoped canonical read helper from the normal package export. Canonical
