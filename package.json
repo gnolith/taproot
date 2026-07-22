@@ -1,6 +1,6 @@
 {
   "name": "@gnolith/taproot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Portable SQLite and D1 Wikibase-compatible knowledge graph and revision layer for Gnolith.",
   "author": "Gnolith contributors",
   "keywords": [

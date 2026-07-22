@@ -7,7 +7,7 @@ import {
   AuthorizationDeniedError,
   InvalidAuthorizationError,
   SEARCH_ADMIN_CAPABILITY,
-  TaprootRepository,
+  createAuthorizationCursorCodec,
   createAuthorizedTaproot,
   hasSearchAdministration,
   initializeTaproot,
@@ -25,9 +25,21 @@ import {
   type InstallationAuthorizationState,
   type VisibilityScopeV1,
 } from '../src/index.js';
+import { TaprootRepository } from '../src/repository.js';
 
 const options = { baseIri: 'https://knowledge.example' };
 const temporaryDirectories: string[] = [];
+
+async function authorizedOptions() {
+  return {
+    cursorCodec: createAuthorizationCursorCodec(
+      await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, [
+        'encrypt',
+        'decrypt',
+      ]),
+    ),
+  };
+}
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0))
@@ -199,6 +211,7 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
         options,
         context(),
         source,
+        await authorizedOptions(),
       );
       await expect(authorized.getEntity('Q1')).resolves.toMatchObject({
         entity: { id: 'Q1' },
@@ -219,6 +232,7 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
           options,
           context(),
           deniedSource,
+          await authorizedOptions(),
         ).getEntity('Q1'),
       ).rejects.toMatchObject({
         code: 'AUTHORIZATION_DENIED',
@@ -235,6 +249,7 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
             options,
             invalidContext,
             source,
+            await authorizedOptions(),
           ).getEntity('Q1'),
         ).rejects.toBeInstanceOf(AuthorizationDeniedError);
       }
@@ -259,6 +274,7 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
           options,
           context(),
           changing,
+          await authorizedOptions(),
         ).getEntity('Q1'),
       ).rejects.toBeInstanceOf(AuthorizationDeniedError);
 
@@ -269,6 +285,7 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
           options,
           context(),
           missing,
+          await authorizedOptions(),
         ).getEntity('Q1'),
       ).rejects.toBeInstanceOf(AuthorizationDeniedError);
 
@@ -292,6 +309,7 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
           options,
           context(),
           revoked,
+          await authorizedOptions(),
         ).getEntityRevision('Q1', 1),
       ).rejects.toBeInstanceOf(AuthorizationDeniedError);
       expect(revoked.historicalReads).toBe(0);
@@ -302,6 +320,7 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
           options,
           context(),
           revoked,
+          await authorizedOptions(),
         ).getEntityRevision('Q1', 1),
       ).rejects.toBeInstanceOf(AuthorizationDeniedError);
       expect(revoked.historicalReads).toBe(0);
@@ -320,6 +339,7 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
           options,
           context(),
           failing,
+          await authorizedOptions(),
         ).getEntity('Q1'),
       ).rejects.toMatchObject({
         message: 'Authorization denied',
@@ -344,6 +364,7 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
           options,
           context(),
           malformed,
+          await authorizedOptions(),
         ).getEntity('Q1'),
       ).rejects.toMatchObject({
         message: 'Authorization denied',

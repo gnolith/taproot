@@ -1,10 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import {
-  InvalidEntityError,
-  TaprootRepository,
-  parseEntityJson,
-} from '../src/index.js';
+import { InvalidEntityError, parseEntityJson } from '../src/index.js';
+import { TaprootRepository } from '../src/repository.js';
 
 describe('package release guard', () => {
   it('is a public package backed only by registry dependencies', () => {
@@ -20,7 +17,7 @@ describe('package release guard', () => {
     expect(manifest).toMatchObject({
       name: '@gnolith/taproot',
       private: false,
-      version: '0.2.0',
+      version: '0.3.0',
       publishConfig: { access: 'public', provenance: true },
     });
     expect(manifest.dependencies['@gnolith/diamond']).toBe('0.4.0');

@@ -9,7 +9,6 @@ import {
   RevisionConflictError,
   SchemaMismatchError,
   TaprootMigrationStateError,
-  TaprootRepository,
   applyTaprootMigrations,
   initializeTaproot,
   inspectTaprootPersistence,
@@ -19,6 +18,7 @@ import {
   type D1DatabaseLike,
   type SqliteDatabaseLike,
 } from '../src/index.js';
+import { TaprootRepository } from '../src/repository.js';
 
 const baseIri = 'https://knowledge.example';
 const temporaryDirectories: string[] = [];

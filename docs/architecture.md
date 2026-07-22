@@ -29,3 +29,8 @@ attribution/audit history, deterministic projections, migration, integrity,
 and repair. It deliberately does not own authentication, authorization, MCP,
 agents, UI, wiki article bodies, media storage, or arbitrary SPARQL Update.
 It also does not own Site assembly, provisioning, deployment, or acceptance.
+
+The normal package export contains no raw canonical repository. Diamond's raw
+SPARQL view covers the complete projection and is privileged maintenance/debug
+infrastructure until a host builds an authorization-scoped dataset and applies
+the owning canonical domain's final hydration recheck.

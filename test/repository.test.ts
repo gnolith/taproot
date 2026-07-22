@@ -12,7 +12,6 @@ import {
   QuadPatchTooLargeError,
   RevisionConflictError,
   SchemaMismatchError,
-  TaprootRepository,
   TaprootMigrationStateError,
   applyTaprootMigrations,
   initializeTaproot,
@@ -23,6 +22,7 @@ import {
   type Snak,
   type Statement,
 } from '../src/index.js';
+import { TaprootRepository } from '../src/repository.js';
 
 const options = { baseIri: 'https://knowledge.example' };
 

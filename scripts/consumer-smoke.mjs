@@ -58,8 +58,11 @@ writeFileSync(
   `
     import { createSparqlHandler } from '@gnolith/diamond';
     import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
+    import * as taprootApi from '@gnolith/taproot';
     import {
-      TaprootRepository,
+      addStatement,
+      createItem,
+      createProperty,
       initializeTaproot,
       inspectTaprootSchema,
     } from '@gnolith/taproot';
@@ -74,16 +77,19 @@ writeFileSync(
     });
     try {
       const db = await miniflare.getD1Database('DB');
-      await initializeTaproot(db, { baseIri: 'https://knowledge.example' });
-      const taproot = new TaprootRepository(db, {
-        baseIri: 'https://knowledge.example',
-      });
-      await taproot.createProperty({ id: 'P1', datatype: 'string' });
-      const item = await taproot.createItem({
+      const options = { baseIri: 'https://knowledge.example' };
+      await initializeTaproot(db, options);
+      await createProperty(db, options, { id: 'P1', datatype: 'string' });
+      const item = await createItem(db, options, {
         id: 'Q1',
         labels: { en: { language: 'en', value: 'clean consumer' } },
       });
-      await taproot.addStatement(
+      if ('entity' in item || 'quadPatch' in item || item.status !== 'committed') {
+        throw new Error('public write receipt disclosed canonical state');
+      }
+      await addStatement(
+        db,
+        options,
         'Q1',
         {
           id: 'Q1$consumer',
@@ -120,14 +126,33 @@ writeFileSync(
 
     const local = new NodeSqliteDatabase(':memory:');
     try {
-      await initializeTaproot(local, { baseIri: 'https://local.example' });
-      const taproot = new TaprootRepository(local, {
-        baseIri: 'https://local.example',
-      });
-      await taproot.createItem({
+      const options = { baseIri: 'https://local.example' };
+      await initializeTaproot(local, options);
+      await createItem(local, options, {
         id: 'Q1',
         labels: { en: { language: 'en', value: 'packed local consumer' } },
       });
+      for (const forbidden of [
+        'TaprootRepository', 'createTaproot', 'getEntity', 'listEntities',
+        'searchEntities', 'listAuditEvents', 'exportEntities',
+        'inspectEntityIntegrity', 'repairEntityProjection',
+      ]) {
+        if (forbidden in taprootApi) throw new Error('raw read bypass exported: ' + forbidden);
+      }
+      let validatorsRejected = false;
+      try {
+        await createItem(local, { ...options, validators: [] }, { id: 'Q2' });
+      } catch {
+        validatorsRejected = true;
+      }
+      if (!validatorsRejected) throw new Error('write validator read bypass remained');
+      let deepImportRejected = false;
+      try {
+        await import('@gnolith/taproot/dist/repository.js');
+      } catch (error) {
+        deepImportRejected = error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED';
+      }
+      if (!deepImportRejected) throw new Error('raw repository deep import remained available');
       const schema = await inspectTaprootSchema(local);
       if (!schema.valid) throw new Error('fresh node:sqlite schema inspection failed');
     } finally {

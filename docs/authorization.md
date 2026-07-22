@@ -39,16 +39,29 @@ access and can never resurrect revoked authority.
 `requireSearchAdministration`. `admin`, `administrator`, `assistant`, and
 other personas do not imply it.
 
-## Compatibility boundary
+## Public boundary in 0.3
 
-The pre-search `TaprootRepository` and its top-level helpers remain exported in
-0.2 for trusted migration, repair, import, and package compatibility. They are
-not an authorization-enforcing application/search boundary and do not satisfy
-the Search Contract. Hosts must not expose them to request, agent, MCP, or
-search callers. Removing or capability-gating that legacy surface is tracked
-in [Taproot issue 24](https://github.com/gnolith/taproot/issues/24) and is
-required before the combined search release can claim that every public
-canonical read path is authorization-enforcing.
+`TaprootRepository`, `createTaproot`, and the old raw read helpers are absent
+from the package export. Normal consumers cannot hydrate canonical entities,
+history, lists, term matches, audit payloads, exports, or integrity diagnostics
+without `AuthorizedTaprootReader`. Public writes return minimal receipts and
+reject validator callbacks, preventing writes from becoming an implicit read
+channel. Package migrations and schema inspection remain host operations but
+do not return canonical content.
+
+Authorized page cursors are AES-GCM encrypted/authenticated with a branded
+codec created from a durable, non-extractable host key. Taproot binds each
+cursor to operation, normalized query/filter, installation, principal,
+workspace grants, capabilities, authorization revision, and current canonical
+revision generation. A cursor is not usable after mutation, revocation, with
+another query, or by another context. Failures are generic. Candidates are
+selected as identifiers, authorized, then hydrated; denied candidates are
+skipped while bounded scans continue to fill an authorized page.
+
+This surface closure is not canonical policy persistence. Until Taproot's
+follow-up persistence issue lands, hosts have no package-owned authoritative
+policy store and the Search Contract IDs named above remain incomplete. Legacy
+canonical rows must fail closed; they must never be interpreted as public.
 
 Taproot deliberately does not persist principals, memberships, or sessions.
 The owning host/domain supplies canonical authorization records through

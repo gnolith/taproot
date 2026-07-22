@@ -1,6 +1,6 @@
 # Wikibase compatibility target
 
-Taproot 0.2.x requires `@gnolith/diamond` 0.4.0 exactly. Existing Cloudflare D1
+Taproot 0.3.x requires `@gnolith/diamond` 0.4.0 exactly. Existing Cloudflare D1
 objects remain compatible with the exported `D1DatabaseLike` surface. New
 embedders may use the equivalent `SqliteDatabaseLike`; both require one
 adapter/connection with ordered atomic batch semantics.
@@ -25,8 +25,9 @@ Intentional differences:
   lifecycle RDF; deleted content remains available in immutable revisions.
 - Search is a deterministic D1 term projection using case-insensitive
   substring matching. FTS5 is not required.
-- Taproot stores attribution claims but does not authenticate them. Identity
-  verification, authorization, and agent/MCP transport remain host concerns.
+- Taproot stores attribution claims but does not authenticate them. Normal
+  canonical reads require a host-created authorization context and current
+  policy source. Authentication and agent/MCP transport remain host concerns.
 - The compatibility target is Wikibase core Items and Properties. Lexemes,
   Forms, Senses, EntitySchemas, MediaInfo, MediaWiki page metadata, and
   normalized external-ID formatter URLs are not claimed as supported entity

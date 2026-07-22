@@ -11,8 +11,9 @@ association between an edit and its claimed attribution metadata.
 Taproot assumes its consumer supplies a SQLite/D1 binding and absolute base IRI.
 Hosts create `AuthorizationContext` values only from authenticated state and
 supply current canonical policies to `AuthorizedTaprootReader`; Taproot checks
-them before and after hydration. Callers reaching mutations and the legacy
-trusted-maintenance repository must already have been authorized by the host.
+them before and after hydration. The normal package export has no raw canonical
+repository. Callers reaching mutations must already have write authority from
+the host; mutation receipts do not disclose canonical bodies.
 Attribution is a stored claim, not proof of identity. Diamond executes
 the RDF patch prepared by Taproot and exposes read-only SPARQL querying; hosts
 must not give untrusted callers an independent write path to Taproot or Diamond
@@ -36,6 +37,8 @@ tables.
   during hydration, and malformed CNF visibility. Denials have a generic body.
 - Search administration requires the exact `search:admin` capability; personas
   and generic administrator labels do not imply it.
+- Page cursors require a non-extractable host AES-GCM key and bind caller,
+  grants, operation, query/filter, auth revision, and canonical generation.
 - Dependency and release compromise is reduced through locked installs, pinned
   GitHub Actions, dependency review, CodeQL, secret scanning, license checks,
   OIDC npm publishing, provenance, SBOMs, checksums, and attestations.
@@ -52,7 +55,9 @@ D1 contract. They do not qualify a deployed host. The Codex agent creating a
 Site owns assembly, provisioning, route and security wiring, deployment, backup
 policy, and production acceptance.
 
-The legacy `TaprootRepository` is retained for trusted maintenance and 0.2
-compatibility and can bypass `AuthorizedTaprootReader`. It must not be exposed
-to untrusted callers; capability-gating or removal is a blocking follow-up for
-the combined search release.
+Diamond's database-level SPARQL handler sees Taproot's complete RDF projection
+and is therefore privileged host maintenance/debug infrastructure, not a
+normal user, agent, MCP, or search endpoint. Workshop must construct an
+authorization-scoped dataset (with a final canonical recheck) before exposing
+SPARQL results. Possession of the SQLite/D1 binding itself remains privileged:
+a compromised host can query tables outside any package API.

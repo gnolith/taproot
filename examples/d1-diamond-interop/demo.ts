@@ -1,33 +1,41 @@
 import {
   RevisionConflictError,
-  TaprootRepository,
+  SEARCH_ADMIN_CAPABILITY,
+  addStatement,
+  createAuthorizationCursorCodec,
+  createAuthorizedTaproot,
+  createItem,
+  createProperty,
   exportEntityJson,
   initializeTaproot,
+  setLabel,
+  setStatementRank,
+  type CanonicalAuthorizationRecord,
   type D1DatabaseLike,
+  type EntityAuthorizationSource,
+  type EntityId,
   type Statement,
 } from '@gnolith/taproot';
 import { createSparqlHandler } from '@gnolith/diamond';
 
 export async function runTaprootInteropDemo(db: D1DatabaseLike) {
   await initializeTaproot(db, { baseIri: 'https://knowledge.example' });
-  const taproot = new TaprootRepository(db, {
-    baseIri: 'https://knowledge.example',
-  });
+  const options = { baseIri: 'https://knowledge.example' };
 
-  await taproot.createProperty({
+  await createProperty(db, options, {
     datatype: 'string',
     labels: { en: { language: 'en', value: 'occupation' } },
   });
-  await taproot.createProperty({
+  await createProperty(db, options, {
     datatype: 'time',
     labels: { en: { language: 'en', value: 'point in time' } },
   });
-  await taproot.createProperty({
+  await createProperty(db, options, {
     datatype: 'url',
     labels: { en: { language: 'en', value: 'reference URL' } },
   });
 
-  const created = await taproot.createItem({
+  const created = await createItem(db, options, {
     labels: { en: { language: 'en', value: 'Ada Lovelace' } },
     descriptions: {
       en: { language: 'en', value: 'English mathematician' },
@@ -91,10 +99,12 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
       },
     ],
   };
-  const added = await taproot.addStatement(created.entityId, occupation, {
+  const added = await addStatement(db, options, created.entityId, occupation, {
     expectedRevision: created.newRevision,
   });
-  const preferred = await taproot.setStatementRank(
+  const preferred = await setStatementRank(
+    db,
+    options,
     created.entityId,
     occupation.id,
     'preferred',
@@ -115,11 +125,9 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
     'qualifiers-order': [],
     references: [],
   };
-  const special = await taproot.addStatement(
-    created.entityId,
-    unknownOccupation,
-    { expectedRevision: preferred.newRevision },
-  );
+  await addStatement(db, options, created.entityId, unknownOccupation, {
+    expectedRevision: preferred.newRevision,
+  });
 
   const sparql = createSparqlHandler({ db });
   const query = `SELECT ?occupation WHERE {
@@ -135,7 +143,7 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
 
   let staleRevisionRejected = false;
   try {
-    await taproot.setLabel(created.entityId, 'en', 'stale edit', {
+    await setLabel(db, options, created.entityId, 'en', 'stale edit', {
       expectedRevision: created.newRevision,
     });
   } catch (cause) {
@@ -143,10 +151,49 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
   }
 
   const sparqlResults: unknown = await response.json();
-  const audit = await taproot.listAuditEvents({ entityId: created.entityId });
-  const integrity = await taproot.inspectEntityIntegrity(created.entityId);
+  const policy: CanonicalAuthorizationRecord = {
+    installationId: 'demo-installation',
+    authorizationRevision: 1,
+    visibility: { version: 1, clauses: [] },
+  };
+  const source: EntityAuthorizationSource = {
+    getInstallationAuthorizationState: () =>
+      Promise.resolve({
+        installationId: 'demo-installation',
+        authorizationRevision: 1,
+      }),
+    getEntityAuthorization: (entityId: EntityId) =>
+      Promise.resolve(entityId === created.entityId ? policy : null),
+    getEntityRevisionAuthorization: (entityId: EntityId) =>
+      Promise.resolve(entityId === created.entityId ? policy : null),
+  };
+  const reader = createAuthorizedTaproot(
+    db,
+    options,
+    {
+      installationId: 'demo-installation',
+      principalId: 'demo-principal',
+      activeWorkspaceId: null,
+      workspaceIds: [],
+      capabilities: [SEARCH_ADMIN_CAPABILITY],
+      authorizationRevision: 1,
+    },
+    source,
+    {
+      cursorCodec: createAuthorizationCursorCodec(
+        await crypto.subtle.generateKey(
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['encrypt', 'decrypt'],
+        ),
+      ),
+    },
+  );
+  const audit = await reader.listAuditEvents({ entityId: created.entityId });
+  const integrity = await reader.inspectEntityIntegrity(created.entityId);
+  const canonical = await reader.getEntity(created.entityId);
   return {
-    entityJson: exportEntityJson(special.entity),
+    entityJson: exportEntityJson(canonical.entity),
     sparqlResults,
     staleRevisionRejected,
     audit: audit.items,

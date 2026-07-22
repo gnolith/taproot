@@ -5,7 +5,6 @@ import {
   PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
   SchemaMismatchError,
   TaprootMigrationStateError,
-  TaprootRepository,
   applyTaprootMigrations,
   createStatement,
   initializeTaproot,
@@ -16,6 +15,7 @@ import {
   type SqliteResultLike,
   type Statement,
 } from '../src/index.js';
+import { TaprootRepository } from '../src/repository.js';
 
 const baseIri = 'https://statement-text.example';
 

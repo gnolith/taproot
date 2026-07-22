@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Breaking 0.3 API:** removed `TaprootRepository`, `createTaproot`, and every
+  unscoped canonical read helper from the normal package export. Canonical
+  entity, history, list, term-search, audit, export, integrity, and repair
+  access now exists only through mandatory `AuthorizedTaprootReader` context.
+- Added host-issued non-extractable AES-GCM cursor capability, authenticated
+  cursors bound to caller/grants/query/filter/auth revision/data generation,
+  identifier-only candidate scans, denied-heavy page filling, and final
+  authorization rechecks. Stale, tampered, and cross-context cursors fail
+  generically.
+- Public mutation helpers now return minimal receipts and reject validator
+  callbacks, so a write configuration cannot observe preexisting canonical
+  content. Raw repository internals are not package-exported.
 - Added host-created authorization contexts, canonical CNF visibility scopes,
   lossless scope intersection, portable fingerprints, explicit `search:admin`
   checks, and fail-closed pre/post-hydration canonical reads.
