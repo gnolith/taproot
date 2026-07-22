@@ -7,6 +7,7 @@ import {
   TaprootRepository,
   createAuthorizedTaproot,
   initializeTaproot,
+  type CanonicalAuthorizationRecord,
   type EntityAuthorizationSource,
 } from '../src/index.js';
 
@@ -59,21 +60,30 @@ describe('local D1 and Diamond interoperability example', () => {
       await initializeTaproot(db, options);
       await new TaprootRepository(db, options).createItem({ id: 'Q1' });
       let installationRevision = 4;
+      let historicalReads = 0;
+      let currentPolicy: CanonicalAuthorizationRecord | null = {
+        installationId: 'installation-1',
+        authorizationRevision: 4,
+        visibility: {
+          version: 1,
+          clauses: [[{ kind: 'workspace', workspaceId: 'workspace-1' }]],
+        },
+      };
       const source: EntityAuthorizationSource = {
         getInstallationAuthorizationState: () =>
           Promise.resolve({
             installationId: 'installation-1',
             authorizationRevision: installationRevision,
           }),
-        getEntityAuthorization: () =>
-          Promise.resolve({
+        getEntityAuthorization: () => Promise.resolve(currentPolicy),
+        getEntityRevisionAuthorization: () => {
+          historicalReads += 1;
+          return Promise.resolve({
             installationId: 'installation-1',
-            authorizationRevision: 4,
-            visibility: {
-              version: 1,
-              clauses: [[{ kind: 'workspace', workspaceId: 'workspace-1' }]],
-            },
-          }),
+            authorizationRevision: 1,
+            visibility: { version: 1, clauses: [] },
+          });
+        },
       };
       const reader = createAuthorizedTaproot(
         db,
@@ -91,6 +101,40 @@ describe('local D1 and Diamond interoperability example', () => {
       await expect(reader.getEntity('Q1')).resolves.toMatchObject({
         entity: { id: 'Q1' },
       });
+      currentPolicy = {
+        installationId: 'installation-1',
+        authorizationRevision: 4,
+        visibility: {
+          version: 1,
+          clauses: [[{ kind: 'principal', principalId: 'revoked-principal' }]],
+        },
+      };
+      await expect(reader.getEntityRevision('Q1', 1)).rejects.toBeInstanceOf(
+        AuthorizationDeniedError,
+      );
+      expect(historicalReads).toBe(0);
+      currentPolicy = null;
+      await expect(reader.getEntityRevision('Q1', 1)).rejects.toBeInstanceOf(
+        AuthorizationDeniedError,
+      );
+      expect(historicalReads).toBe(0);
+      currentPolicy = {
+        installationId: 'installation-1',
+        authorizationRevision: 4,
+        visibility: {
+          version: 1,
+          clauses: [[{ kind: 'unsupported-private-schema' }]],
+        } as never,
+      };
+      await expect(reader.getEntity('Q1')).rejects.toMatchObject({
+        code: 'AUTHORIZATION_DENIED',
+        message: 'Authorization denied',
+      });
+      currentPolicy = {
+        installationId: 'installation-1',
+        authorizationRevision: 4,
+        visibility: { version: 1, clauses: [] },
+      };
       installationRevision = 5;
       await expect(reader.getEntity('Q1')).rejects.toBeInstanceOf(
         AuthorizationDeniedError,

@@ -57,8 +57,10 @@ class MutableAuthorizationSource implements EntityAuthorizationSource {
     authorizationRevision: 7,
   };
   records = new Map<EntityId, CanonicalAuthorizationRecord>();
+  historicalRecords = new Map<EntityId, CanonicalAuthorizationRecord>();
   onSecondRecordRead?: () => void;
   recordReads = 0;
+  historicalReads = 0;
 
   getInstallationAuthorizationState() {
     return Promise.resolve(this.state);
@@ -68,6 +70,15 @@ class MutableAuthorizationSource implements EntityAuthorizationSource {
     this.recordReads += 1;
     if (this.recordReads === 2) this.onSecondRecordRead?.();
     return Promise.resolve(this.records.get(entityId) ?? null);
+  }
+
+  getEntityRevisionAuthorization(entityId: EntityId) {
+    this.historicalReads += 1;
+    return Promise.resolve(
+      this.historicalRecords.get(entityId) ??
+        this.records.get(entityId) ??
+        null,
+    );
   }
 }
 
@@ -131,6 +142,23 @@ describe('authorization contract values', () => {
         ...context(),
         injectedAuthority: true,
       } as AuthorizationContext),
+    ).toThrow(InvalidAuthorizationError);
+    const sparseWorkspaces = new Array<string>(1);
+    const sparseCapabilities = new Array<string>(1);
+    expect(() =>
+      normalizeAuthorizationContext(
+        context({ workspaceIds: sparseWorkspaces, activeWorkspaceId: null }),
+      ),
+    ).toThrow(InvalidAuthorizationError);
+    expect(() =>
+      normalizeAuthorizationContext(
+        context({ capabilities: sparseCapabilities }),
+      ),
+    ).toThrow(InvalidAuthorizationError);
+    expect(() =>
+      normalizeAuthorizationContext(
+        context({ capabilities: [undefined] as unknown as string[] }),
+      ),
     ).toThrow(InvalidAuthorizationError);
   });
 
@@ -244,10 +272,46 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
         ).getEntity('Q1'),
       ).rejects.toBeInstanceOf(AuthorizationDeniedError);
 
+      const revoked = new MutableAuthorizationSource();
+      revoked.records.set('Q1', {
+        installationId: 'installation-1',
+        authorizationRevision: 7,
+        visibility: {
+          version: 1,
+          clauses: [[{ kind: 'principal', principalId: 'somebody-else' }]],
+        },
+      });
+      revoked.historicalRecords.set('Q1', {
+        installationId: 'installation-1',
+        authorizationRevision: 1,
+        visibility: { version: 1, clauses: [] },
+      });
+      await expect(
+        createAuthorizedTaproot(
+          environment.db,
+          options,
+          context(),
+          revoked,
+        ).getEntityRevision('Q1', 1),
+      ).rejects.toBeInstanceOf(AuthorizationDeniedError);
+      expect(revoked.historicalReads).toBe(0);
+      revoked.records.delete('Q1');
+      await expect(
+        createAuthorizedTaproot(
+          environment.db,
+          options,
+          context(),
+          revoked,
+        ).getEntityRevision('Q1', 1),
+      ).rejects.toBeInstanceOf(AuthorizationDeniedError);
+      expect(revoked.historicalReads).toBe(0);
+
       const failing: EntityAuthorizationSource = {
         getInstallationAuthorizationState: () =>
           Promise.reject(new Error('secret policy backend detail')),
         getEntityAuthorization: () =>
+          Promise.resolve(source.records.get('Q1')!),
+        getEntityRevisionAuthorization: () =>
           Promise.resolve(source.records.get('Q1')!),
       };
       await expect(
@@ -259,6 +323,31 @@ describe('authorized canonical reads on a persisted native SQLite file', () => {
         ).getEntity('Q1'),
       ).rejects.toMatchObject({
         message: 'Authorization denied',
+      });
+
+      const malformed: EntityAuthorizationSource = {
+        getInstallationAuthorizationState: () => Promise.resolve(source.state),
+        getEntityAuthorization: () =>
+          Promise.resolve({
+            ...source.records.get('Q1')!,
+            visibility: {
+              version: 1,
+              clauses: [[{ kind: 'secret-schema-kind' }]],
+            },
+          } as never),
+        getEntityRevisionAuthorization: () =>
+          Promise.resolve(source.records.get('Q1')!),
+      };
+      await expect(
+        createAuthorizedTaproot(
+          environment.db,
+          options,
+          context(),
+          malformed,
+        ).getEntity('Q1'),
+      ).rejects.toMatchObject({
+        message: 'Authorization denied',
+        code: 'AUTHORIZATION_DENIED',
       });
     } finally {
       await environment.dispose();

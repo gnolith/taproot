@@ -52,9 +52,14 @@ export interface InstallationAuthorizationState {
  */
 export interface EntityAuthorizationSource {
   getInstallationAuthorizationState(): Promise<InstallationAuthorizationState>;
+  /** Current canonical policy. Deleted/missing current records return null. */
   getEntityAuthorization(
     entityId: EntityId,
-    revision?: number,
+  ): Promise<CanonicalAuthorizationRecord | null>;
+  /** Historical restriction, always intersected with current policy. */
+  getEntityRevisionAuthorization(
+    entityId: EntityId,
+    revision: number,
   ): Promise<CanonicalAuthorizationRecord | null>;
 }
 
@@ -285,25 +290,51 @@ export class AuthorizedTaprootReader {
     try {
       [state, record] = await Promise.all([
         this.#authorization.getInstallationAuthorizationState(),
-        this.#authorization.getEntityAuthorization(entityId, revisionNumber),
+        this.#authorization.getEntityAuthorization(entityId),
       ]);
+      const normalizedState = normalizeInstallationState(state);
+      const current = normalizeAuthorizationRecord(record);
+      if (
+        normalizedState.installationId !== this.#context.installationId ||
+        current.installationId !== this.#context.installationId ||
+        normalizedState.authorizationRevision !==
+          this.#context.authorizationRevision ||
+        current.authorizationRevision > normalizedState.authorizationRevision ||
+        !isVisibleTo(current.visibility, this.#context)
+      )
+        throw new AuthorizationDeniedError('Authorization denied');
+      let effective = current;
+      if (revisionNumber !== undefined) {
+        const historical = normalizeAuthorizationRecord(
+          await this.#authorization.getEntityRevisionAuthorization(
+            entityId,
+            revisionNumber,
+          ),
+        );
+        if (historical.installationId !== current.installationId)
+          throw new AuthorizationDeniedError('Authorization denied');
+        effective = {
+          ...current,
+          authorizationRevision: Math.max(
+            current.authorizationRevision,
+            historical.authorizationRevision,
+          ),
+          visibility: intersectVisibilityScopes(
+            current.visibility,
+            historical.visibility,
+          ),
+        };
+      }
+      if (
+        effective.authorizationRevision >
+          normalizedState.authorizationRevision ||
+        !isVisibleTo(effective.visibility, this.#context)
+      )
+        throw new AuthorizationDeniedError('Authorization denied');
+      return { state: normalizedState, record: effective };
     } catch {
       throw new AuthorizationDeniedError('Authorization denied');
     }
-    if (!record) throw new AuthorizationDeniedError('Authorization denied');
-    const normalizedState = normalizeInstallationState(state);
-    const normalizedRecord = normalizeAuthorizationRecord(record);
-    if (
-      normalizedState.installationId !== this.#context.installationId ||
-      normalizedRecord.installationId !== this.#context.installationId ||
-      normalizedState.authorizationRevision !==
-        this.#context.authorizationRevision ||
-      normalizedRecord.authorizationRevision >
-        normalizedState.authorizationRevision ||
-      !isVisibleTo(normalizedRecord.visibility, this.#context)
-    )
-      throw new AuthorizationDeniedError('Authorization denied');
-    return { state: normalizedState, record: normalizedRecord };
   }
 }
 
@@ -331,7 +362,7 @@ function normalizeInstallationState(
 }
 
 function normalizeAuthorizationRecord(
-  value: CanonicalAuthorizationRecord,
+  value: CanonicalAuthorizationRecord | null,
 ): CanonicalAuthorizationRecord {
   if (!isRecord(value)) invalid('authorization record must be an object');
   exactKeys(value, ['installationId', 'authorizationRevision', 'visibility']);
@@ -383,9 +414,12 @@ function serializeAtom(atom: VisibilityAtomV1): string {
 function stringSet(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.length > 256)
     invalid(`${field} must be an array with at most 256 entries`);
-  return [...new Set(value.map((entry) => identifier(entry, field)))].sort(
-    compareCodeUnits,
-  );
+  const normalized: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.hasOwn(value, index)) invalid(`${field} must be dense`);
+    normalized.push(identifier(value[index], field));
+  }
+  return [...new Set(normalized)].sort(compareCodeUnits);
 }
 
 function identifier(value: unknown, field: string): string {

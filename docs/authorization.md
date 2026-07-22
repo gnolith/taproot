@@ -1,7 +1,9 @@
 # Authorization foundation
 
-This foundation implements Search Contract **B03, D03, H01, and H07**. It does
-not implement candidate retrieval or ranking.
+This foundation supplies primitives needed toward Search Contract **B03, D03,
+H01, and H07**. None of those contract IDs is complete or evidenced by this PR
+alone: candidate prefiltering, cursor binding, canonical domain persistence,
+all public read boundaries, and combined-system acceptance remain outstanding.
 
 Hosts create an `AuthorizationContext` from authenticated state. All fields are
 required: installation and principal identity, active and authorized workspace
@@ -26,6 +28,12 @@ missing state fails closed. Taproot checks installation identity, the exact
 installation authorization revision, and visibility before hydration, then
 loads and checks again. Policy changes during hydration fail with the same
 generic `AuthorizationDeniedError` as every other denial.
+
+Historical hydration first authorizes the current canonical record. A missing,
+deleted, or currently inaccessible source denies access even when its requested
+historical revision was public. The historical revision policy is then
+intersected with current visibility, so old policy can only further restrict
+access and can never resurrect revoked authority.
 
 `search:admin` is the only search-administration capability recognized by
 `requireSearchAdministration`. `admin`, `administrator`, `assistant`, and
