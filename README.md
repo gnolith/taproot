@@ -115,8 +115,17 @@ worker. Item mutations emit one root event in their canonical transaction.
 Migration 0006 is also DDL-only and adds the dormant unified-search
 materialization lifecycle. An exact `search:admin` host may initialize and run
 bounded work, inspect redacted health, retry dead work, and manage a shadow
-rebuild. Taproot publishes no public search endpoint and remains blocked while
-the Task, Memory, Prompt, Resource, and Annotation producers are absent.
+rebuild.
+
+Migration 0007 preserves existing staged rows while adding immutable producer
+manifests, adoption checkpoints, and generation-pinned fingerprints. Host
+assembly can register data-only Workshop Task and Memory callbacks through a
+DB/installation/kind-sealed boundary. Taproot alone derives source hashes,
+authorization envelopes, document/chunk IDs, and atomic mutation events. A
+missing or mismatched process-local producer blocks health without claiming or
+incrementing its jobs. Prompt, Resource, and Annotation remain blocked.
+Taproot publishes no public search endpoint and does not assemble or deploy a
+complete Site.
 
 ## Editing
 

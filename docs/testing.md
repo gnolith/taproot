@@ -33,6 +33,14 @@ redacted blocked health, migration drift, and a true SQLite close/reopen.
 one-million-chunk indexed-path artifact without imposing an SLA. The packed
 consumer exercises the guarded lifecycle from the installed tarball.
 
+`test/external-search-migration.test.ts` applies exact migration 0007 on both
+persisted engines, preserves the full staged document/visibility/filter/chunk
+graph, enforces exactly seven staged kinds, and reopens the database.
+`test/external-search-producers.test.ts` qualifies the fieldless mutation
+handle, same-batch Workshop mutation+event, data-only Task materialization,
+redacted adoption failures, resumable cursor reconstruction, and rejection of
+forged, replayed, cross-kind, or stale-process handles.
+
 The Workerd suite exercises successful edits, malformed and oversized input,
 optimistic conflicts, concurrent writers, migration, immutable history,
 projection repair, shared RDF values, and injected RDF failures. The injected

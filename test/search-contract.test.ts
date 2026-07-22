@@ -622,6 +622,7 @@ function sourceEvent(
     sourceId,
     sourceRevision,
     sourceHash: SOURCE_HASH,
+    sourcePolicyRevision: 4,
     authorizationRevision: 4,
     searchGeneration: 9,
   };
@@ -641,6 +642,7 @@ function envelope(
     installationId: 'installation-1',
     workspaceId: 'workspace-1',
     ownerPrincipalId: 'owner-1',
+    sourcePolicyRevision: 4,
     authorizationRevision: 4,
     visibility,
   });

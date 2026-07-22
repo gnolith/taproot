@@ -12,6 +12,7 @@ import {
   taprootAuthorizationSchemaStatements,
   taprootSearchSourceEventSchemaStatements,
   taprootSearchMaterializationSchemaStatements,
+  taprootExternalSearchProducerSchemaStatements,
   type EntityCommand,
   type SqliteDatabaseLike,
   type SqlitePreparedStatementLike,
@@ -420,7 +421,8 @@ async function downgradeStatementTextMigration(
            '0003-canonical-statement-text',
            '0004-canonical-authorization-policy',
            '0005-unified-search-source-events',
-           '0006-unified-search-materialization-lifecycle'
+           '0006-unified-search-materialization-lifecycle',
+           '0007-external-search-producers'
          )`,
     ),
     db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),
@@ -436,9 +438,12 @@ async function dropAuthorizationSchema(db: SqliteDatabaseLike): Promise<void> {
     ...taprootAuthorizationSchemaStatements,
     ...taprootSearchSourceEventSchemaStatements,
     ...taprootSearchMaterializationSchemaStatements,
+    ...taprootExternalSearchProducerSchemaStatements,
   ]
     .map((sql) =>
-      /^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS ([a-z0-9_]+)/iu.exec(sql),
+      /^CREATE (TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
+        sql,
+      ),
     )
     .filter((match): match is RegExpExecArray => match !== null)
     .reverse();

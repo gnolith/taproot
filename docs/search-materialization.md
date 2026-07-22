@@ -58,17 +58,28 @@ watermark, job set, anti-join, and expected corpus pointers in the same batch,
 atomically swaps the active corpus, increments cursor generation, and records
 immutable admin audit.
 
-Only Item-root production is currently executable. Item stages include Item and
-Statement documents completely; standalone Statement source events are
-coalesced as Item-root-owned rather than dead-lettered or duplicated. Task,
-Memory, Prompt, Resource, and Annotation producers remain absent, so product
-health intentionally remains
-`blocked-producers`; no backend-complete or public-search claim is made.
+Item stages include Item and Statement documents completely; standalone
+Statement source events are coalesced as Item-root-owned rather than
+dead-lettered or duplicated. Migration 0007 adds host-sealed Workshop Task and
+Memory producers. Their callbacks return only bounded canonical data,
+authorization data, and projection fields; they receive no SQL, database,
+lifecycle guard, mutation handle, or caller-shaped authorization context.
+Taproot derives hashes, identifiers, authority envelopes, and chunks.
+
+Producer manifests and adoption progress are durable and immutable/audited.
+Each corpus pins an exact fingerprint. A process restart must reconstruct the
+matching callback registration; missing or mismatched registrations leave jobs
+pending at attempt zero and appear dynamically in `blockedProducerKinds`.
+`sourcePolicyRevision` remains distinct from the live installation
+`authorizationRevision` through source, job, stage, and head fences. Prompt,
+Resource, and Annotation remain blocked, so no backend-complete or
+public-search claim is made.
 
 ## Qualification
 
 The same black-box lifecycle suite runs on persisted Node SQLite and real
-Miniflare/Workerd D1. It covers exact migration, 32-way reclaim contention,
+Miniflare/Workerd D1. It covers exact migrations, 0006 staged-graph
+preservation, producer adoption/reconstruction, 32-way reclaim contention,
 crashed-stage recovery, stale ABA tokens, stable IDs, replace-all removal,
 immediate stale fencing, mixed CNF, dual fanout, no-hole activation, and health
 redaction. The reproducible no-SLA baseline records 100,000 roots and 1,000,000

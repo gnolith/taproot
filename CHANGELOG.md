@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added migration 0007 with immutable external-producer manifests, durable
+  resumable adoption/audit state, generation-pinned fingerprints, distinct
+  source-policy and live-authorization fences, and a host-sealed data-only
+  Workshop Task/Memory boundary. Missing or mismatched process runtimes remain
+  dynamically blocked without consuming attempts. Existing 0006 staged graphs
+  are preserved on native SQLite and Workerd D1; Prompt, Resource, and
+  Annotation remain blocked and no public search or Site deployment is added.
+
 - Added DDL-only migration 0006 and an opaque `search:admin`-guarded,
   runtime-neutral materialization lifecycle with bounded durable jobs,
   128-bit lease tokens and ABA fencing, invisible staged manifests, atomic
@@ -10,7 +18,7 @@
 - Added complete persisted Item-root projection into stable Item and Statement
   document slots with canonical references, CNF visibility/filter rows, traced
   chunks, removal semantics, and identical native SQLite/Workerd D1 lifecycle
-  tests. Five non-Taproot producers remain explicitly blocked, and no public
+  tests. Deferred producers remain explicitly blocked, and no public
   query/ranking/snippet/cursor surface or complete-Site assembly is added.
 - Added DDL-only migration 0005 with an immutable, metadata-only unified-search
   source-event log and current registry, plus opaque domain-bound atomic event

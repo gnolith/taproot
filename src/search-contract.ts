@@ -154,6 +154,7 @@ export interface SearchProjectionSourceEventV1 {
   sourceId: string;
   sourceRevision: string;
   sourceHash: string;
+  sourcePolicyRevision: number;
   authorizationRevision: number;
   searchGeneration: number;
 }
@@ -166,6 +167,7 @@ export interface SearchAuthorizationEnvelopeValueV1 {
   installationId: string;
   workspaceId: string | null;
   ownerPrincipalId: string;
+  sourcePolicyRevision: number;
   authorizationRevision: number;
   visibility: VisibilityScopeV1;
   fingerprint: string;
@@ -180,7 +182,16 @@ export interface SearchProjectionAuthorizationAuthorityV1 {
 }
 
 export type SearchProjectionFieldV1 =
-  'label' | 'alias' | 'description' | 'type' | 'statement';
+  | 'label'
+  | 'alias'
+  | 'description'
+  | 'type'
+  | 'statement'
+  | 'title'
+  | 'content'
+  | 'prompt'
+  | 'result'
+  | 'status';
 
 export interface SearchProjectionSegmentV1 {
   field: SearchProjectionFieldV1;
@@ -198,7 +209,7 @@ export interface DerivedSearchDocumentV1 {
   /** Stable within one installation/root/canonical reference across revisions. */
   documentSlot: string;
   hash: string;
-  kind: 'statement' | 'item';
+  kind: UnifiedSearchKind;
   source: SearchProjectionSourceEventV1;
   /** Event-producing aggregate root used for replace-all and deletion. */
   rootReference: UnifiedSearchReferenceV1;
@@ -564,6 +575,7 @@ export function normalizeSearchProjectionSourceEventV1(
     'sourceId',
     'sourceRevision',
     'sourceHash',
+    'sourcePolicyRevision',
     'authorizationRevision',
     'searchGeneration',
   ]);
@@ -579,6 +591,10 @@ export function normalizeSearchProjectionSourceEventV1(
     sourceId: identifier(input.sourceId, 'sourceId'),
     sourceRevision: opaque(input.sourceRevision, 'sourceRevision'),
     sourceHash: sha256(input.sourceHash, 'sourceHash'),
+    sourcePolicyRevision: revision(
+      input.sourcePolicyRevision,
+      'sourcePolicyRevision',
+    ),
     authorizationRevision: revision(
       input.authorizationRevision,
       'authorizationRevision',
@@ -619,6 +635,7 @@ export async function createTrustedSearchAuthorizationEnvelopeV1(
     'installationId',
     'workspaceId',
     'ownerPrincipalId',
+    'sourcePolicyRevision',
     'authorizationRevision',
     'visibility',
   ]);
@@ -635,6 +652,10 @@ export async function createTrustedSearchAuthorizationEnvelopeV1(
         ? null
         : identifier(input.workspaceId, 'workspaceId'),
     ownerPrincipalId: identifier(input.ownerPrincipalId, 'ownerPrincipalId'),
+    sourcePolicyRevision: revision(
+      input.sourcePolicyRevision,
+      'sourcePolicyRevision',
+    ),
     authorizationRevision: revision(
       input.authorizationRevision,
       'authorizationRevision',
@@ -947,6 +968,7 @@ function authorizationFor(
     authorization.sourceKind !== sourceKind ||
     authorization.sourceId !== sourceId ||
     authorization.sourceRevision !== source.sourceRevision ||
+    authorization.sourcePolicyRevision !== source.sourcePolicyRevision ||
     authorization.authorizationRevision !== source.authorizationRevision ||
     authorization.installationId !== source.installationId
   )
@@ -961,6 +983,7 @@ async function intersectAuthorization(
   if (
     item.installationId !== statement.installationId ||
     item.sourceRevision !== statement.sourceRevision ||
+    item.sourcePolicyRevision !== statement.sourcePolicyRevision ||
     item.authorizationRevision !== statement.authorizationRevision
   )
     invalid('statement authorization is not in the Item authorization domain');
@@ -1349,6 +1372,7 @@ function authorizationFingerprint(value: {
   installationId: string;
   workspaceId: string | null;
   ownerPrincipalId: string;
+  sourcePolicyRevision: number;
   authorizationRevision: number;
   visibility: VisibilityScopeV1;
 }): Promise<string> {
@@ -1357,6 +1381,7 @@ function authorizationFingerprint(value: {
     installationId: value.installationId,
     workspaceId: value.workspaceId,
     ownerPrincipalId: value.ownerPrincipalId,
+    sourcePolicyRevision: value.sourcePolicyRevision,
     authorizationRevision: value.authorizationRevision,
     visibility: value.visibility,
   });

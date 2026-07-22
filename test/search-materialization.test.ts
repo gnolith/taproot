@@ -31,6 +31,8 @@ import {
   setLabel,
   softDeleteEntity,
   taprootSearchMaterializationSchemaStatements,
+  taprootSearchSourceEventSchemaStatements,
+  taprootExternalSearchProducerSchemaStatements,
   type AuthorizationContext,
   type CanonicalAuthorizationPolicyInput,
   type TaprootHostWriteCapability,
@@ -88,6 +90,7 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
             id: '0006-unified-search-materialization-lifecycle',
             status: 'pending',
           },
+          { id: '0007-external-search-producers', status: 'pending' },
         ]);
         await applyTaprootMigrations(env.db, options);
         expect((await inspectTaprootSchema(env.db)).valid).toBe(true);
@@ -542,7 +545,7 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
       }
     }, 60_000);
 
-    it('backs unavailable producers off to dead, retries them under audit, and coalesces standalone Statements', async () => {
+    it('leaves unavailable producer jobs unattempted, reports dynamic health, and coalesces standalone Statements', async () => {
       const env = await runtime.create();
       try {
         const fixedOptions = {
@@ -561,6 +564,17 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
           env.capability,
         );
         await materialization.initialize(adminContext(1));
+        await env.db
+          .prepare(
+            `UPDATE taproot_unified_search_generation_producers
+             SET state = 'ready', producer_fingerprint = ?,
+                 contract_version = 'workshop-search-producer-v1',
+                 projection_version = 'workshop-search-projection-v1',
+                 authorization_contract_version = 'workshop-search-authorization-v1'
+             WHERE installation_id = ? AND source_kind = 'task'`,
+          )
+          .bind('a'.repeat(64), installationId)
+          .run();
         await env.db
           .prepare(`CREATE TABLE producer_probe(id TEXT PRIMARY KEY) STRICT`)
           .run();
@@ -617,66 +631,32 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
             ),
           ],
         );
-        for (let attempt = 1; attempt <= 5; attempt += 1) {
-          const receipt = await materialization.run(
-            adminContext(1),
-            runOptions(),
-          );
-          expect(attempt === 5 ? receipt.dead : receipt.deferred).toBe(2);
-          if (attempt === 1) {
-            const backoff = await env.db
-              .prepare(
-                `SELECT not_before > updated_at AS delayed
-                 FROM taproot_search_projection_jobs WHERE source_kind = 'task'`,
-              )
-              .all<{ delayed: number }>();
-            expect(Number(backoff.results[0]?.delayed)).toBe(1);
-          }
-          if (attempt < 5)
-            await env.db
-              .prepare(
-                `UPDATE taproot_search_projection_jobs
-                 SET not_before = '2020-01-01T00:00:00.000Z'
-                 WHERE source_kind = 'task'`,
-              )
-              .run();
-        }
-        expect(await materialization.health(adminContext(1))).toMatchObject({
-          status: 'degraded',
-          deadJobs: 2,
+        const unavailable = await materialization.run(
+          adminContext(1),
+          runOptions(),
+        );
+        expect(unavailable).toMatchObject({
+          claimed: 0,
+          deferred: 0,
+          dead: 0,
         });
-        await env.db
-          .prepare(
-            `CREATE TRIGGER reject_retry_audit
-             BEFORE INSERT ON taproot_search_admin_audit
-             WHEN NEW.event_type = 'retry'
-             BEGIN SELECT RAISE(ABORT, 'injected retry audit failure'); END`,
-          )
-          .run();
-        await expect(
-          materialization.retryDead(adminContext(1), { limit: 1 }),
-        ).rejects.toThrow(/retry audit failure/u);
-        expect(await materialization.health(adminContext(1))).toMatchObject({
-          deadJobs: 2,
-        });
-        await env.db.prepare(`DROP TRIGGER reject_retry_audit`).run();
-        expect(
-          await materialization.retryDead(adminContext(1), { limit: 1 }),
-        ).toBe(1);
-        expect(
-          await materialization.retryDead(adminContext(1), { limit: 1 }),
-        ).toBe(1);
-        const retried = await env.db
+        const untouched = await env.db
           .prepare(
             `SELECT state, attempt FROM taproot_search_projection_jobs
              WHERE source_kind = 'task' ORDER BY source_id`,
           )
           .all<{ state: string; attempt: number }>();
-        expect(retried.results).toEqual([
+        expect(untouched.results).toEqual([
           { state: 'pending', attempt: 0 },
           { state: 'pending', attempt: 0 },
         ]);
-        expect(await count(env.db, 'taproot_search_admin_audit')).toBe(3);
+        const unavailableHealth = await materialization.health(adminContext(1));
+        expect(unavailableHealth).toMatchObject({
+          status: 'blocked',
+          pendingJobs: 2,
+          deadJobs: 0,
+        });
+        expect(unavailableHealth.blockedProducerKinds).toContain('task');
 
         const statementSource = await createInstallationSearchSourceGuardV1(
           env.db,
@@ -743,46 +723,21 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
           capability,
         );
         await materialization.initialize(adminContext(1));
-        await db
-          .prepare(
-            `CREATE TABLE stale_transition_probe(id TEXT PRIMARY KEY) STRICT`,
-          )
-          .run();
-        const source = await createInstallationSearchSourceGuardV1(
+        const guard = await createInstallationAuthorizationGuard(
           db,
           timedOptions,
           capability,
-          {
-            domain: 'workshop.task',
-            sourceKind: 'task',
-            capability: 'task-write',
-            changeClasses: ['canonical'],
-          },
         );
-        await source.batchWithSourceEvent(
-          {
-            installationId,
-            principalId: 'producer-1',
-            activeWorkspaceId: null,
-            workspaceIds: [],
-            capabilities: ['task-write'],
-            authorizationRevision: 1,
-          },
-          {
-            eventId: 'stale-transition-event',
-            sourceId: 'task-stale',
-            operation: 'upsert',
-            changeClass: 'canonical',
-            sourceRevision: '1',
-            sourceHash: 'c'.repeat(64),
-            predecessor: null,
-          },
-          [
-            db.prepare(
-              `INSERT INTO stale_transition_probe(id) VALUES ('committed')`,
-            ),
-          ],
-        );
+        await createItem(db, timedOptions, guard, writeContext(1), {
+          id: 'Q999',
+          authorization: policy(1, {}),
+        });
+        await db
+          .prepare(
+            `UPDATE taproot_entities SET entity_json = '{}'
+             WHERE entity_id = 'Q999'`,
+          )
+          .run();
         db.intercept(
           /SELECT \?, job_id, state, \?, attempt,[\s\S]*state IN \('leased', 'staged'\)/iu,
           async () => {
@@ -803,12 +758,15 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
         const state = await db
           .prepare(
             `SELECT state, claim_generation FROM taproot_search_projection_jobs
-             WHERE source_id = 'task-stale'`,
+             WHERE claim_generation = (
+               SELECT MAX(claim_generation) FROM taproot_search_projection_jobs
+             )
+             ORDER BY claim_generation DESC LIMIT 1`,
           )
           .all<{ state: string; claim_generation: number }>();
         expect(state.results[0]).toEqual({
           state: 'pending',
-          claim_generation: 2,
+          claim_generation: 0,
         });
         const transitions = await db
           .prepare(
@@ -818,7 +776,7 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
           .all<{ transition_id: string }>();
         expect(
           transitions.results.map(({ transition_id }) => transition_id),
-        ).toEqual([expect.stringMatching(/:pending:2$/u)]);
+        ).toEqual([]);
       } finally {
         await env.close();
       }
@@ -1141,9 +1099,34 @@ async function count(db: D1DatabaseLike, table: string): Promise<number> {
 }
 
 async function downgradeTo0005(db: D1DatabaseLike): Promise<void> {
-  const objects = taprootSearchMaterializationSchemaStatements
+  await dropSchemaObjects(db, taprootExternalSearchProducerSchemaStatements);
+  await dropSchemaObjects(db, taprootSearchMaterializationSchemaStatements);
+  await dropSchemaObjects(db, taprootSearchSourceEventSchemaStatements);
+  await db.batch(
+    taprootSearchSourceEventSchemaStatements.map((sql) => db.prepare(sql)),
+  );
+  await db.batch([
+    db.prepare(`DELETE FROM taproot_migrations WHERE version >= 6`),
+    db.prepare(
+      `DELETE FROM _gnolith_migrations
+       WHERE namespace = '@gnolith/taproot'
+         AND migration_id IN (
+           '0006-unified-search-materialization-lifecycle',
+           '0007-external-search-producers'
+         )`,
+    ),
+  ]);
+}
+
+async function dropSchemaObjects(
+  db: D1DatabaseLike,
+  statements: readonly string[],
+): Promise<void> {
+  const objects = statements
     .map((sql) =>
-      /^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS ([a-z0-9_]+)/iu.exec(sql),
+      /^CREATE (TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
+        sql,
+      ),
     )
     .filter((match): match is RegExpExecArray => match !== null)
     .reverse();
@@ -1152,18 +1135,6 @@ async function downgradeTo0005(db: D1DatabaseLike): Promise<void> {
       db.prepare(`DROP ${match[1]!.toUpperCase()} IF EXISTS ${match[2]}`),
     ),
   );
-  await db.batch([
-    db.prepare(`DELETE FROM taproot_migrations WHERE version = 6`),
-    db.prepare(
-      `DELETE FROM _gnolith_migrations
-       WHERE namespace = '@gnolith/taproot'
-         AND migration_id = '0006-unified-search-materialization-lifecycle'`,
-    ),
-    db.prepare(
-      `UPDATE taproot_metadata SET metadata_value = '4'
-       WHERE metadata_key = 'schema_version'`,
-    ),
-  ]);
 }
 
 async function migrationCount(db: D1DatabaseLike, id: string): Promise<number> {

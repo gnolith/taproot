@@ -8,10 +8,11 @@ kinds, in this order:
 
 Omitting `kinds` normalizes to all seven for contract negotiation only. It does
 not claim that all seven projectors or an executable search service exist.
-Taproot currently implements pure projection planning only for `statement` and
-`item`. Task, Memory, Prompt, Resource, and Annotation projector entry points
-fail with `UnsupportedSearchProjectionError`; they never return an empty
-successful plan.
+Taproot's public pure projector entry points remain limited to `statement` and
+`item`; the other five entry points fail with
+`UnsupportedSearchProjectionError`. Separately, migration 0007 provides a
+host-sealed data-only producer boundary for Workshop Task and Memory
+materialization. Prompt, Resource, and Annotation are not enabled.
 
 ## Request and response boundary
 
@@ -76,7 +77,7 @@ text.
 
 The pure projection contract does not implement search execution, candidate
 retrieval, ranking, snippets, cursor issuance, hydration, or provider adapters.
-The package's separate migrations 0005 and 0006 persist source events and a
+The package's separate migrations 0005 through 0007 persist source events, a
 dormant guarded materialization lifecycle as documented in
 [search-source-events.md](search-source-events.md) and
 [search-materialization.md](search-materialization.md). Existing
