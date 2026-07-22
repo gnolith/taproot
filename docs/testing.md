@@ -20,7 +20,9 @@ same-adapter enforcement, late-batch rollback, and concurrent writers.
 `consumer:check` packs the
 package, installs the tarball into a fresh temporary project with registry
 Diamond and Miniflare dependencies, initializes a new D1 database, writes an
-entity, and verifies the RDF through SPARQL using only public package exports.
+entity, and verifies the RDF through privileged package-test SPARQL using only
+public package exports. This proves RDF interoperability, not authorization of
+a user-facing SPARQL endpoint.
 
 `npm run check` is the complete local package release-quality gate. Coverage
 thresholds are enforced in `vitest.config.ts`; lowering them requires an

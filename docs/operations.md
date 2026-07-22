@@ -6,7 +6,7 @@ Run `initializeTaproot(db, { baseIri })` before using a new database. The
 absolute HTTP(S) base IRI is stored as permanent database identity and cannot
 be replaced by a later hostname or runtime setting. Afterward,
 `initializeTaproot(db)` is idempotent and initializes Diamond too. Do not apply
-the historical numbered SQL files directly in 0.2; hosts orchestrate the
+the historical numbered SQL files directly in 0.3; hosts orchestrate the
 package-owned plan/apply/initialize APIs because legacy revision hashes and
 adoption checks cannot be correctly produced by SQLite alone.
 
@@ -35,12 +35,12 @@ Codex Site host owns D1 and Site assembly.
 
 ## Integrity and repair
 
-`verifyAuditChain(id)` verifies revision continuity, every content hash and
+Authorized `verifyAuditChain(id)` verifies revision continuity, every content hash and
 parent link, the chain head, and corresponding audit events.
 `inspectEntityIntegrity(id)` also compares current JSON, revision JSON, terms,
 RDF, and ownership. `inspectTaprootIntegrity` scans by cursor.
 
-`repairEntityProjection` atomically rebuilds terms, RDF, and ownership without
+Authorized, `search:admin`-gated `repairEntityProjection` atomically rebuilds terms, RDF, and ownership without
 changing canonical content or inventing a new content revision. It appends a
 `repair` audit event. It does not rewrite damaged immutable history; restore
 such data from backup and investigate if hash verification fails.
@@ -48,7 +48,8 @@ such data from backup and investigate if hash verification fails.
 ## Backup and restore
 
 Back up the whole D1 database to preserve atomic boundaries. Canonical entities
-can also be exported as newline-delimited JSON with `exportEntities`, but that
+can also be exported as authorization-filtered newline-delimited JSON with
+`AuthorizedTaprootReader.exportEntities`, but that
 is a knowledge export, not a backup of attribution, revisions, deletions,
 redirects, or audit history.
 

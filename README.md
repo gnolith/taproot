@@ -12,7 +12,7 @@ editing commands, term search, repairable projections, and a deterministic RDF p
 
 ## Status
 
-Version `0.2.0` supports Node 22 and 24 and depends exactly on Diamond `0.4.0`,
+Version `0.3.0` supports Node 22 and 24 and depends exactly on Diamond `0.4.0`,
 which exposes transaction-composable RDF patches, a runtime-neutral SQLite
 capability, and a process-local `node:sqlite` adapter.
 
@@ -48,25 +48,43 @@ tables idempotently. First initialization requires the database's permanent
 identity:
 
 ```ts
-import { TaprootRepository, initializeTaproot } from '@gnolith/taproot';
+import {
+  createAuthorizationCursorCodec,
+  createAuthorizedTaproot,
+  createItem,
+  createTaprootHostWriteCapability,
+  initializeTaproot,
+  setLabel,
+} from '@gnolith/taproot';
 
 await initializeTaproot(env.DB, { baseIri: 'https://knowledge.example' });
-const knowledge = new TaprootRepository(env.DB, {
+const options = {
   baseIri: 'https://knowledge.example',
-});
+};
+const writeCapability = createTaprootHostWriteCapability(
+  env.DB,
+  options,
+  nonExtractableHmacSha256Key,
+);
 
-const property = await knowledge.createProperty({
-  datatype: 'string',
-  labels: { en: { language: 'en', value: 'occupation' } },
-});
-const item = await knowledge.createItem({
+const item = await createItem(env.DB, options, writeCapability, {
   labels: { en: { language: 'en', value: 'Ada Lovelace' } },
 });
+
+// The host derives context only from authenticated state and supplies current
+// canonical policy records. The cursor key is durable and host-held.
+const knowledge = createAuthorizedTaproot(env.DB, options, context, policies, {
+  cursorCodec: createAuthorizationCursorCodec(nonExtractableAesGcmKey),
+});
+const canonical = await knowledge.getEntity(item.entityId);
 ```
+
+Never accept either host key, the write capability, authorization context, or
+policy source from a request, MCP argument, prompt, or query.
 
 Use Taproot's `planTaprootMigrations`, `applyTaprootMigrations`, and
 `initializeTaproot` APIs for schema changes. The numbered SQL files document
-the historical 0.1 layout and are not an operator migration interface in 0.2.
+the historical 0.1 layout and are not an operator migration interface in 0.3.
 The package APIs own checksums, conservative adoption, application-level
 SHA-256 backfills, and RDF reprojection.
 
@@ -80,24 +98,35 @@ Diamond patch together. A stale guard or any SQL/RDF failure rolls the whole
 batch back.
 
 ```ts
-const edited = await knowledge.setLabel(item.entityId, 'fr', 'Ada Lovelace', {
-  expectedRevision: item.newRevision,
-  attribution: {
-    id: 'agent:cataloguer',
-    kind: 'agent',
-    tool: 'gnolith-mcp',
+const edited = await setLabel(
+  env.DB,
+  options,
+  writeCapability,
+  item.entityId,
+  'fr',
+  'Ada Lovelace',
+  {
+    expectedRevision: item.newRevision,
+    attribution: {
+      id: 'agent:cataloguer',
+      kind: 'agent',
+      tool: 'gnolith-mcp',
+    },
+    editSummary: 'add French label',
+    tags: ['agent'],
+    requestId: 'mcp-request-123',
   },
-  editSummary: 'add French label',
-  tags: ['agent'],
-  requestId: 'mcp-request-123',
-});
+);
 ```
 
-The public API includes reads/search; create/import/replace; soft delete,
-restore, and redirect; all term/sitelink commands; complete statement,
-qualifier, reference, and rank commands; audit/history and integrity reads;
-bulk workflows; and canonical JSON parse, validate, create, and export helpers. Top-level function forms are exported alongside
-`TaprootRepository`.
+The public API exposes canonical reads only on `AuthorizedTaprootReader`.
+Entity/history/list/term-search/audit/export and integrity operations require a
+host-created authorization context and current policy source. Public mutation
+helpers require the DB/installation-bound host write capability and return only
+entity ID, previous/new revision, and committed status;
+they do not return canonical JSON, text, RDF counts, hashes, or audit bodies.
+`TaprootRepository` and raw read helpers are intentionally absent from package
+exports in the breaking 0.3 line.
 
 Statement creation and replacement include `text` on the `Statement` itself.
 Rank, qualifier, and reference mutation methods require authored text for the
@@ -105,16 +134,21 @@ new logical statement revision. `replaceEntity` and `revertEntity` require an
 exact `statementTexts` map for every statement they carry forward. Reusing old
 wording is allowed only when the caller deliberately supplies it again.
 
-Set `requireAttribution: true` to reject unattributed writes. `validators`
-provide host policy checks without coupling Taproot to authentication, and
-`observe` receives isolated success/error timing records for committed writes.
+Set `requireAttribution: true` to reject unattributed writes. `observe` receives
+isolated success/error timing records. Public write options cannot install
+validators or RDF factories over canonical state and cannot vary the canonical
+entity-size limit; hosts perform domain validation before invoking the write
+using separately authorized input.
 
 ## SPARQL prefixes
 
 `wikibasePrefixes(baseIri)` returns site-owned `wd:`, `wds:`, `wdv:`,
 `wdref:`, `wdt:`, `p:`, `ps:`, `psv:`, `pq:`, `pqv:`, `pr:`, `prv:`, and
-`wdno:` namespaces. Pass the D1 binding to Diamond's read-only SPARQL handler
-to query them.
+`wdno:` namespaces. Diamond's database-level SPARQL handler can query them, but
+it sees the complete graph and is privileged host maintenance/debug
+infrastructure. Do not expose it to a user, agent, MCP, or search caller.
+Normal SPARQL needs an authorization-scoped dataset and final canonical policy
+recheck in the owning host.
 
 ## Limits
 

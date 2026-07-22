@@ -14,33 +14,21 @@ manifest in the `@gnolith/taproot` ledger namespace. Known version-one layouts
 are inspected before adoption. Unknown, partial, out-of-order, or
 checksum-drifted histories raise typed migration/schema errors.
 
-`AuthorizedTaprootReader` is the authorization-enforcing application/search
-read boundary. It requires a host-created `AuthorizationContext` and an
-`EntityAuthorizationSource`; neither can be omitted. See
+`AuthorizedTaprootReader` is the only application/search canonical read
+boundary. It requires a host-created `AuthorizationContext`, an
+`EntityAuthorizationSource`, and a host-issued cursor codec; none can be
+omitted. See
 [`authorization.md`](authorization.md).
-
-The older `TaprootRepository` and equivalent top-level functions remain a
-trusted maintenance/compatibility API in 0.2. They must not be exposed as a
-request-scoped, agent, MCP, or search read boundary.
 
 ## Reads
 
-Normal canonical hydration uses `AuthorizedTaprootReader.getEntity`,
-`getEntityRevision`, and `resolveEntity`. It checks canonical policy before and
-after hydration and fails closed on absent, stale, cross-installation, or
-changed authorization state.
-
-The following legacy trusted-maintenance reads are not authorization-enforcing:
-
-- `getEntity`, `resolveEntity`, `getEntityRevision`
-- `listEntities`, `listEntityRevisionsPage`, `searchEntitiesPage`
-- `getAuditEvent`, `listAuditEvents`, `verifyAuditChain`
-- `inspectEntityIntegrity`, `inspectTaprootIntegrity`
-
-Page APIs return `{ items, cursor }`. Pass the opaque cursor back unchanged.
-Entity and revision cursors are keyset cursors. Search cursors are bounded
-offset cursors and should be consumed promptly when the search index is being
-edited concurrently.
+Normal canonical hydration uses `getEntity`, `getEntityRevision`, and
+`resolveEntity`. Authorized page APIs cover `listEntities`,
+`listEntityRevisions`, `searchEntities`, and `listAuditEvents`; pass the opaque
+cursor back unchanged. `getAuditEvent`, `exportEntities`, and all integrity
+operations are also authorization-enforcing. Current policy gates every
+disclosure; historical policy is intersected and can only narrow it. Integrity
+and repair additionally require the exact `search:admin` capability.
 
 ## Writes
 
@@ -51,9 +39,13 @@ edited concurrently.
 - `softDeleteEntity`, `restoreEntity`, `redirectEntity`
 - `repairEntityProjection`
 
-All updates require `expectedRevision`. Redirects must target a live entity of
-the same type and cannot create a cycle. `resolveEntity` follows a bounded
-chain and reports every hop.
+All updates require `expectedRevision`. Public write helpers return a minimal
+`MutationReceipt`, never canonical content, and require a
+`TaprootHostWriteCapability` created with a non-extractable HMAC-SHA-256 host
+key. The capability is process-local and bound to the exact database object and
+normalized base IRI; it cannot be serialized or reused across bindings or
+installations. Redirects must target a live entity of the same type and cannot
+create a cycle. `resolveEntity` follows a bounded chain and reports every hop.
 
 `createStatement` and `createReference` build correctly shaped values. Import
 accepts trusted explicit Q/P IDs and advances counters. `importEntities`
@@ -75,9 +67,13 @@ An edit can contain structured `attribution`, `editSummary`, sorted/deduplicated
 `system`. The legacy `actor` string remains accepted and is normalized to a
 human attribution record.
 
-Set `requireAttribution`, `validators`, `clock`, `createId`, `observe`, entity
-size, and bulk limits in `TaprootOptions`. Validators run before the D1 batch.
-Observers cannot fail or roll back committed writes.
+Public `TaprootWriteOptions` support `requireAttribution`, `clock`, `createId`,
+`observe`, and bulk limits. They deliberately reject validators, RDF factories,
+and a caller-selected entity-size limit because those can observe preexisting
+canonical content during a mutation. Hosts perform domain validation over
+separately authorized input. Observers cannot fail or roll back committed
+writes. Host assembly must not expose the database binding or write capability
+to request, user, agent, or MCP code.
 
 All domain failures extend `TaprootError` and expose a stable uppercase
 snake-case `code` in addition to their exported class for `instanceof` checks.

@@ -7,9 +7,12 @@ rebuildable projections and never become a competing statement model.
 
 Every write performs the same transaction:
 
-1. Load the current entity and enforce its expected revision.
-2. Apply commands, validate the whole document, referenced Property
-   datatypes, host validators, size limits, attribution, and lifecycle rules.
+1. Validate the host write capability against the exact database binding and
+   installation before database access, then load the current entity and
+   enforce its expected revision.
+2. Apply commands and validate the whole document, referenced Property
+   datatypes, fixed size limits, attribution, and lifecycle rules. Public write
+   configuration cannot install callbacks over preexisting canonical state.
 3. Serialize canonical JSON and compute its SHA-256 content/parent hashes.
 4. Build the complete RDF closure and search-term projection.
 5. Commit the current row, immutable revision, audit event, terms, RDF patch,
@@ -29,3 +32,8 @@ attribution/audit history, deterministic projections, migration, integrity,
 and repair. It deliberately does not own authentication, authorization, MCP,
 agents, UI, wiki article bodies, media storage, or arbitrary SPARQL Update.
 It also does not own Site assembly, provisioning, deployment, or acceptance.
+
+The normal package export contains no raw canonical repository. Diamond's raw
+SPARQL view covers the complete projection and is privileged maintenance/debug
+infrastructure until a host builds an authorization-scoped dataset and applies
+the owning canonical domain's final hydration recheck.

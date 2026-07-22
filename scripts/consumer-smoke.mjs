@@ -58,8 +58,12 @@ writeFileSync(
   `
     import { createSparqlHandler } from '@gnolith/diamond';
     import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
+    import * as taprootApi from '@gnolith/taproot';
     import {
-      TaprootRepository,
+      addStatement,
+      createItem,
+      createProperty,
+      createTaprootHostWriteCapability,
       initializeTaproot,
       inspectTaprootSchema,
     } from '@gnolith/taproot';
@@ -72,18 +76,30 @@ writeFileSync(
       compatibilityFlags: ['nodejs_compat'],
       d1Databases: { DB: crypto.randomUUID() },
     });
+    let d1WriteCapability;
     try {
       const db = await miniflare.getD1Database('DB');
-      await initializeTaproot(db, { baseIri: 'https://knowledge.example' });
-      const taproot = new TaprootRepository(db, {
-        baseIri: 'https://knowledge.example',
-      });
-      await taproot.createProperty({ id: 'P1', datatype: 'string' });
-      const item = await taproot.createItem({
+      const options = { baseIri: 'https://knowledge.example' };
+      await initializeTaproot(db, options);
+      d1WriteCapability = createTaprootHostWriteCapability(
+        db,
+        options,
+        await crypto.subtle.generateKey(
+          { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+        ),
+      );
+      await createProperty(db, options, d1WriteCapability, { id: 'P1', datatype: 'string' });
+      const item = await createItem(db, options, d1WriteCapability, {
         id: 'Q1',
         labels: { en: { language: 'en', value: 'clean consumer' } },
       });
-      await taproot.addStatement(
+      if ('entity' in item || 'quadPatch' in item || item.status !== 'committed') {
+        throw new Error('public write receipt disclosed canonical state');
+      }
+      await addStatement(
+        db,
+        options,
+        d1WriteCapability,
         'Q1',
         {
           id: 'Q1$consumer',
@@ -120,14 +136,78 @@ writeFileSync(
 
     const local = new NodeSqliteDatabase(':memory:');
     try {
-      await initializeTaproot(local, { baseIri: 'https://local.example' });
-      const taproot = new TaprootRepository(local, {
-        baseIri: 'https://local.example',
-      });
-      await taproot.createItem({
+      const options = { baseIri: 'https://local.example' };
+      await initializeTaproot(local, options);
+      const localWriteCapability = createTaprootHostWriteCapability(
+        local,
+        options,
+        await crypto.subtle.generateKey(
+          { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+        ),
+      );
+      await createItem(local, options, localWriteCapability, {
         id: 'Q1',
         labels: { en: { language: 'en', value: 'packed local consumer' } },
       });
+      for (const forbidden of [
+        'TaprootRepository', 'createTaproot', 'getEntity', 'listEntities',
+        'searchEntities', 'listAuditEvents', 'exportEntities',
+        'inspectEntityIntegrity', 'repairEntityProjection',
+      ]) {
+        if (forbidden in taprootApi) throw new Error('raw read bypass exported: ' + forbidden);
+      }
+      let validatorsRejected = false;
+      try {
+        await createItem(local, { ...options, validators: [] }, localWriteCapability, { id: 'Q2' });
+      } catch {
+        validatorsRejected = true;
+      }
+      if (!validatorsRejected) throw new Error('write validator read bypass remained');
+      for (const forbiddenOptions of [
+        { ...options, factory: {} },
+        { ...options, maxEntityBytes: 1 },
+      ]) {
+        let rejected = false;
+        try {
+          await createItem(local, forbiddenOptions, localWriteCapability, { id: 'Q2' });
+        } catch {
+          rejected = true;
+        }
+        if (!rejected) throw new Error('write configuration read bypass remained');
+      }
+      for (const forbiddenCapability of [
+        undefined,
+        { kind: 'taproot-host-write-v1' },
+        JSON.parse(JSON.stringify(localWriteCapability)),
+        d1WriteCapability,
+      ]) {
+        let rejected = false;
+        try {
+          await createItem(local, options, forbiddenCapability, { id: 'Q2' });
+        } catch {
+          rejected = true;
+        }
+        if (!rejected) throw new Error('write capability boundary was forgeable');
+      }
+      let crossInstallationRejected = false;
+      try {
+        await createItem(
+          local,
+          { baseIri: 'https://other.example' },
+          localWriteCapability,
+          { id: 'Q2' },
+        );
+      } catch {
+        crossInstallationRejected = true;
+      }
+      if (!crossInstallationRejected) throw new Error('write capability crossed installation');
+      let deepImportRejected = false;
+      try {
+        await import('@gnolith/taproot/dist/repository.js');
+      } catch (error) {
+        deepImportRejected = error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED';
+      }
+      if (!deepImportRejected) throw new Error('raw repository deep import remained available');
       const schema = await inspectTaprootSchema(local);
       if (!schema.valid) throw new Error('fresh node:sqlite schema inspection failed');
     } finally {

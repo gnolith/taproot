@@ -4,12 +4,13 @@ import { describe, expect, it } from 'vitest';
 import { runTaprootInteropDemo } from '../examples/d1-diamond-interop/demo.js';
 import {
   AuthorizationDeniedError,
-  TaprootRepository,
+  createAuthorizationCursorCodec,
   createAuthorizedTaproot,
   initializeTaproot,
   type CanonicalAuthorizationRecord,
   type EntityAuthorizationSource,
 } from '../src/index.js';
+import { TaprootRepository } from '../src/repository.js';
 
 describe('local D1 and Diamond interoperability example', () => {
   it('coordinates Taproot writes and Diamond SPARQL on local Workerd D1', async () => {
@@ -97,6 +98,15 @@ describe('local D1 and Diamond interoperability example', () => {
           authorizationRevision: 4,
         },
         source,
+        {
+          cursorCodec: createAuthorizationCursorCodec(
+            await crypto.subtle.generateKey(
+              { name: 'AES-GCM', length: 256 },
+              false,
+              ['encrypt', 'decrypt'],
+            ),
+          ),
+        },
       );
       await expect(reader.getEntity('Q1')).resolves.toMatchObject({
         entity: { id: 'Q1' },
