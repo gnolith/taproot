@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Added the additive unified-search V1 type/normalization contract and pure,
+  authorization-preserving Statement and Item projection planning. The seven
+  kind vocabulary is recognized, while five deferred projectors fail explicitly.
+- Added deterministic canonical bytes, hashes, IDs, lossless bounded chunking,
+  and cursor-binding inputs. This does not add search execution, persistence,
+  migration 0005, ranking, snippets, cursor issuance, health/rebuild, or Site
+  deployment, and it does not change legacy term search or SPARQL.
+
 ## 0.3.0
 
 - **Breaking 0.3 API:** removed `TaprootRepository`, `createTaproot`, and every

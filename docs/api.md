@@ -1,5 +1,10 @@
 # API guide
 
+The additive unified-search V1 types, strict normalizers, deterministic
+serialization utilities, and pure Statement/Item projectors are documented in
+[search-contract.md](search-contract.md). They do not replace the legacy
+term-search types or SPARQL surface and do not execute a search.
+
 ## Persistence and migrations
 
 Taproot accepts Diamond's runtime-neutral `SqliteDatabaseLike`; the exported

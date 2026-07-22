@@ -62,15 +62,20 @@ writeFileSync(
     import {
       addStatement,
       bootstrapTaprootAuthorization,
+      canonicalSearchBytesV1,
       createItem,
       createProperty,
       createInstallationAuthorizationGuard,
       createInstallationDomainMutationGuard,
       createTaprootHostWriteCapability,
+      createSearchProjectionAuthorizationAuthorityV1,
+      createTrustedSearchAuthorizationEnvelopeV1,
       initializeTaproot,
       inspectTaprootSchema,
       KNOWLEDGE_POLICY_CAPABILITY,
       KNOWLEDGE_WRITE_CAPABILITY,
+      PersistedEntityAuthorizationSource,
+      projectStatementForUnifiedSearchV1,
     } from '@gnolith/taproot';
     import { Miniflare } from 'miniflare';
 
@@ -236,6 +241,77 @@ writeFileSync(
         labels: { en: { language: 'en', value: 'packed local consumer' } },
         authorization: policy(1),
       });
+      const projectionAuthority = createSearchProjectionAuthorizationAuthorityV1(
+        new PersistedEntityAuthorizationSource(local),
+      );
+      const statementAuthorizationInput = {
+        version: 1,
+        sourceKind: 'statement',
+        sourceId: 'Q1$packed-search',
+        sourceRevision: '2',
+        installationId,
+        workspaceId: null,
+        ownerPrincipalId: 'packed-consumer-principal',
+        authorizationRevision: 2,
+        visibility: { version: 1, clauses: [] },
+      };
+      let forgedProjectionAuthorityRejected = false;
+      try {
+        await createTrustedSearchAuthorizationEnvelopeV1(
+          { kind: 'taproot-search-projection-authorization-authority-v1' },
+          statementAuthorizationInput,
+        );
+      } catch {
+        forgedProjectionAuthorityRejected = true;
+      }
+      if (!forgedProjectionAuthorityRejected) {
+        throw new Error('request data constructed a trusted projection envelope');
+      }
+      const statementAuthorization = await createTrustedSearchAuthorizationEnvelopeV1(
+        projectionAuthority,
+        statementAuthorizationInput,
+      );
+      const statementPlan = await projectStatementForUnifiedSearchV1({
+        source: {
+          version: 1,
+          eventId: 'packed-search-event',
+          operation: 'upsert',
+          installationId,
+          kind: 'statement',
+          sourceId: 'Q1$packed-search',
+          sourceRevision: '2',
+          sourceHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          authorizationRevision: 2,
+          searchGeneration: 2,
+        },
+        itemId: 'Q1',
+        statement: {
+          id: 'Q1$packed-search',
+          type: 'statement',
+          text: 'Packed projection text.',
+          rank: 'normal',
+          mainsnak: {
+            snaktype: 'value',
+            property: 'P1',
+            datatype: 'string',
+            datavalue: { type: 'string', value: 'not projected' },
+          },
+          qualifiers: {},
+          'qualifiers-order': [],
+          references: [],
+        },
+        authorization: statementAuthorization,
+        maxChunkBytes: 8,
+      });
+      if (
+        statementPlan.documents[0]?.text !== 'Packed projection text.' ||
+        statementPlan.chunks.map(({ text }) => text).join('') !== 'Packed projection text.' ||
+        statementPlan.chunks.some(({ canonical }) => canonical !== false) ||
+        new TextDecoder().decode(canonicalSearchBytesV1({ z: null, a: 'e\\u0301' })) !==
+          '{"a":"é","z":null}'
+      ) {
+        throw new Error('packed unified search projection contract failed');
+      }
       if (
         'prepareAuthorizationAdvance' in localGuard ||
         'prepareExpectedRevisionFence' in localGuard

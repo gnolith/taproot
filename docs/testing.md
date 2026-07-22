@@ -5,6 +5,15 @@ serialization, and RDF mapping fixtures. Integration tests run against
 Miniflare's Workerd D1 implementation and initialize Diamond and Taproot in the
 same database.
 
+`test/search-contract.test.ts` pins the exact seven-kind V1 vocabulary and
+filter matrix, strict limits and public shapes, Unicode/null/order canonical
+vectors, cursor bindings, opaque projection authority, logical Statement
+projection, Item no-omission splitting, mixed-scope partition/rejection,
+hostile widening prevention, chunk trace/noncanonicality, and explicit
+unsupported errors for deferred projectors. The packed consumer repeats the
+public serialization, pure projection, and forged-authority checks from the
+installed tarball.
+
 The Workerd suite exercises successful edits, malformed and oversized input,
 optimistic conflicts, concurrent writers, migration, immutable history,
 projection repair, shared RDF values, and injected RDF failures. The injected

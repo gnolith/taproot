@@ -31,3 +31,7 @@ export class BaseIriMismatchError extends TaprootError {}
 export class TaprootMigrationStateError extends SchemaMismatchError {}
 export class InvalidAuthorizationError extends TaprootError {}
 export class AuthorizationDeniedError extends TaprootError {}
+export class InvalidSearchContractError extends TaprootError {}
+export class UnsupportedSearchProjectionError extends TaprootError {}
+export class MixedSearchProjectionScopeError extends TaprootError {}
+export class SearchProjectionLimitError extends TaprootError {}
