@@ -431,7 +431,11 @@ function stringArray(
 ): string[] {
   if (!Array.isArray(value) || value.length > maximumItems)
     invalid(`${field} is invalid`);
-  const result = value.map((entry) => token(entry, field, maximumLength));
+  const result: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.hasOwn(value, index)) invalid(`${field} is invalid`);
+    result.push(token(value[index], field, maximumLength));
+  }
   if (new Set(result).size !== result.length) invalid(`${field} is invalid`);
   return result;
 }

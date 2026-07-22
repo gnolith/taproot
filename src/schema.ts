@@ -401,6 +401,58 @@ export const taprootSearchSourceEventSchemaStatements = [
              AND source_revision = NEW.source_revision)
     )
     BEGIN SELECT RAISE(ABORT, 'taproot unified-search source events cannot be replaced'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_events_predecessor_guard
+    BEFORE INSERT ON taproot_unified_search_source_events
+    WHEN NEW.predecessor_sequence IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM taproot_unified_search_source_events
+      WHERE sequence = NEW.predecessor_sequence
+        AND event_id = NEW.predecessor_event_id
+        AND installation_id = NEW.installation_id
+        AND domain = NEW.domain
+        AND source_kind = NEW.source_kind
+        AND source_id = NEW.source_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source predecessor is invalid'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_registry_event_insert_guard
+    BEFORE INSERT ON taproot_unified_search_source_registry
+    WHEN NOT EXISTS (
+      SELECT 1 FROM taproot_unified_search_source_events
+      WHERE sequence = NEW.current_event_sequence
+        AND event_id = NEW.current_event_id
+        AND installation_id = NEW.installation_id
+        AND domain = NEW.domain
+        AND source_kind = NEW.source_kind
+        AND source_id = NEW.source_id
+        AND operation = NEW.operation
+        AND change_class = NEW.change_class
+        AND source_revision = NEW.source_revision
+        AND source_hash = NEW.source_hash
+        AND authorization_revision = NEW.authorization_revision
+        AND search_generation = NEW.search_generation
+        AND payload_hash = NEW.payload_hash
+        AND created_at = NEW.updated_at
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source registry event is invalid'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_registry_event_update_guard
+    BEFORE UPDATE ON taproot_unified_search_source_registry
+    WHEN NOT EXISTS (
+      SELECT 1 FROM taproot_unified_search_source_events
+      WHERE sequence = NEW.current_event_sequence
+        AND event_id = NEW.current_event_id
+        AND installation_id = NEW.installation_id
+        AND domain = NEW.domain
+        AND source_kind = NEW.source_kind
+        AND source_id = NEW.source_id
+        AND operation = NEW.operation
+        AND change_class = NEW.change_class
+        AND source_revision = NEW.source_revision
+        AND source_hash = NEW.source_hash
+        AND authorization_revision = NEW.authorization_revision
+        AND search_generation = NEW.search_generation
+        AND payload_hash = NEW.payload_hash
+        AND created_at = NEW.updated_at
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source registry event is invalid'); END`,
   `CREATE TRIGGER IF NOT EXISTS taproot_search_source_registry_identity_no_update
     BEFORE UPDATE OF installation_id, source_kind, source_id, domain
     ON taproot_unified_search_source_registry

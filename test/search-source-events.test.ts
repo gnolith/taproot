@@ -203,6 +203,16 @@ describe('opaque InstallationSearchSourceGuardV1', () => {
         { changeClasses: ['canonical'] },
       ),
     ).toThrow(InvalidSearchSourceEventError);
+    const sparseChangeClasses = new Array<string>(2);
+    sparseChangeClasses[1] = 'canonical';
+    expect(() =>
+      normalizeInstallationSearchSourceBindingV1({
+        domain: 'tasks',
+        sourceKind: 'task',
+        capability: 'task:write',
+        changeClasses: sparseChangeClasses,
+      }),
+    ).toThrow(InvalidSearchSourceEventError);
   });
 
   it('commits sibling SQL, one generation, event and registry atomically; exact replay is a no-op', async () => {
@@ -408,6 +418,117 @@ describe('opaque InstallationSearchSourceGuardV1', () => {
       await env.close();
     }
   });
+
+  it('commits, replays, rolls back, and fences predecessor races on real Workerd D1', async () => {
+    const env = await workerdEnvironment();
+    try {
+      await bootstrapTaprootAuthorization(
+        env.db,
+        options,
+        env.capability,
+        installationId,
+      );
+      await env.db
+        .prepare(`CREATE TABLE test_domain_values(value TEXT UNIQUE) STRICT`)
+        .run();
+      const guard = await createInstallationSearchSourceGuardV1(
+        env.db,
+        options,
+        env.capability,
+        taskBinding(),
+      );
+      const first = sourceEvent('workerd-task-event-1', 'task-1', 'r1', null);
+      expect(
+        await guard.batchWithSourceEvent(taskContext(), first, [
+          env.db.prepare(
+            `INSERT INTO test_domain_values(value) VALUES ('first')`,
+          ),
+        ]),
+      ).toMatchObject({ searchGeneration: 2, replayed: false });
+      expect(
+        await guard.batchWithSourceEvent(taskContext(), first, [
+          env.db.prepare(
+            `INSERT INTO test_domain_values(value) VALUES ('replay-must-not-run')`,
+          ),
+        ]),
+      ).toMatchObject({ searchGeneration: 2, replayed: true });
+
+      const predecessor = await currentPredecessor(env.db, 'task', 'task-1');
+      const attempts = await Promise.allSettled([
+        guard.batchWithSourceEvent(
+          taskContext(),
+          sourceEvent('workerd-task-event-2a', 'task-1', 'r2a', predecessor),
+          [
+            env.db.prepare(
+              `INSERT INTO test_domain_values(value) VALUES ('winner-a')`,
+            ),
+          ],
+        ),
+        guard.batchWithSourceEvent(
+          taskContext(),
+          sourceEvent('workerd-task-event-2b', 'task-1', 'r2b', predecessor),
+          [
+            env.db.prepare(
+              `INSERT INTO test_domain_values(value) VALUES ('winner-b')`,
+            ),
+          ],
+        ),
+      ]);
+      expect(
+        attempts.filter(({ status }) => status === 'fulfilled'),
+      ).toHaveLength(1);
+      expect(
+        attempts.filter(({ status }) => status === 'rejected'),
+      ).toHaveLength(1);
+      expect(await installationGeneration(env.db)).toBe(3);
+      expect(await count(env.db, 'taproot_unified_search_source_events')).toBe(
+        2,
+      );
+      expect(await count(env.db, 'test_domain_values')).toBe(2);
+
+      const next = await currentPredecessor(env.db, 'task', 'task-1');
+      await expect(
+        guard.batchWithSourceEvent(
+          taskContext(),
+          sourceEvent('workerd-task-rollback', 'task-1', 'r3', next),
+          [
+            env.db.prepare(
+              `INSERT INTO test_domain_values(value) VALUES ('first')`,
+            ),
+          ],
+        ),
+      ).rejects.toBeDefined();
+      expect(await installationGeneration(env.db)).toBe(3);
+      expect(await count(env.db, 'taproot_unified_search_source_events')).toBe(
+        2,
+      );
+
+      await expectMalformedSourcePointersRejected(env.db, guard);
+    } finally {
+      await env.close();
+    }
+  }, 30_000);
+
+  it('rejects malformed predecessor and registry pointers on Node SQLite', async () => {
+    const env = await nodeEnvironment();
+    try {
+      await bootstrapTaprootAuthorization(
+        env.db,
+        options,
+        env.capability,
+        installationId,
+      );
+      const guard = await createInstallationSearchSourceGuardV1(
+        env.db,
+        options,
+        env.capability,
+        taskBinding(),
+      );
+      await expectMalformedSourcePointersRejected(env.db, guard);
+    } finally {
+      await env.close();
+    }
+  });
 });
 
 describe('Taproot Item root source events', () => {
@@ -567,6 +688,147 @@ async function nodeEnvironment(): Promise<{
   const db = new NodeSqliteDatabase(join(directory, 'taproot.sqlite'));
   await initializeTaproot(db, options);
   return { db, capability: await writeCapability(db), close: () => db.close() };
+}
+
+async function workerdEnvironment(): Promise<{
+  db: D1DatabaseLike;
+  capability: TaprootHostWriteCapability;
+  close(): Promise<void>;
+}> {
+  const miniflare = new Miniflare({
+    modules: true,
+    script: 'export default { fetch() { return new Response("ok") } }',
+    compatibilityDate: '2026-07-19',
+    compatibilityFlags: ['nodejs_compat'],
+    d1Databases: { DB: crypto.randomUUID() },
+  });
+  const db = (await miniflare.getD1Database('DB')) as unknown as D1DatabaseLike;
+  await initializeTaproot(db, options);
+  return {
+    db,
+    capability: await writeCapability(db),
+    close: () => miniflare.dispose(),
+  };
+}
+
+async function expectMalformedSourcePointersRejected(
+  db: D1DatabaseLike,
+  guard: Awaited<ReturnType<typeof createInstallationSearchSourceGuardV1>>,
+): Promise<void> {
+  const first = sourceEvent('integrity-event-1', 'integrity-task', 'r1', null);
+  await guard.batchWithSourceEvent(taskContext(), first, [domainNoop(db)]);
+  const firstPredecessor = await currentPredecessor(
+    db,
+    'task',
+    'integrity-task',
+  );
+  await guard.batchWithSourceEvent(
+    taskContext(),
+    sourceEvent('integrity-event-2', 'integrity-task', 'r2', firstPredecessor),
+    [domainNoop(db)],
+  );
+  const secondPredecessor = await currentPredecessor(
+    db,
+    'task',
+    'integrity-task',
+  );
+  const generation = await installationGeneration(db);
+  await expect(
+    db
+      .prepare(
+        `INSERT INTO taproot_unified_search_source_events(
+           event_id, installation_id, domain, source_kind, source_id,
+           operation, change_class, source_revision, source_hash,
+           authorization_revision, search_generation, predecessor_event_id,
+           predecessor_sequence, payload_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        'integrity-bad-pair',
+        installationId,
+        'tasks',
+        'task',
+        'integrity-task',
+        'upsert',
+        'canonical',
+        'r3-bad',
+        'a'.repeat(64),
+        1,
+        generation + 1,
+        firstPredecessor.eventId,
+        secondPredecessor.sequence,
+        'b'.repeat(64),
+        '2026-07-22T00:00:00.000Z',
+      )
+      .run(),
+  ).rejects.toBeDefined();
+
+  const stagedCreatedAt = '2026-07-22T00:00:01.000Z';
+  await db
+    .prepare(
+      `INSERT INTO taproot_unified_search_source_events(
+         event_id, installation_id, domain, source_kind, source_id,
+         operation, change_class, source_revision, source_hash,
+         authorization_revision, search_generation, predecessor_event_id,
+         predecessor_sequence, payload_hash, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      'integrity-staged-event-3',
+      installationId,
+      'tasks',
+      'task',
+      'integrity-task',
+      'upsert',
+      'canonical',
+      'r3-staged',
+      'c'.repeat(64),
+      1,
+      generation + 1,
+      secondPredecessor.eventId,
+      secondPredecessor.sequence,
+      'd'.repeat(64),
+      stagedCreatedAt,
+    )
+    .run();
+  const staged = await db
+    .prepare(
+      `SELECT sequence FROM taproot_unified_search_source_events
+       WHERE event_id = 'integrity-staged-event-3'`,
+    )
+    .all<{ sequence: number }>();
+  await expect(
+    db
+      .prepare(
+        `UPDATE taproot_unified_search_source_registry SET
+           current_event_id = 'integrity-staged-event-3',
+           current_event_sequence = ?, operation = 'upsert',
+           change_class = 'canonical', source_revision = 'r3-staged',
+           source_hash = ?, authorization_revision = 1,
+           search_generation = ?, payload_hash = ?, updated_at = ?
+         WHERE installation_id = ? AND source_kind = 'task'
+           AND source_id = 'integrity-task'`,
+      )
+      .bind(
+        Number(staged.results[0]?.sequence),
+        'c'.repeat(64),
+        generation + 1,
+        'e'.repeat(64),
+        stagedCreatedAt,
+        installationId,
+      )
+      .run(),
+  ).rejects.toBeDefined();
+  expect(await currentPredecessor(db, 'task', 'integrity-task')).toEqual(
+    secondPredecessor,
+  );
+}
+
+function domainNoop(db: D1DatabaseLike) {
+  return db.prepare(
+    `UPDATE taproot_metadata SET metadata_value = metadata_value
+     WHERE metadata_key = 'schema_version'`,
+  );
 }
 
 async function writeCapability(db: D1DatabaseLike) {
