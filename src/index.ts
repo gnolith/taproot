@@ -4,6 +4,18 @@ import type {
   SqliteResultLike,
 } from '@gnolith/diamond';
 import { InvalidAuthorizationError } from './errors.js';
+import {
+  assertExactSearchSourceReplayV1,
+  inspectUnifiedSearchSourceReplayV1,
+  normalizeInstallationSearchSourceBindingV1,
+  normalizeUnifiedSearchSourceEventInputV1,
+  prepareUnifiedSearchSourceEventStatementsV1,
+  readPersistedSearchSourceRegistryV1,
+  unifiedSearchSourcePayloadHashV1,
+  type InstallationSearchSourceBindingV1,
+  type InstallationSearchSourceGuardV1,
+  type UnifiedSearchSourceEventInputV1,
+} from './search-source-events.js';
 import { canonicalizeTaprootBaseIri } from './migrations.js';
 import {
   KNOWLEDGE_WRITE_CAPABILITY,
@@ -163,6 +175,17 @@ const installationDomainMutationGuards = new WeakMap<
   DomainGuardBinding
 >();
 
+interface SearchSourceGuardBinding extends InstallationGuardBinding {
+  sourceKind: InstallationSearchSourceBindingV1['sourceKind'];
+  capability: string;
+  changeClasses: readonly string[];
+}
+
+const installationSearchSourceGuards = new WeakMap<
+  object,
+  SearchSourceGuardBinding
+>();
+
 interface InternalInstallationAuthorizationState extends InstallationAuthorizationState {
   lastAdvanceId: string;
 }
@@ -204,6 +227,21 @@ export * from './errors.js';
 export * from './migrations.js';
 export * from './rdf.js';
 export * from './search-contract.js';
+export {
+  UNIFIED_SEARCH_SOURCE_KINDS_V1,
+  normalizeInstallationSearchSourceBindingV1,
+  normalizeUnifiedSearchSourceEventInputV1,
+  unifiedSearchSourcePayloadHashV1,
+} from './search-source-events.js';
+export type {
+  InstallationSearchSourceBindingV1,
+  InstallationSearchSourceEventReceiptV1,
+  InstallationSearchSourceGuardV1,
+  UnifiedSearchSourceEventInputV1,
+  UnifiedSearchSourceKindV1,
+  UnifiedSearchSourceOperationV1,
+  UnifiedSearchSourcePredecessorV1,
+} from './search-source-events.js';
 export * from './schema.js';
 export * from './types.js';
 
@@ -589,6 +627,171 @@ export async function createInstallationDomainMutationGuard(
     },
   });
   installationDomainMutationGuards.set(guard, binding);
+  return guard;
+}
+
+/**
+ * Assembly issues this opaque guard for exactly one non-Knowledge source kind.
+ * It owns source-event persistence only; it does not materialize or query search.
+ */
+export async function createInstallationSearchSourceGuardV1(
+  db: D1DatabaseLike,
+  options: TaprootWriteOptions,
+  hostCapability: TaprootHostWriteCapability,
+  rawBinding: InstallationSearchSourceBindingV1,
+): Promise<InstallationSearchSourceGuardV1> {
+  repository(db, options, hostCapability);
+  const requested = normalizeInstallationSearchSourceBindingV1(rawBinding);
+  if (
+    requested.capability === KNOWLEDGE_WRITE_CAPABILITY ||
+    requested.capability === KNOWLEDGE_POLICY_CAPABILITY ||
+    requested.domain === 'knowledge'
+  )
+    throw new InvalidAuthorizationError(
+      'Knowledge source events are emitted by canonical mutation authority',
+    );
+  const state = await readInstallationAuthorizationState(db);
+  const binding: SearchSourceGuardBinding = {
+    db,
+    baseIri: canonicalizeTaprootBaseIri(options.baseIri),
+    installationId: state.installationId,
+    clock: options.clock ?? (() => new Date()),
+    domain: requested.domain,
+    sourceKind: requested.sourceKind,
+    capability: requested.capability,
+    changeClasses: requested.changeClasses,
+  };
+  const guard: InstallationSearchSourceGuardV1 = Object.freeze({
+    kind: 'taproot-installation-search-source-guard-v1' as const,
+    batchWithSourceEvent: async (
+      rawContext: AuthorizationContext,
+      rawEvent: UnifiedSearchSourceEventInputV1,
+      domainStatements: readonly SqlitePreparedStatementLike[],
+    ) => {
+      validateGuardDomainStatements(domainStatements);
+      if (!installationSearchSourceGuards.has(guard))
+        throw new InvalidAuthorizationError(
+          'assembly-issued search source guard is required',
+        );
+      const context = normalizeAuthorizationContext(rawContext);
+      const currentState = await readGuardState(binding);
+      if (
+        context.installationId !== currentState.installationId ||
+        context.authorizationRevision !== currentState.authorizationRevision ||
+        !context.capabilities.includes(binding.capability)
+      )
+        throw new InvalidAuthorizationError(
+          'search source authorization denied',
+        );
+      const event = normalizeUnifiedSearchSourceEventInputV1(rawEvent, binding);
+      const replay = await inspectUnifiedSearchSourceReplayV1(
+        binding.db,
+        binding.installationId,
+        binding.sourceKind,
+        event.sourceId,
+        event.sourceRevision,
+      );
+      if (replay) {
+        const replayHash = await unifiedSearchSourcePayloadHashV1(
+          binding.installationId,
+          binding.domain,
+          binding.sourceKind,
+          event,
+          replay.authorizationRevision,
+          replay.searchGeneration,
+        );
+        assertExactSearchSourceReplayV1(replay, event.eventId, replayHash);
+        return {
+          eventId: event.eventId,
+          authorizationRevision: replay.authorizationRevision,
+          searchGeneration: replay.searchGeneration,
+          replayed: true,
+          results: [],
+        };
+      }
+      const predecessor = await readPersistedSearchSourceRegistryV1(
+        binding.db,
+        binding.installationId,
+        binding.sourceKind,
+        event.sourceId,
+      );
+      if (
+        (predecessor === null && event.predecessor !== null) ||
+        (predecessor !== null &&
+          (event.predecessor === null ||
+            predecessor.domain !== binding.domain ||
+            predecessor.eventId !== event.predecessor.eventId ||
+            predecessor.sequence !== event.predecessor.sequence))
+      )
+        throw new InvalidAuthorizationError(
+          'search source predecessor does not match persisted ownership',
+        );
+      const searchGeneration = currentState.searchGeneration + 1;
+      if (!Number.isSafeInteger(searchGeneration))
+        throw new InvalidAuthorizationError('search generation is exhausted');
+      const createdAt = binding.clock().toISOString();
+      const prepared = await prepareUnifiedSearchSourceEventStatementsV1(
+        binding.db,
+        {
+          installationId: binding.installationId,
+          domain: binding.domain,
+          sourceKind: binding.sourceKind,
+          authorizationRevision: currentState.authorizationRevision,
+          searchGeneration,
+          createdAt,
+        },
+        event,
+        binding.changeClasses,
+      );
+      const advance = binding.db
+        .prepare(
+          `UPDATE taproot_installation_authorization
+           SET search_generation = ?, last_advance_id = ?, updated_at = ?
+           WHERE singleton = 1 AND installation_id = ?
+             AND authorization_revision = ? AND search_generation = ?
+             AND last_advance_id = ?`,
+        )
+        .bind(
+          searchGeneration,
+          event.eventId,
+          createdAt,
+          binding.installationId,
+          currentState.authorizationRevision,
+          currentState.searchGeneration,
+          currentState.lastAdvanceId,
+        );
+      const fence = binding.db
+        .prepare(
+          `INSERT INTO taproot_assertions(assertion_key)
+           SELECT NULL WHERE NOT EXISTS (
+             SELECT 1 FROM taproot_installation_authorization
+             WHERE singleton = 1 AND installation_id = ?
+               AND authorization_revision = ? AND search_generation = ?
+               AND last_advance_id = ?
+           )`,
+        )
+        .bind(
+          binding.installationId,
+          currentState.authorizationRevision,
+          searchGeneration,
+          event.eventId,
+        );
+      const results = await binding.db.batch([
+        ...domainStatements,
+        advance,
+        fence,
+        ...prepared.statements,
+      ]);
+      return {
+        eventId: event.eventId,
+        authorizationRevision: currentState.authorizationRevision,
+        searchGeneration,
+        replayed: false,
+        results,
+      };
+    },
+  });
+  installationSearchSourceGuards.set(guard, binding);
   return guard;
 }
 

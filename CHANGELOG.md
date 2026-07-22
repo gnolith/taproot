@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added DDL-only migration 0005 with an immutable, metadata-only unified-search
+  source-event log and current registry, plus opaque domain-bound atomic event
+  guards and one root event per Taproot Item mutation. This does not add jobs,
+  leasing, materialization, rebuild, health, query execution, semantic search,
+  Seedbed assembly, or Site deployment; the authorization outbox is unchanged.
+- Added persisted Node SQLite and real Workerd D1 migration/concurrency/
+  rollback/security coverage and a reproducible capped 100k ingest artifact.
+
 - Added the additive unified-search V1 type/normalization contract and pure,
   authorization-preserving Statement and Item projection planning. The seven
   kind vocabulary is recognized, while five deferred projectors fail explicitly.

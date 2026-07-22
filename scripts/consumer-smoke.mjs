@@ -67,6 +67,7 @@ writeFileSync(
       createProperty,
       createInstallationAuthorizationGuard,
       createInstallationDomainMutationGuard,
+      createInstallationSearchSourceGuardV1,
       createTaprootHostWriteCapability,
       createSearchProjectionAuthorizationAuthorityV1,
       createTrustedSearchAuthorizationEnvelopeV1,
@@ -232,11 +233,59 @@ writeFileSync(
       if (!crossCapabilityRejected) {
         throw new Error('packed domain guard accepted a cross-domain capability');
       }
+      let forgedSourceAuthorityRejected = false;
+      try {
+        await createInstallationSearchSourceGuardV1(
+          local,
+          options,
+          { kind: 'taproot-host-write-v1' },
+          {
+            domain: 'workshop.task',
+            sourceKind: 'task',
+            capability: 'task-write',
+            changeClasses: ['canonical'],
+          },
+        );
+      } catch {
+        forgedSourceAuthorityRejected = true;
+      }
+      if (!forgedSourceAuthorityRejected) {
+        throw new Error('packed source guard accepted caller-shaped host authority');
+      }
+      const taskSourceGuard = await createInstallationSearchSourceGuardV1(
+        local,
+        options,
+        localWriteCapability,
+        {
+          domain: 'workshop.task',
+          sourceKind: 'task',
+          capability: 'task-write',
+          changeClasses: ['canonical'],
+        },
+      );
+      const sourceCommit = await taskSourceGuard.batchWithSourceEvent(
+        taskContext,
+        {
+          eventId: 'packed-task-source-1',
+          sourceId: 'task-1',
+          operation: 'upsert',
+          changeClass: 'canonical',
+          sourceRevision: 'opaque-r1',
+          sourceHash: 'a'.repeat(64),
+          predecessor: null,
+        },
+        [local.prepare("INSERT INTO packed_task_probe(id) VALUES ('task-source-ok')")],
+      );
+      if (
+        sourceCommit.replayed ||
+        sourceCommit.authorizationRevision !== 1 ||
+        sourceCommit.searchGeneration !== 2
+      ) throw new Error('packed source guard did not atomically advance one generation');
       const fencedState = await taskGuard.readCurrentState();
       if (
         fencedState.authorizationRevision !== 1 ||
-        fencedState.searchGeneration !== 1
-      ) throw new Error('ordinary domain fence advanced authorization counters');
+        fencedState.searchGeneration !== 2
+      ) throw new Error('packed source generation was not persisted');
       await createItem(local, options, localGuard, writer(1), {
         id: 'Q1',
         labels: { en: { language: 'en', value: 'packed local consumer' } },
@@ -484,6 +533,7 @@ for (const path of [
   'migrations/0002_audit_operations.sql',
   'migrations/0003_canonical_statement_text.sql',
   'migrations/0004_canonical_authorization_policy.sql',
+  'migrations/0005_unified_search_source_events.sql',
 ]) {
   if (!existsSync(join(root, 'node_modules', packagePath, path))) {
     throw new Error(`packed artifact is missing ${path}`);

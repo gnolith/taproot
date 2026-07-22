@@ -22,6 +22,7 @@ import {
   inspectTaprootSchema,
   isExactTaprootPreFinalizeSchema,
   isExactPreAuthorizationTaprootSchema,
+  isExactPreSearchSourceEventTaprootSchema,
   isExactTaprootSchema,
   isExactTaprootUpgradeSchema,
   isRecognizedLegacyV1,
@@ -30,6 +31,7 @@ import {
   preStatementTextTaprootSchemaStatements,
   taprootFinalizeStatements,
   taprootAuthorizationSchemaStatements,
+  taprootSearchSourceEventSchemaStatements,
   taprootSchemaStatements,
   verifyTaprootPackageSeeds,
   verifyPersistedStatementText,
@@ -82,6 +84,10 @@ export const taprootMigrations = [
   {
     id: '0004-canonical-authorization-policy',
     statements: taprootAuthorizationSchemaStatements,
+  },
+  {
+    id: '0005-unified-search-source-events',
+    statements: taprootSearchSourceEventSchemaStatements,
   },
 ] as const satisfies readonly NamespacedMigration[];
 
@@ -266,7 +272,11 @@ export async function applyTaprootMigrations(
     applied.length > 0 &&
     applied.length < expected.length
   ) {
-    if (!(await isExactPreAuthorizationTaprootSchema(db)))
+    const exactPredecessor =
+      applied.length === 4
+        ? await isExactPreSearchSourceEventTaprootSchema(db)
+        : await isExactPreAuthorizationTaprootSchema(db);
+    if (!exactPredecessor)
       throw new TaprootMigrationStateError(
         'Pending Taproot migrations require the exact prior package catalog',
       );
@@ -275,7 +285,8 @@ export async function applyTaprootMigrations(
       pending.some(
         ({ migration }) =>
           migration.id !== '0003-canonical-statement-text' &&
-          migration.id !== '0004-canonical-authorization-policy',
+          migration.id !== '0004-canonical-authorization-policy' &&
+          migration.id !== '0005-unified-search-source-events',
       )
     )
       throw new TaprootMigrationStateError(
@@ -305,7 +316,7 @@ export async function applyTaprootMigrations(
       ]);
     } catch (cause) {
       throw new TaprootMigrationStateError(
-        'Canonical statement-text migration failed; existing data may lack explicitly authored text and no historical text was inferred or rewritten',
+        'Taproot additive migration failed atomically; no historical text was inferred, rewritten, or backfilled',
         { cause },
       );
     }
@@ -566,7 +577,7 @@ async function finalizeRecovery(
     db.prepare(
       `INSERT INTO taproot_assertions(assertion_key)
        SELECT NULL WHERE
-         (SELECT COUNT(*) FROM taproot_migrations) != 4
+         (SELECT COUNT(*) FROM taproot_migrations) != 5
          OR NOT EXISTS (
            SELECT 1 FROM taproot_migrations
            WHERE version = 1 AND name = 'initial'
@@ -582,6 +593,10 @@ async function finalizeRecovery(
          OR NOT EXISTS (
            SELECT 1 FROM taproot_migrations
            WHERE version = 4 AND name = 'canonical-authorization-policy'
+         )
+         OR NOT EXISTS (
+           SELECT 1 FROM taproot_migrations
+           WHERE version = 5 AND name = 'unified-search-source-events'
          )`,
     ),
     db.prepare(

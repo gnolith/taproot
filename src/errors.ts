@@ -35,3 +35,5 @@ export class InvalidSearchContractError extends TaprootError {}
 export class UnsupportedSearchProjectionError extends TaprootError {}
 export class MixedSearchProjectionScopeError extends TaprootError {}
 export class SearchProjectionLimitError extends TaprootError {}
+export class InvalidSearchSourceEventError extends TaprootError {}
+export class SearchSourceReplayConflictError extends TaprootError {}

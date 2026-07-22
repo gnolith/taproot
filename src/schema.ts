@@ -9,11 +9,12 @@ import { buildEntityQuads } from './rdf.js';
 import type { EntityId, WikibaseEntity } from './types.js';
 import { SchemaMismatchError } from './errors.js';
 
-export const TAPROOT_SCHEMA_VERSION = '3';
+export const TAPROOT_SCHEMA_VERSION = '4';
 export const TAPROOT_JSON_VERSION = '2';
 export const TAPROOT_RDF_VERSION = '2';
 
 const PRE_AUTHORIZATION_SCHEMA_VERSION = '2';
+const PRE_SEARCH_SOURCE_SCHEMA_VERSION = '3';
 
 const preAuthorizationTaprootSchemaStatements = [
   `CREATE TABLE IF NOT EXISTS taproot_entities (
@@ -327,16 +328,160 @@ export const taprootAuthorizationSchemaStatements = [
     )
     BEGIN SELECT RAISE(ABORT, 'taproot authorization advances cannot be replaced'); END`,
   `INSERT INTO taproot_metadata(metadata_key, metadata_value)
-    VALUES ('schema_version', '${TAPROOT_SCHEMA_VERSION}')
+    VALUES ('schema_version', '${PRE_SEARCH_SOURCE_SCHEMA_VERSION}')
     ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
   `INSERT INTO taproot_migrations(version, name)
     VALUES (4, 'canonical-authorization-policy')
     ON CONFLICT(version) DO NOTHING`,
 ] as const;
 
-export const taprootSchemaStatements = [
+/** Additive immutable unified-search source-event catalog introduced by migration 0005. */
+export const taprootSearchSourceEventSchemaStatements = [
+  `CREATE TABLE IF NOT EXISTS taproot_unified_search_source_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    installation_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('statement', 'item', 'task', 'memory', 'prompt', 'resource', 'annotation')),
+    source_id TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+    change_class TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    authorization_revision INTEGER NOT NULL CHECK (authorization_revision >= 1),
+    search_generation INTEGER NOT NULL CHECK (search_generation >= 1),
+    predecessor_event_id TEXT,
+    predecessor_sequence INTEGER,
+    payload_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK ((predecessor_event_id IS NULL) = (predecessor_sequence IS NULL)),
+    UNIQUE (installation_id, source_kind, source_id, source_revision),
+    FOREIGN KEY (predecessor_sequence) REFERENCES taproot_unified_search_source_events(sequence)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_unified_search_source_registry (
+    installation_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('statement', 'item', 'task', 'memory', 'prompt', 'resource', 'annotation')),
+    source_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    current_event_id TEXT NOT NULL,
+    current_event_sequence INTEGER NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+    change_class TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    authorization_revision INTEGER NOT NULL CHECK (authorization_revision >= 1),
+    search_generation INTEGER NOT NULL CHECK (search_generation >= 1),
+    payload_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (installation_id, source_kind, source_id),
+    UNIQUE (current_event_id),
+    UNIQUE (current_event_sequence),
+    FOREIGN KEY (current_event_sequence) REFERENCES taproot_unified_search_source_events(sequence)
+  ) STRICT`,
+  `CREATE INDEX IF NOT EXISTS taproot_search_source_events_replay_idx
+    ON taproot_unified_search_source_events(installation_id, source_kind, source_id, source_revision, payload_hash)`,
+  `CREATE INDEX IF NOT EXISTS taproot_search_source_events_sequence_idx
+    ON taproot_unified_search_source_events(installation_id, domain, source_kind, sequence)`,
+  `CREATE INDEX IF NOT EXISTS taproot_search_source_registry_lookup_idx
+    ON taproot_unified_search_source_registry(installation_id, domain, source_kind, source_id)`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_events_no_update
+    BEFORE UPDATE ON taproot_unified_search_source_events
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source events are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_events_no_delete
+    BEFORE DELETE ON taproot_unified_search_source_events
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source events are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_events_no_replace
+    BEFORE INSERT ON taproot_unified_search_source_events
+    WHEN EXISTS (
+      SELECT 1 FROM taproot_unified_search_source_events
+      WHERE event_id = NEW.event_id
+         OR (installation_id = NEW.installation_id
+             AND source_kind = NEW.source_kind
+             AND source_id = NEW.source_id
+             AND source_revision = NEW.source_revision)
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source events cannot be replaced'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_events_predecessor_guard
+    BEFORE INSERT ON taproot_unified_search_source_events
+    WHEN NEW.predecessor_sequence IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM taproot_unified_search_source_events
+      WHERE sequence = NEW.predecessor_sequence
+        AND event_id = NEW.predecessor_event_id
+        AND installation_id = NEW.installation_id
+        AND domain = NEW.domain
+        AND source_kind = NEW.source_kind
+        AND source_id = NEW.source_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source predecessor is invalid'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_registry_event_insert_guard
+    BEFORE INSERT ON taproot_unified_search_source_registry
+    WHEN NOT EXISTS (
+      SELECT 1 FROM taproot_unified_search_source_events
+      WHERE sequence = NEW.current_event_sequence
+        AND event_id = NEW.current_event_id
+        AND installation_id = NEW.installation_id
+        AND domain = NEW.domain
+        AND source_kind = NEW.source_kind
+        AND source_id = NEW.source_id
+        AND operation = NEW.operation
+        AND change_class = NEW.change_class
+        AND source_revision = NEW.source_revision
+        AND source_hash = NEW.source_hash
+        AND authorization_revision = NEW.authorization_revision
+        AND search_generation = NEW.search_generation
+        AND payload_hash = NEW.payload_hash
+        AND created_at = NEW.updated_at
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source registry event is invalid'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_registry_event_update_guard
+    BEFORE UPDATE ON taproot_unified_search_source_registry
+    WHEN NOT EXISTS (
+      SELECT 1 FROM taproot_unified_search_source_events
+      WHERE sequence = NEW.current_event_sequence
+        AND event_id = NEW.current_event_id
+        AND installation_id = NEW.installation_id
+        AND domain = NEW.domain
+        AND source_kind = NEW.source_kind
+        AND source_id = NEW.source_id
+        AND operation = NEW.operation
+        AND change_class = NEW.change_class
+        AND source_revision = NEW.source_revision
+        AND source_hash = NEW.source_hash
+        AND authorization_revision = NEW.authorization_revision
+        AND search_generation = NEW.search_generation
+        AND payload_hash = NEW.payload_hash
+        AND created_at = NEW.updated_at
+    )
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source registry event is invalid'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_registry_identity_no_update
+    BEFORE UPDATE OF installation_id, source_kind, source_id, domain
+    ON taproot_unified_search_source_registry
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source ownership is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_registry_no_delete
+    BEFORE DELETE ON taproot_unified_search_source_registry
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source registry is durable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_search_source_registry_sequence_guard
+    BEFORE UPDATE ON taproot_unified_search_source_registry
+    WHEN NEW.current_event_sequence <= OLD.current_event_sequence
+      OR NEW.search_generation <= OLD.search_generation
+    BEGIN SELECT RAISE(ABORT, 'taproot unified-search source registry must advance'); END`,
+  `INSERT INTO taproot_metadata(metadata_key, metadata_value)
+    VALUES ('schema_version', '${TAPROOT_SCHEMA_VERSION}')
+    ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
+  `INSERT INTO taproot_migrations(version, name)
+    VALUES (5, 'unified-search-source-events')
+    ON CONFLICT(version) DO NOTHING`,
+] as const;
+
+/** Exact package catalog immediately before migration 0005. */
+export const preSearchSourceEventTaprootSchemaStatements = [
   ...preAuthorizationTaprootSchemaStatements,
   ...taprootAuthorizationSchemaStatements,
+] as const;
+
+export const taprootSchemaStatements = [
+  ...preSearchSourceEventTaprootSchemaStatements,
+  ...taprootSearchSourceEventSchemaStatements,
 ] as const;
 
 /** Exact package-created schema before authored statement text became required. */
@@ -457,6 +602,7 @@ export const taprootFinalizeStatements = [
       sql.includes('INSERT INTO taproot_migrations'),
   ),
   ...taprootAuthorizationSchemaStatements,
+  ...taprootSearchSourceEventSchemaStatements,
 ] as const;
 
 export interface TaprootSchemaInspection {
@@ -954,15 +1100,16 @@ export async function verifyTaprootPackageSeeds(
        WHERE (version = 1 AND name = 'initial')
           OR (version = 2 AND name = 'audit-and-operations')
           OR (version = 3 AND name = 'canonical-statement-text')
-          OR (version = 4 AND name = 'canonical-authorization-policy')`,
+          OR (version = 4 AND name = 'canonical-authorization-policy')
+          OR (version = 5 AND name = 'unified-search-source-events')`,
     )
     .all<{ count: number }>();
   const migrationSeedTotal = await db
     .prepare(`SELECT COUNT(*) AS count FROM taproot_migrations`)
     .all<{ count: number }>();
   if (
-    Number(migrationSeeds.results[0]?.count ?? 0) !== 4 ||
-    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 4
+    Number(migrationSeeds.results[0]?.count ?? 0) !== 5 ||
+    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 5
   )
     throw new SchemaMismatchError(
       'Taproot package migration seeds are incomplete',
@@ -1001,6 +1148,8 @@ export async function inspectTaprootSchema(
     'taproot_authorization_backfill_plans',
     'taproot_authorization_admin_audit',
     'taproot_installation_authorization_advances',
+    'taproot_unified_search_source_events',
+    'taproot_unified_search_source_registry',
   ];
   const tables = await db
     .prepare(
@@ -1150,6 +1299,40 @@ export async function inspectTaprootSchema(
       'reason',
       'created_at',
     ],
+    taproot_unified_search_source_events: [
+      'sequence',
+      'event_id',
+      'installation_id',
+      'domain',
+      'source_kind',
+      'source_id',
+      'operation',
+      'change_class',
+      'source_revision',
+      'source_hash',
+      'authorization_revision',
+      'search_generation',
+      'predecessor_event_id',
+      'predecessor_sequence',
+      'payload_hash',
+      'created_at',
+    ],
+    taproot_unified_search_source_registry: [
+      'installation_id',
+      'source_kind',
+      'source_id',
+      'domain',
+      'current_event_id',
+      'current_event_sequence',
+      'operation',
+      'change_class',
+      'source_revision',
+      'source_hash',
+      'authorization_revision',
+      'search_generation',
+      'payload_hash',
+      'updated_at',
+    ],
   };
   for (const [table, expectedColumns] of Object.entries(authorizationColumns)) {
     if (!names.has(table)) continue;
@@ -1163,7 +1346,7 @@ export async function inspectTaprootSchema(
       );
     }
     const actualSql = tables.results.find(({ name }) => name === table)?.sql;
-    const expectedSql = taprootAuthorizationSchemaStatements.find((sql) =>
+    const expectedSql = taprootSchemaStatements.find((sql) =>
       new RegExp(
         `^\\s*CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${table}\\b`,
         'iu',
@@ -1188,6 +1371,9 @@ export async function inspectTaprootSchema(
     'taproot_entity_authorization_revision_idx',
     'taproot_statement_authorization_candidate_idx',
     'taproot_authorization_outbox_state_idx',
+    'taproot_search_source_events_replay_idx',
+    'taproot_search_source_events_sequence_idx',
+    'taproot_search_source_registry_lookup_idx',
   ];
   const indexRows = await db
     .prepare(
@@ -1220,6 +1406,12 @@ export async function inspectTaprootSchema(
     'taproot_installation_authorization_advances_no_update',
     'taproot_installation_authorization_advances_no_delete',
     'taproot_installation_authorization_advances_no_replace',
+    'taproot_search_source_events_no_update',
+    'taproot_search_source_events_no_delete',
+    'taproot_search_source_events_no_replace',
+    'taproot_search_source_registry_identity_no_update',
+    'taproot_search_source_registry_no_delete',
+    'taproot_search_source_registry_sequence_guard',
   ];
   const triggerRows = await db
     .prepare(
@@ -1281,6 +1473,13 @@ export async function isExactTaprootSchema(
   db: SqliteDatabaseLike,
 ): Promise<boolean> {
   return matchesExactCatalog(db, taprootSchemaStatements);
+}
+
+/** Exact migration-0004 predecessor catalog accepted by migration 0005. */
+export async function isExactPreSearchSourceEventTaprootSchema(
+  db: SqliteDatabaseLike,
+): Promise<boolean> {
+  return matchesExactCatalog(db, preSearchSourceEventTaprootSchemaStatements);
 }
 
 /** Exact package catalog immediately before canonical authorization migration 0004. */

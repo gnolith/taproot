@@ -58,6 +58,7 @@
     "pack:check": "npm pack --dry-run",
     "prepack": "npm run build",
     "repository:check": "node scripts/repository-check.mjs",
+    "baseline:search-source-events": "npm run build && node scripts/search-source-event-baseline.mjs",
     "release:check": "node scripts/release-check.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
