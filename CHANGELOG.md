@@ -6,6 +6,11 @@
   predecessor through their capability-bound runtime after a commit or process
   restart; durable kind registrations can be rebound only by the matching
   deterministic owner registration.
+- External producer projection text now accepts normalized multiline canonical
+  content under the same nonblank UTF-8 byte bound as built-in projections.
+- External producer adoption now persists source events and predecessors for
+  enumerated legacy owner rows, including pages adopted after materialization
+  initialization and later process restarts.
 
 - Reset search to four built-in kinds (`item`, `statement`, `resource`, and
   `annotation`) plus privately branded, namespace-bound external kinds.

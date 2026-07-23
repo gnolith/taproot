@@ -14,6 +14,7 @@ import {
 import {
   registerExternalProducerKindV1,
   registerExternalProducerV1,
+  createSearchMaterializationAdminGuardV1,
   type ExternalProducer,
 } from '../src/search.js';
 
@@ -85,6 +86,10 @@ describe('generic external producer boundary', () => {
         sourcePolicyRevision: 1,
         canonical: { title: 'A generic fixture' },
       };
+      const legacyIds = Array.from(
+        { length: 1001 },
+        (_, index) => `fixture-${index + 1}`,
+      );
       const producer: ExternalProducer = {
         descriptor: {
           registration: registeredKind.registration,
@@ -93,9 +98,26 @@ describe('generic external producer boundary', () => {
           projectionVersion: 'fixture-projection-v1',
           changeClasses: ['canonical'],
         },
-        enumerate: () =>
-          Promise.resolve({ ids: [source.sourceId], cursor: null }),
-        loadExact: () => Promise.resolve(source),
+        enumerate: (cursor, limit) => {
+          const start = cursor === null ? 0 : Number(cursor);
+          const ids = legacyIds.slice(start, start + limit);
+          const next = start + ids.length;
+          return Promise.resolve({
+            ids,
+            cursor: next < legacyIds.length ? String(next) : null,
+          });
+        },
+        loadExact: (sourceId) =>
+          Promise.resolve(
+            sourceId === source.sourceId
+              ? source
+              : {
+                  sourceId,
+                  sourceRevision: '1',
+                  sourcePolicyRevision: 1,
+                  canonical: { title: sourceId },
+                },
+          ),
         project: () => Promise.resolve({ text: 'A generic fixture document' }),
         authorize: (_reference, context) =>
           Promise.resolve(context.installationId === installationId),
@@ -107,10 +129,44 @@ describe('generic external producer boundary', () => {
         authority,
         producer,
       );
+      const materialization = await createSearchMaterializationAdminGuardV1(
+        db,
+        options,
+        authority,
+      );
+      await materialization.initialize(adminContext());
+      await expect(
+        registered.adopt(adminContext(), { limit: 1000 }),
+      ).resolves.toEqual({
+        enumerated: 1000,
+        adopted: 1000,
+        cursor: '1000',
+      });
+      await expect(
+        registered.adopt(adminContext(), { cursor: '1000', limit: 1000 }),
+      ).resolves.toEqual({
+        enumerated: 1,
+        adopted: 1,
+        cursor: null,
+      });
+      const adoptedPredecessor = await registered.currentPredecessor(
+        source.sourceId,
+      );
+      expect(adoptedPredecessor).not.toBeNull();
+      await expect(
+        materialization.run(adminContext(), {
+          maxJobs: 10,
+          maxRebuildRoots: 10,
+        }),
+      ).resolves.toMatchObject({ completed: 10, deferred: 0 });
+      await expect(
+        registered.currentPredecessor('fixture-1001'),
+      ).resolves.not.toBeNull();
+      source.sourceRevision = '2';
       const participant = await registered.issuer.seal({
         sourceId: source.sourceId,
         sourceRevision: source.sourceRevision,
-        predecessor: null,
+        predecessor: adoptedPredecessor,
         ownerMutationToken: {
           sourceId: source.sourceId,
           revision: source.sourceRevision,
@@ -218,6 +274,17 @@ describe('generic external producer boundary', () => {
           )
           .run();
         let registered = await registerRestartProducer(env.db, source);
+        const materializationKey = await crypto.subtle.generateKey(
+          { name: 'HMAC', hash: 'SHA-256' },
+          false,
+          ['sign'],
+        );
+        const materialization = await createSearchMaterializationAdminGuardV1(
+          env.db,
+          options,
+          createTaprootHostWriteCapability(env.db, options, materializationKey),
+        );
+        await materialization.initialize(adminContext());
         expect(await registered.currentPredecessor(source.sourceId)).toBeNull();
         const first = await commitRestartMutation(registered, source, null);
         const firstPredecessor = await registered.currentPredecessor(
@@ -234,6 +301,20 @@ describe('generic external producer boundary', () => {
           firstPredecessor,
         );
         expect(second.generation).toBe(first.generation + 1);
+        const materializationReceipt = await materialization.run(
+          adminContext(),
+          {
+            maxJobs: 10,
+            maxRebuildRoots: 10,
+            maxChunkBytes: 64,
+            leaseMilliseconds: 30_000,
+          },
+        );
+        expect(materializationReceipt).toMatchObject({
+          completed: 1,
+          superseded: 1,
+          deferred: 0,
+        });
         const secondPredecessor = await registered.currentPredecessor(
           source.sourceId,
         );
@@ -287,6 +368,27 @@ describe('generic external producer boundary', () => {
           secondPredecessor,
         );
         expect(third.generation).toBe(second.generation + 1);
+        const reopenedMaterializationKey = await crypto.subtle.generateKey(
+          { name: 'HMAC', hash: 'SHA-256' },
+          false,
+          ['sign'],
+        );
+        const reopenedMaterialization =
+          await createSearchMaterializationAdminGuardV1(
+            env.db,
+            options,
+            createTaprootHostWriteCapability(
+              env.db,
+              options,
+              reopenedMaterializationKey,
+            ),
+          );
+        await expect(
+          reopenedMaterialization.run(adminContext(), {
+            maxJobs: 10,
+            maxRebuildRoots: 10,
+          }),
+        ).resolves.toMatchObject({ completed: 1, deferred: 0 });
       } finally {
         await env.close();
       }
@@ -356,7 +458,8 @@ async function registerRestartProducer(
     },
     enumerate: () => Promise.resolve({ ids: [source.sourceId], cursor: null }),
     loadExact: () => Promise.resolve(source),
-    project: () => Promise.resolve({ text: 'Restart-safe source' }),
+    project: () =>
+      Promise.resolve({ text: 'Restart-safe source\nwith canonical fields' }),
     authorize: () => Promise.resolve(true),
     hydrate: () => Promise.resolve(source.canonical),
   };
@@ -403,6 +506,17 @@ function nativeRestartRuntime() {
         close: () => db.close(),
       });
     },
+  };
+}
+
+function adminContext(): AuthorizationContext {
+  return {
+    installationId,
+    principalId: 'admin',
+    activeWorkspaceId: null,
+    workspaceIds: [],
+    capabilities: ['search:admin'],
+    authorizationRevision: 1,
   };
 }
 

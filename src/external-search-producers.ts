@@ -613,6 +613,50 @@ async function adopt(
     const source = normalizeSource(await runtime.producer.loadExact(sourceId));
     if (source.sourceId !== sourceId)
       denied('external producer returned the wrong source');
+    const predecessor = await readPersistedSearchSourceRegistryV1(
+      runtime.db,
+      runtime.installationId,
+      runtime.storageKey,
+      sourceId,
+    );
+    if (predecessor?.sourceRevision !== source.sourceRevision) {
+      const sourceHash = await canonicalSearchHashV1({
+        registrationId: runtime.registrationId,
+        sourceId,
+        sourceRevision: source.sourceRevision,
+      });
+      const eventId = `external-adoption-event-${await canonicalSearchHashV1({
+        registrationId: runtime.registrationId,
+        sourceId,
+        sourceRevision: source.sourceRevision,
+        predecessorEventId: predecessor?.eventId ?? null,
+        authorizationRevision: before.authorizationRevision,
+        searchGeneration: before.generation,
+      })}`;
+      const prepared = await prepareUnifiedSearchSourceEventStatementsV1(
+        runtime.db,
+        {
+          installationId: runtime.installationId,
+          domain: runtime.ownerDomain,
+          sourceKind: runtime.storageKey,
+          sourcePolicyRevision: source.sourcePolicyRevision,
+          authorizationRevision: before.authorizationRevision,
+          searchGeneration: before.generation,
+          createdAt: runtime.clock().toISOString(),
+        },
+        {
+          eventId,
+          sourceId,
+          operation: 'upsert',
+          changeClass: runtime.descriptor.changeClasses[0]!,
+          sourceRevision: source.sourceRevision,
+          sourceHash,
+          predecessor,
+        },
+        runtime.descriptor.changeClasses,
+      );
+      await runtime.db.batch(prepared.statements);
+    }
     adopted += 1;
   }
   const after = await currentFence(runtime.db, runtime.installationId);
@@ -807,16 +851,7 @@ function normalizeProjectedDocument(
 ): Required<Pick<ExternalProjectedSearchDocumentV1, 'text'>> &
   ExternalProjectedSearchDocumentV1 {
   if (!raw || typeof raw !== 'object') denied('external projection is invalid');
-  const text = token(
-    raw.text,
-    'projection.text',
-    UNIFIED_SEARCH_LIMITS.maxProjectionTextBytes,
-  );
-  if (
-    encoder.encode(text).byteLength >
-    UNIFIED_SEARCH_LIMITS.maxProjectionTextBytes
-  )
-    denied('external projection text is too large');
+  const text = projectionText(raw.text);
   return Object.freeze({
     text,
     ...(raw.documentSlot === undefined
@@ -998,6 +1033,19 @@ function token(value: unknown, field: string, maximum: number): string {
   )
     denied(`${field} is invalid`);
   return value;
+}
+
+function projectionText(value: unknown): string {
+  if (typeof value !== 'string') denied('projection.text must be a string');
+  const normalized = value.normalize('NFC');
+  if (normalized.trim().length === 0)
+    denied('projection.text must be nonblank');
+  if (
+    encoder.encode(normalized).byteLength >
+    UNIFIED_SEARCH_LIMITS.maxProjectionTextBytes
+  )
+    denied('projection.text is too large');
+  return normalized;
 }
 
 function digest(value: unknown, field: string): string {
