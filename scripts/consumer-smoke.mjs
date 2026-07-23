@@ -68,7 +68,7 @@ writeFileSync(
         'restoreTaprootInstallationSnapshotV1',
       ]) if (name in taproot) throw new Error('removed bridge exported: ' + name);
       for (const [module, names] of [
-        [search, ['createAuthorizedSearchServiceV1', 'registerExternalProducerKindV1']],
+        [search, ['createAuthorizedSearchServiceV1', 'registerExternalProducerKindV1', 'registerExternalProducerV1']],
         [backup, ['inspectLegacyTaproot042ForAdoptionV1', 'exportTaprootBackupSectionV1']],
         [sparql, ['prepareScopedSparqlPolicyV1']],
       ]) for (const name of names) {

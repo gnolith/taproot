@@ -2,6 +2,11 @@
 
 ## 0.5.0
 
+- Registered external producers can read their exact frozen source-event
+  predecessor through their capability-bound runtime after a commit or process
+  restart; durable kind registrations can be rebound only by the matching
+  deterministic owner registration.
+
 - Reset search to four built-in kinds (`item`, `statement`, `resource`, and
   `annotation`) plus privately branded, namespace-bound external kinds.
 - Added canonical Resource/Annotation mutation boundaries, sealed

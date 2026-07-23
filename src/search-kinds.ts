@@ -121,13 +121,32 @@ export async function registerExternalProducerKindV1(
     )
     .bind(installationId, storageKey)
     .all<{ registration_id: string; owner_domain: string }>();
-  if (existing.results.length) denied('external kind is already registered');
   const registrationId = await stableRegistrationId(
     installationId,
     namespace,
     localName,
     ownerDomain,
   );
+  const persisted = existing.results[0];
+  if (persisted) {
+    if (
+      persisted.registration_id !== registrationId ||
+      persisted.owner_domain !== ownerDomain
+    )
+      denied('external kind registration does not match the durable owner');
+    if (liveRegistrations.get(db)?.has(registrationId))
+      denied('external kind is already registered');
+    return issueRegistrationCapability({
+      db,
+      installationId,
+      registrationId,
+      namespace,
+      localName,
+      ownerDomain,
+      storageKey,
+      adapter: raw.adapter,
+    });
+  }
   await db
     .prepare(
       `INSERT INTO taproot_external_search_kind_registrations(
@@ -145,9 +164,7 @@ export async function registerExternalProducerKindV1(
       new Date().toISOString(),
     )
     .run();
-  const kind = Object.freeze({ namespace, localName });
-  const registration = Object.freeze({ registrationId, kind });
-  const binding: KindBinding = {
+  return issueRegistrationCapability({
     db,
     installationId,
     registrationId,
@@ -156,7 +173,15 @@ export async function registerExternalProducerKindV1(
     ownerDomain,
     storageKey,
     adapter: raw.adapter,
-  };
+  });
+}
+
+function issueRegistrationCapability(
+  binding: KindBinding,
+): RegisteredExternalProducerKindV1 {
+  const { db, registrationId, namespace, localName } = binding;
+  const kind = Object.freeze({ namespace, localName });
+  const registration = Object.freeze({ registrationId, kind });
   kindBindings.set(kind, binding);
   registrationBindings.set(registration, binding);
   let byId = liveRegistrations.get(db);

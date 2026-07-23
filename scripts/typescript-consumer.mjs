@@ -40,6 +40,7 @@ writeFileSync(
   import type {
     ExternalProducer,
     ExternalSearchKind,
+    RegisteredExternalProducerV1,
     SearchMaterializationHealthV1,
   } from '@gnolith/taproot/search';
   import type {
@@ -50,10 +51,17 @@ writeFileSync(
   declare const db: D1DatabaseLike;
   declare const context: AuthorizationContext;
   declare const producer: ExternalProducer;
+  declare const registeredProducer: RegisteredExternalProducerV1;
   declare const kind: ExternalSearchKind;
   declare const health: SearchMaterializationHealthV1;
   declare const fragment: LegacyTaproot042AdoptionFragmentV1;
   declare const blob: ResourceBlobDescriptor;
+  const predecessor = await registeredProducer.currentPredecessor('source-1');
+  if (predecessor) {
+    const eventId: string = predecessor.eventId;
+    const sequence: number = predecessor.sequence;
+    void [eventId, sequence];
+  }
   void [db, context, producer, kind, health, fragment, blob];
   `,
 );

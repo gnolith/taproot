@@ -110,6 +110,9 @@ export interface ExternalProducerMutationReceiptV1 {
 export interface RegisteredExternalProducerV1 {
   readonly kind: ExternalSearchKind;
   readonly issuer: RegisteredProducerMutationIssuer;
+  currentPredecessor(
+    sourceId: string,
+  ): Promise<Readonly<UnifiedSearchSourcePredecessorV1> | null>;
   commit(
     participant: OwnerMutationParticipant,
   ): Promise<ExternalProducerMutationReceiptV1>;
@@ -197,6 +200,8 @@ export async function registerExternalProducerV1(
   return Object.freeze({
     kind: descriptor.registration.kind,
     issuer,
+    currentPredecessor: (sourceId: string) =>
+      currentPredecessor(runtime, sourceId),
     commit: (participant: OwnerMutationParticipant) =>
       commitParticipant(runtime, participant),
     adopt: (
@@ -204,6 +209,25 @@ export async function registerExternalProducerV1(
       input: { cursor?: string | null; limit: number },
     ) => adopt(runtime, context, input),
   });
+}
+
+async function currentPredecessor(
+  runtime: RuntimeBinding,
+  rawSourceId: string,
+): Promise<Readonly<UnifiedSearchSourcePredecessorV1> | null> {
+  const sourceId = token(rawSourceId, 'sourceId', 256);
+  const persisted = await readPersistedSearchSourceRegistryV1(
+    runtime.db,
+    runtime.installationId,
+    runtime.storageKey,
+    sourceId,
+  );
+  return persisted
+    ? Object.freeze({
+        eventId: persisted.eventId,
+        sequence: persisted.sequence,
+      })
+    : null;
 }
 
 /** @internal */

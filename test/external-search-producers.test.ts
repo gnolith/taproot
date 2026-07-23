@@ -1,7 +1,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { D1DatabaseLike } from '@gnolith/diamond';
 import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
+import { Miniflare } from 'miniflare';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   bootstrapTaprootAuthorization,
@@ -195,4 +197,237 @@ describe('generic external producer boundary', () => {
       await second.close();
     }
   });
+
+  for (const runtime of [nativeRestartRuntime(), workerdRestartRuntime()]) {
+    it(`continues first/second mutations across ${runtime.name} restart and rejects stale or forged predecessors`, async () => {
+      const source = {
+        sourceId: 'restart-source-1',
+        sourceRevision: '1',
+        sourcePolicyRevision: 1,
+        canonical: { title: 'Restart-safe source' },
+      };
+      let env = await runtime.open();
+      try {
+        await initializeTaproot(env.db, options);
+        await bootstrapFor(env.db);
+        await env.db
+          .prepare(
+            `CREATE TABLE fixture_restart_owner_records(
+               source_id TEXT PRIMARY KEY, revision TEXT NOT NULL
+             ) STRICT`,
+          )
+          .run();
+        let registered = await registerRestartProducer(env.db, source);
+        expect(await registered.currentPredecessor(source.sourceId)).toBeNull();
+        const first = await commitRestartMutation(registered, source, null);
+        const firstPredecessor = await registered.currentPredecessor(
+          source.sourceId,
+        );
+        expect(firstPredecessor?.eventId).toBe(first.eventId);
+        expect(Number.isSafeInteger(firstPredecessor?.sequence)).toBe(true);
+        expect(Object.isFrozen(firstPredecessor)).toBe(true);
+
+        source.sourceRevision = '2';
+        const second = await commitRestartMutation(
+          registered,
+          source,
+          firstPredecessor,
+        );
+        expect(second.generation).toBe(first.generation + 1);
+        const secondPredecessor = await registered.currentPredecessor(
+          source.sourceId,
+        );
+        expect(secondPredecessor).toEqual({
+          eventId: second.eventId,
+          sequence: firstPredecessor!.sequence + 1,
+        });
+
+        source.sourceRevision = '3';
+        await expect(
+          commitRestartMutation(registered, source, firstPredecessor),
+        ).rejects.toThrow(/predecessor is stale/u);
+        await expect(
+          commitRestartMutation(registered, source, {
+            ...secondPredecessor!,
+            sequence: secondPredecessor!.sequence + 1,
+          }),
+        ).rejects.toThrow(/predecessor is stale/u);
+
+        await env.close();
+        env = await runtime.open();
+        const mismatchedKey = await crypto.subtle.generateKey(
+          { name: 'HMAC', hash: 'SHA-256' },
+          false,
+          ['sign'],
+        );
+        await expect(
+          registerExternalProducerKindV1(
+            env.db,
+            options,
+            createTaprootHostWriteCapability(env.db, options, mismatchedKey),
+            {
+              installationId,
+              namespace: 'restart.example',
+              localName: 'record',
+              ownerDomain: 'different-owner',
+              adapter: {
+                kind: 'taproot-external-owner-transaction-adapter-v1',
+                prepare: () => Promise.resolve([]),
+              },
+            },
+          ),
+        ).rejects.toThrow(/does not match the durable owner/u);
+        registered = await registerRestartProducer(env.db, source);
+        expect(await registered.currentPredecessor(source.sourceId)).toEqual(
+          secondPredecessor,
+        );
+        const third = await commitRestartMutation(
+          registered,
+          source,
+          secondPredecessor,
+        );
+        expect(third.generation).toBe(second.generation + 1);
+      } finally {
+        await env.close();
+      }
+    });
+  }
 });
+
+type RestartSource = {
+  sourceId: string;
+  sourceRevision: string;
+  sourcePolicyRevision: number;
+  canonical: unknown;
+};
+
+async function bootstrapFor(db: D1DatabaseLike): Promise<void> {
+  const key = await crypto.subtle.generateKey(
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  await bootstrapTaprootAuthorization(
+    db,
+    options,
+    createTaprootHostWriteCapability(db, options, key),
+    installationId,
+  );
+}
+
+async function registerRestartProducer(
+  db: D1DatabaseLike,
+  source: RestartSource,
+) {
+  const key = await crypto.subtle.generateKey(
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const authority = createTaprootHostWriteCapability(db, options, key);
+  const kind = await registerExternalProducerKindV1(db, options, authority, {
+    installationId,
+    namespace: 'restart.example',
+    localName: 'record',
+    ownerDomain: 'restart-owner',
+    adapter: {
+      kind: 'taproot-external-owner-transaction-adapter-v1',
+      prepare(token) {
+        const input = token as { sourceId: string; revision: string };
+        return Promise.resolve([
+          db
+            .prepare(
+              `INSERT INTO fixture_restart_owner_records(source_id, revision)
+               VALUES (?, ?)
+               ON CONFLICT(source_id) DO UPDATE SET revision=excluded.revision`,
+            )
+            .bind(input.sourceId, input.revision),
+        ]);
+      },
+    },
+  });
+  const producer: ExternalProducer = {
+    descriptor: {
+      registration: kind.registration,
+      implementationVersion: '1.0.0',
+      fingerprint: 'a'.repeat(64),
+      projectionVersion: 'restart-projection-v1',
+      changeClasses: ['canonical'],
+    },
+    enumerate: () => Promise.resolve({ ids: [source.sourceId], cursor: null }),
+    loadExact: () => Promise.resolve(source),
+    project: () => Promise.resolve({ text: 'Restart-safe source' }),
+    authorize: () => Promise.resolve(true),
+    hydrate: () => Promise.resolve(source.canonical),
+  };
+  return registerExternalProducerV1(db, options, authority, producer);
+}
+
+function commitRestartMutation(
+  registered: Awaited<ReturnType<typeof registerRestartProducer>>,
+  source: RestartSource,
+  predecessor: Awaited<
+    ReturnType<
+      Awaited<ReturnType<typeof registerRestartProducer>>['currentPredecessor']
+    >
+  >,
+) {
+  return registered.issuer
+    .seal({
+      sourceId: source.sourceId,
+      sourceRevision: source.sourceRevision,
+      predecessor,
+      ownerMutationToken: {
+        sourceId: source.sourceId,
+        revision: source.sourceRevision,
+      },
+    })
+    .then((participant) => registered.commit(participant));
+}
+
+function nativeRestartRuntime() {
+  let path: string | null = null;
+  return {
+    name: 'persisted native SQLite',
+    open: () => {
+      if (!path) {
+        const directory = mkdtempSync(
+          join(tmpdir(), 'taproot-producer-native-'),
+        );
+        directories.push(directory);
+        path = join(directory, 'taproot.sqlite');
+      }
+      const db = new NodeSqliteDatabase(path);
+      return Promise.resolve({
+        db,
+        close: () => db.close(),
+      });
+    },
+  };
+}
+
+function workerdRestartRuntime() {
+  let directory: string | null = null;
+  const databaseId = crypto.randomUUID();
+  return {
+    name: 'real Workerd D1',
+    async open() {
+      if (!directory) {
+        directory = mkdtempSync(join(tmpdir(), 'taproot-producer-d1-'));
+        directories.push(directory);
+      }
+      const miniflare = new Miniflare({
+        modules: true,
+        script: 'export default { fetch() { return new Response("ok") } }',
+        compatibilityDate: '2026-07-19',
+        compatibilityFlags: ['nodejs_compat'],
+        d1Databases: { DB: databaseId },
+        d1Persist: directory,
+      });
+      return {
+        db: (await miniflare.getD1Database('DB')) as unknown as D1DatabaseLike,
+        close: () => miniflare.dispose(),
+      };
+    },
+  };
+}

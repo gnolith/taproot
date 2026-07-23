@@ -118,6 +118,12 @@ The guard exposes only live-state inspection; it accepts no SQL or foreign
 statements. Canonical writes and policy advances use bounded Taproot operations.
 External search producers coordinate through namespace-bound registration
 capabilities and sealed one-shot owner mutation participants.
+`RegisteredExternalProducerV1.currentPredecessor(sourceId)` returns the exact
+frozen `{ eventId, sequence }` required to seal the next mutation, or `null`
+before the first event. It remains scoped to that registered installation and
+external kind. After a process restart, the exact deterministic durable owner
+registration can be rebound to a new live capability; same-connection
+duplicates and owner mismatches remain rejected.
 `inspectTaprootAuthorizationReadiness`,
 `planTaprootAuthorizationBackfill`, and
 `applyTaprootAuthorizationBackfill` are host-controlled, exact
