@@ -2,7 +2,7 @@ import type {
   D1DatabaseLike,
   SqlitePreparedStatementLike,
   SqliteResultLike,
-} from '@gnolith/diamond';
+} from './sqlite-types.js';
 import {
   normalizeAuthorizationContext,
   normalizeVisibilityScope,
@@ -33,6 +33,7 @@ import type { AuthorizationContext, VisibilityScopeV1 } from './types.js';
 
 const MAX_DOMAIN_STATEMENTS = 100;
 const MAX_SQL_BYTES = 64 * 1024;
+const MAX_COMMIT_ATTEMPTS = 64;
 const BLOCKED_SQL = /(?:^|[^a-z0-9_])(?:taproot_|_gnolith_)/iu;
 
 export interface ExternalSearchDomainMutationBindingV1 {
@@ -201,7 +202,7 @@ interface MutationBinding {
     predecessor: UnifiedSearchSourcePredecessorV1 | null;
   };
   sourcePolicyRevision: number;
-  statements: readonly SqlitePreparedStatementLike[];
+  statements: readonly Readonly<ExternalSearchDomainSqlV1>[];
   attempted: boolean;
 }
 
@@ -215,6 +216,7 @@ const producerRuntimes = new WeakMap<
   object,
   Map<string, ExternalSearchProducerRuntimeV1>
 >();
+const commitLocks = new WeakMap<object, Map<string, Promise<void>>>();
 
 /** @internal Host-capability validation is performed by the package entrypoint. */
 export function createExternalSearchDomainPolicyAuthorityInternalV1(
@@ -434,95 +436,154 @@ export async function commitExternalSearchCanonicalMutationInternalV1(
   )
     denied('canonical mutation handle is invalid');
   mutation.attempted = true;
-
-  const context = normalizeAuthorizationContext(mutation.context);
-  const state = await currentState(coordinatorBinding.db);
-  if (
-    state.installationId !== coordinatorBinding.installationId ||
-    context.installationId !== state.installationId ||
-    context.authorizationRevision !== state.authorizationRevision ||
-    !context.capabilities.includes(coordinatorBinding.capability)
-  )
-    denied('canonical mutation authorization denied');
-  const predecessor = await readPersistedSearchSourceRegistryV1(
+  const release = await acquireCommitLock(
     coordinatorBinding.db,
     coordinatorBinding.installationId,
-    coordinatorBinding.sourceKind,
-    mutation.event.sourceId,
   );
-  if (
-    (predecessor === null && mutation.event.predecessor !== null) ||
-    (predecessor !== null &&
-      (mutation.event.predecessor === null ||
-        predecessor.domain !== coordinatorBinding.domain ||
-        predecessor.eventId !== mutation.event.predecessor.eventId ||
-        predecessor.sequence !== mutation.event.predecessor.sequence))
-  )
-    denied('canonical mutation predecessor is stale');
+  try {
+    const context = normalizeAuthorizationContext(mutation.context);
+    try {
+      for (let attempt = 0; attempt < MAX_COMMIT_ATTEMPTS; attempt += 1) {
+        const state = await currentState(coordinatorBinding.db);
+        if (
+          state.installationId !== coordinatorBinding.installationId ||
+          context.installationId !== state.installationId ||
+          context.authorizationRevision !== state.authorizationRevision ||
+          !context.capabilities.includes(coordinatorBinding.capability)
+        )
+          denied('canonical mutation authorization denied');
+        const predecessor = await readPersistedSearchSourceRegistryV1(
+          coordinatorBinding.db,
+          coordinatorBinding.installationId,
+          coordinatorBinding.sourceKind,
+          mutation.event.sourceId,
+        );
+        if (
+          (predecessor === null && mutation.event.predecessor !== null) ||
+          (predecessor !== null &&
+            (mutation.event.predecessor === null ||
+              predecessor.domain !== coordinatorBinding.domain ||
+              predecessor.eventId !== mutation.event.predecessor.eventId ||
+              predecessor.sequence !== mutation.event.predecessor.sequence))
+        )
+          denied('canonical mutation predecessor is stale');
 
-  const searchGeneration = state.searchGeneration + 1;
-  if (!Number.isSafeInteger(searchGeneration))
-    denied('search generation is exhausted');
-  const createdAt = coordinatorBinding.clock().toISOString();
-  const prepared = await prepareUnifiedSearchSourceEventStatementsV1(
-    coordinatorBinding.db,
-    {
-      installationId: coordinatorBinding.installationId,
-      domain: coordinatorBinding.domain,
-      sourceKind: coordinatorBinding.sourceKind,
-      sourcePolicyRevision: mutation.sourcePolicyRevision,
-      authorizationRevision: state.authorizationRevision,
-      searchGeneration,
-      createdAt,
-    },
-    mutation.event,
-    coordinatorBinding.changeClasses,
+        const searchGeneration = state.searchGeneration + 1;
+        if (!Number.isSafeInteger(searchGeneration))
+          denied('search generation is exhausted');
+        const createdAt = coordinatorBinding.clock().toISOString();
+        const prepared = await prepareUnifiedSearchSourceEventStatementsV1(
+          coordinatorBinding.db,
+          {
+            installationId: coordinatorBinding.installationId,
+            domain: coordinatorBinding.domain,
+            sourceKind: coordinatorBinding.sourceKind,
+            sourcePolicyRevision: mutation.sourcePolicyRevision,
+            authorizationRevision: state.authorizationRevision,
+            searchGeneration,
+            createdAt,
+          },
+          mutation.event,
+          coordinatorBinding.changeClasses,
+        );
+        const advance = coordinatorBinding.db
+          .prepare(
+            `UPDATE taproot_installation_authorization
+           SET search_generation = ?, last_advance_id = ?, updated_at = ?
+           WHERE singleton = 1 AND installation_id = ?
+             AND authorization_revision = ? AND search_generation = ?
+             AND last_advance_id = ?`,
+          )
+          .bind(
+            searchGeneration,
+            mutation.event.eventId,
+            createdAt,
+            state.installationId,
+            state.authorizationRevision,
+            state.searchGeneration,
+            state.lastAdvanceId,
+          );
+        const fence = coordinatorBinding.db
+          .prepare(
+            `INSERT INTO taproot_assertions(assertion_key)
+           SELECT NULL WHERE NOT EXISTS (
+             SELECT 1 FROM taproot_installation_authorization
+             WHERE singleton = 1 AND installation_id = ?
+               AND authorization_revision = ? AND search_generation = ?
+               AND last_advance_id = ?
+           )`,
+          )
+          .bind(
+            state.installationId,
+            state.authorizationRevision,
+            searchGeneration,
+            mutation.event.eventId,
+          );
+        const domainStatements = mutation.statements.map((statement) =>
+          prepareDomainSql(coordinatorBinding.db, statement),
+        );
+        try {
+          const results = await coordinatorBinding.db.batch([
+            ...domainStatements,
+            advance,
+            fence,
+            ...prepared.statements,
+          ]);
+          return {
+            eventId: mutation.event.eventId,
+            authorizationRevision: state.authorizationRevision,
+            searchGeneration,
+            results: results.slice(0, domainStatements.length),
+          };
+        } catch (cause) {
+          const latest = await currentState(coordinatorBinding.db);
+          if (
+            latest.installationId !== state.installationId ||
+            latest.authorizationRevision !== state.authorizationRevision
+          )
+            denied('canonical mutation authorization changed during commit');
+          if (
+            latest.searchGeneration === state.searchGeneration &&
+            latest.lastAdvanceId === state.lastAdvanceId
+          )
+            throw cause;
+        }
+      }
+      denied('canonical mutation contention limit exceeded');
+    } finally {
+      mutationBindings.delete(opaqueMutation);
+    }
+  } finally {
+    release();
+  }
+}
+
+async function acquireCommitLock(
+  db: D1DatabaseLike,
+  installationId: string,
+): Promise<() => void> {
+  let locks = commitLocks.get(db);
+  if (!locks) {
+    locks = new Map();
+    commitLocks.set(db, locks);
+  }
+  const previous = locks.get(installationId) ?? Promise.resolve();
+  let resolveCurrent!: () => void;
+  const current = new Promise<void>((resolve) => {
+    resolveCurrent = resolve;
+  });
+  const tail = previous.then(
+    () => current,
+    () => current,
   );
-  const advance = coordinatorBinding.db
-    .prepare(
-      `UPDATE taproot_installation_authorization
-       SET search_generation = ?, last_advance_id = ?, updated_at = ?
-       WHERE singleton = 1 AND installation_id = ?
-         AND authorization_revision = ? AND search_generation = ?
-         AND last_advance_id = ?`,
-    )
-    .bind(
-      searchGeneration,
-      mutation.event.eventId,
-      createdAt,
-      state.installationId,
-      state.authorizationRevision,
-      state.searchGeneration,
-      state.lastAdvanceId,
-    );
-  const fence = coordinatorBinding.db
-    .prepare(
-      `INSERT INTO taproot_assertions(assertion_key)
-       SELECT NULL WHERE NOT EXISTS (
-         SELECT 1 FROM taproot_installation_authorization
-         WHERE singleton = 1 AND installation_id = ?
-           AND authorization_revision = ? AND search_generation = ?
-           AND last_advance_id = ?
-       )`,
-    )
-    .bind(
-      state.installationId,
-      state.authorizationRevision,
-      searchGeneration,
-      mutation.event.eventId,
-    );
-  const results = await coordinatorBinding.db.batch([
-    ...mutation.statements,
-    advance,
-    fence,
-    ...prepared.statements,
-  ]);
-  mutationBindings.delete(opaqueMutation);
-  return {
-    eventId: mutation.event.eventId,
-    authorizationRevision: state.authorizationRevision,
-    searchGeneration,
-    results: results.slice(0, mutation.statements.length),
+  locks.set(installationId, tail);
+  await previous.catch(() => undefined);
+  return () => {
+    resolveCurrent();
+    if (locks?.get(installationId) === tail) {
+      locks.delete(installationId);
+      if (locks.size === 0) commitLocks.delete(db);
+    }
   };
 }
 
@@ -583,9 +644,7 @@ async function sealMutation(
     binding,
   );
   const rawStatements = raw.statements as readonly ExternalSearchDomainSqlV1[];
-  const statements = rawStatements.map((value) =>
-    prepareDomainSql(binding.db, value),
-  );
+  const statements = rawStatements.map(normalizeDomainSql);
   const handle: OpaqueExternalSearchCanonicalMutationV1 = Object.freeze({
     kind: 'taproot-external-search-canonical-mutation-v1' as const,
   });
@@ -601,10 +660,9 @@ async function sealMutation(
   return handle;
 }
 
-function prepareDomainSql(
-  db: D1DatabaseLike,
+function normalizeDomainSql(
   raw: ExternalSearchDomainSqlV1,
-): SqlitePreparedStatementLike {
+): Readonly<ExternalSearchDomainSqlV1> {
   exactKeys(raw, ['sql', 'values']);
   if (
     typeof raw.sql !== 'string' ||
@@ -615,7 +673,19 @@ function prepareDomainSql(
     denied('canonical mutation SQL is invalid');
   if (!Array.isArray(raw.values) || raw.values.length > 256)
     denied('canonical mutation values are invalid');
-  return db.prepare(raw.sql).bind(...(raw.values as readonly unknown[]));
+  return Object.freeze({
+    sql: raw.sql,
+    values: Object.freeze(
+      Array.from(raw.values, (value: unknown): unknown => value),
+    ),
+  });
+}
+
+function prepareDomainSql(
+  db: D1DatabaseLike,
+  raw: Readonly<ExternalSearchDomainSqlV1>,
+): SqlitePreparedStatementLike {
+  return db.prepare(raw.sql).bind(...raw.values);
 }
 
 function normalizeBinding(

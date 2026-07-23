@@ -1,7 +1,7 @@
 import type {
   D1DatabaseLike,
   SqlitePreparedStatementLike,
-} from '@gnolith/diamond';
+} from './sqlite-types.js';
 import {
   PersistedEntityAuthorizationSource,
   SEARCH_ADMIN_CAPABILITY,
@@ -64,7 +64,7 @@ export interface SearchMaterializationRunReceiptV1 {
 
 export interface SearchMaterializationHealthV1 {
   version: 1;
-  status: 'blocked' | 'building' | 'degraded';
+  status: 'healthy' | 'blocked' | 'building' | 'degraded';
   activeCorpusGeneration: number;
   shadowCorpusGeneration: number | null;
   cursorGeneration: number;
@@ -414,14 +414,27 @@ class SearchMaterializationRuntime {
     const blockedProducerKinds = await this.#blockedProducerKinds(
       state.active_corpus_id,
     );
+    const pendingJobs = Number(countRow?.pending ?? 0);
+    const leasedJobs = Number(countRow?.leased ?? 0);
+    const deadJobs = Number(countRow?.dead ?? 0);
+    const staleHeads = Number(stale.results[0]?.count ?? 0);
+    const activeAppliedWatermark = Number(generation.active_applied);
+    const status: SearchMaterializationHealthV1['status'] =
+      state.shadow_corpus_id !== null
+        ? 'building'
+        : deadJobs > 0 || state.last_error_code !== null
+          ? 'degraded'
+          : blockedProducerKinds.length > 0
+            ? 'blocked'
+            : pendingJobs > 0 ||
+                leasedJobs > 0 ||
+                staleHeads > 0 ||
+                activeAppliedWatermark !== high
+              ? 'building'
+              : 'healthy';
     return {
       version: 1,
-      status:
-        state.shadow_corpus_id !== null
-          ? 'building'
-          : Number(countRow?.dead ?? 0) > 0
-            ? 'degraded'
-            : 'blocked',
+      status,
       activeCorpusGeneration: Number(generation.active_generation),
       shadowCorpusGeneration:
         generation.shadow_generation === null
@@ -429,12 +442,12 @@ class SearchMaterializationRuntime {
           : Number(generation.shadow_generation),
       cursorGeneration: Number(state.cursor_generation),
       blockedProducerKinds,
-      pendingJobs: Number(countRow?.pending ?? 0),
-      leasedJobs: Number(countRow?.leased ?? 0),
-      deadJobs: Number(countRow?.dead ?? 0),
-      staleHeads: Number(stale.results[0]?.count ?? 0),
+      pendingJobs,
+      leasedJobs,
+      deadJobs,
+      staleHeads,
       sourceHighWatermark: high,
-      activeAppliedWatermark: Number(generation.active_applied),
+      activeAppliedWatermark,
       shadowAppliedWatermark:
         generation.shadow_generation === null
           ? null

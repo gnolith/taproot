@@ -1,6 +1,6 @@
 # Wikibase compatibility target
 
-Taproot 0.4.1 requires `@gnolith/diamond` 0.4.1 exactly. Existing Cloudflare D1
+Taproot 0.4.2 requires `@gnolith/diamond` 0.4.1 exactly. Existing Cloudflare D1
 objects remain compatible with the exported `D1DatabaseLike` surface. New
 embedders may use the equivalent `SqliteDatabaseLike`; both require one
 adapter/connection with ordered atomic batch semantics.

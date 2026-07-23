@@ -383,6 +383,176 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
       }
     }, 30_000);
 
+    it('serializes 18 simultaneous Task, Memory, and Prompt commits without generation collisions', async () => {
+      const env = await runtime.create();
+      try {
+        const producers = {
+          task: await producer(env.db, env.capability, 'task', '1'),
+          memory: await producer(env.db, env.capability, 'memory', '2'),
+          prompt: await producer(env.db, env.capability, 'prompt', '3'),
+        } as const;
+        await env.db
+          .prepare(
+            `CREATE TABLE workshop_concurrent_sources(
+               source_kind TEXT NOT NULL,
+               source_id TEXT NOT NULL,
+               event_id TEXT NOT NULL,
+               PRIMARY KEY(source_kind, source_id)
+             ) STRICT`,
+          )
+          .run();
+        const kinds = ['task', 'memory', 'prompt'] as const;
+        const handles = await Promise.all(
+          Array.from({ length: 18 }, async (_, index) => {
+            const kind = kinds[index % kinds.length]!;
+            const sourceId = `${kind}-concurrent-${index}`;
+            const eventId = `${kind}-concurrent-event-${index}`;
+            return {
+              kind,
+              handle: await producers[kind].coordinator.sealCanonicalMutation({
+                context: producerContext(kind),
+                eventId,
+                sourceId,
+                operation: 'upsert',
+                changeClass: 'canonical',
+                sourceRevision: '1',
+                sourcePolicyRevision: 1,
+                predecessor: null,
+                canonicalPostState: { kind, sourceId, revision: 1 },
+                statements: [
+                  {
+                    sql: `INSERT INTO workshop_concurrent_sources(
+                            source_kind, source_id, event_id
+                          ) VALUES (?, ?, ?)`,
+                    values: [kind, sourceId, eventId],
+                  },
+                ],
+              }),
+            };
+          }),
+        );
+        const receipts = await Promise.all(
+          handles.map(({ kind, handle }) =>
+            producers[kind].guard.commitCanonicalMutation(handle),
+          ),
+        );
+        expect(
+          receipts
+            .map(({ searchGeneration }) => searchGeneration)
+            .sort((left, right) => left - right),
+        ).toEqual(Array.from({ length: 18 }, (_, index) => index + 2));
+        expect(
+          await scalar(
+            env.db,
+            `SELECT COUNT(*) FROM workshop_concurrent_sources`,
+          ),
+        ).toBe(18);
+        expect(
+          await scalar(
+            env.db,
+            `SELECT COUNT(*) FROM taproot_unified_search_source_events`,
+          ),
+        ).toBe(18);
+        expect(
+          await scalar(
+            env.db,
+            `SELECT search_generation FROM taproot_installation_authorization
+             WHERE singleton = 1`,
+          ),
+        ).toBe(19);
+
+        const sameSourceHandles = await Promise.all(
+          ['a', 'b'].map((suffix) =>
+            producers.task.coordinator.sealCanonicalMutation({
+              context: producerContext('task'),
+              eventId: `same-source-event-${suffix}`,
+              sourceId: 'task-same-source',
+              operation: 'upsert',
+              changeClass: 'canonical',
+              sourceRevision: '1',
+              sourcePolicyRevision: 1,
+              predecessor: null,
+              canonicalPostState: { taskId: 'task-same-source', suffix },
+              statements: [
+                {
+                  sql: `INSERT INTO workshop_concurrent_sources(
+                          source_kind, source_id, event_id
+                        ) VALUES ('task', 'task-same-source', ?)`,
+                  values: [`same-source-event-${suffix}`],
+                },
+              ],
+            }),
+          ),
+        );
+        const race = await Promise.allSettled(
+          sameSourceHandles.map((handle) =>
+            producers.task.guard.commitCanonicalMutation(handle),
+          ),
+        );
+        expect(
+          race.filter(({ status }) => status === 'fulfilled'),
+        ).toHaveLength(1);
+        const rejected = race.find(({ status }) => status === 'rejected');
+        expect(rejected?.status).toBe('rejected');
+        if (!rejected || rejected.status !== 'rejected')
+          throw new Error('same-source race did not reject one commit');
+        expect(rejected.reason).toBeInstanceOf(InvalidAuthorizationError);
+        expect(String(rejected.reason)).not.toMatch(/internal_error/u);
+        expect(
+          await scalar(
+            env.db,
+            `SELECT COUNT(*) FROM taproot_unified_search_source_events
+             WHERE source_kind='task' AND source_id='task-same-source'`,
+          ),
+        ).toBe(1);
+
+        const generationBeforeFailure = await scalar(
+          env.db,
+          `SELECT search_generation FROM taproot_installation_authorization
+           WHERE singleton = 1`,
+        );
+        const failing =
+          await producers.memory.coordinator.sealCanonicalMutation({
+            context: producerContext('memory'),
+            eventId: 'concurrent-domain-failure',
+            sourceId: 'memory-domain-failure',
+            operation: 'upsert',
+            changeClass: 'canonical',
+            sourceRevision: '1',
+            sourcePolicyRevision: 1,
+            predecessor: null,
+            canonicalPostState: { memoryId: 'memory-domain-failure' },
+            statements: [
+              {
+                sql: `INSERT INTO workshop_concurrent_sources(
+                        source_kind, source_id, event_id
+                      ) VALUES ('task', 'task-same-source', 'duplicate')`,
+                values: [],
+              },
+            ],
+          });
+        await expect(
+          producers.memory.guard.commitCanonicalMutation(failing),
+        ).rejects.toThrow();
+        expect(
+          await scalar(
+            env.db,
+            `SELECT COUNT(*) FROM taproot_unified_search_source_events
+             WHERE event_id='concurrent-domain-failure'`,
+          ),
+        ).toBe(0);
+        expect(
+          await scalar(
+            env.db,
+            `SELECT search_generation FROM taproot_installation_authorization
+             WHERE singleton = 1`,
+          ),
+        ).toBe(generationBeforeFailure);
+      } finally {
+        await env.close();
+      }
+    }, 60_000);
+
     it('rejects cross-kind handles and Taproot SQL at the bound preparer', async () => {
       const env = await runtime.create();
       try {
@@ -433,7 +603,7 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
 async function producer(
   db: D1DatabaseLike,
   capability: TaprootHostWriteCapability,
-  sourceKind: 'task' | 'memory',
+  sourceKind: 'task' | 'memory' | 'prompt',
   fingerprintCharacter: string,
   callbackOverrides: Partial<ExternalSearchProducerCallbacksV1> = {},
 ) {
@@ -516,6 +686,15 @@ function taskContext(): AuthorizationContext {
     workspaceIds: ['workspace-1'],
     capabilities: ['task:write'],
     authorizationRevision: 1,
+  };
+}
+
+function producerContext(
+  kind: 'task' | 'memory' | 'prompt',
+): AuthorizationContext {
+  return {
+    ...taskContext(),
+    capabilities: [`${kind}:write`],
   };
 }
 

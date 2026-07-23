@@ -4,8 +4,8 @@ import {
   readAppliedMigrations,
   type AppliedMigration,
   type NamespacedMigration,
-  type SqliteDatabaseLike,
 } from '@gnolith/diamond';
+import type { SqliteDatabaseLike } from './sqlite-types.js';
 import {
   BaseIriMismatchError,
   InvalidBaseIriError,

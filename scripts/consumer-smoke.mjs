@@ -69,6 +69,7 @@ writeFileSync(
       addStatement,
       bootstrapTaprootAuthorization,
       canonicalSearchBytesV1,
+      createAuthorizedSearchServiceV1,
       createItem,
       createProperty,
       createInstallationAuthorizationGuard,
@@ -179,6 +180,37 @@ writeFileSync(
           authorization: policy(3, { 'Q1$consumer': [] }),
         },
       );
+      const d1Materialization = await createSearchMaterializationAdminGuardV1(
+        db, options, d1WriteCapability,
+      );
+      await d1Materialization.initialize(searchAdmin(4));
+      const d1MaterializationReceipt = await d1Materialization.run(
+        searchAdmin(4),
+        {
+          maxJobs: 10,
+          maxRebuildRoots: 10,
+          maxChunkBytes: 64,
+          leaseMilliseconds: 30_000,
+        },
+      );
+      if (d1MaterializationReceipt.completed !== 1) {
+        throw new Error('packed D1 materialization did not publish the Item root');
+      }
+      const packedSearch = createAuthorizedSearchServiceV1(db, {
+        installationId,
+      });
+      const packedStatementTerm = await packedSearch.search(
+        { text: 'The packed Taproot consumer works' },
+        writer(4),
+      );
+      const packedKinds = new Set(
+        packedStatementTerm.results.map(({ kind }) => kind),
+      );
+      if (!packedKinds.has('item') || !packedKinds.has('statement')) {
+        throw new Error(
+          'packed D1 statement-only term did not return Item and Statement results',
+        );
+      }
       const query = 'ASK { <https://knowledge.example/entity/Q1> <https://knowledge.example/prop/direct/P1> "works" }';
       const response = await createSparqlHandler({ db })(
         new Request('https://consumer.example/sparql?query=' + encodeURIComponent(query), {

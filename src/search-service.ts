@@ -1,4 +1,4 @@
-import type { SqliteDatabaseLike } from '@gnolith/diamond';
+import type { SqliteDatabaseLike } from './sqlite-types.js';
 import { isVisibleTo, normalizeAuthorizationContext } from './authorization.js';
 import type { TaprootContentRepositoryV1 } from './content-domain.js';
 import { lookupExternalSearchProducerRuntimeInternalV1 } from './external-search-producers.js';

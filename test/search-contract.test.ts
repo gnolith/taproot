@@ -373,7 +373,7 @@ describe('pure Taproot Statement and Item projection planning', () => {
     ).rejects.toBeInstanceOf(InvalidSearchContractError);
   });
 
-  it('projects all Item metadata, types, and every statement text exactly once without omission', async () => {
+  it('projects all Item metadata and mirrors every statement into Item and Statement results without omission', async () => {
     const item = makeItem();
     const source = sourceEvent('item', item.id, `${item.lastrevid}`);
     const authorization = await envelope('item', item.id, '3', PUBLIC);
@@ -388,16 +388,10 @@ describe('pure Taproot Statement and Item projection planning', () => {
     });
     expect(plan.documents).toHaveLength(3);
     const text = plan.documents.map(({ text }) => text).join('\n');
-    for (const expected of [
-      'Kiln',
-      'Four',
-      'Oven',
-      'A very hot kiln',
-      'Q5',
-      'type statement text',
-      'other statement text 🔥',
-    ])
+    for (const expected of ['Kiln', 'Four', 'Oven', 'A very hot kiln', 'Q5'])
       expect(occurrences(text, expected)).toBe(1);
+    for (const expected of ['type statement text', 'other statement text 🔥'])
+      expect(occurrences(text, expected)).toBe(2);
     for (const document of plan.documents)
       expect(
         plan.chunks
@@ -415,7 +409,13 @@ describe('pure Taproot Statement and Item projection planning', () => {
       plan.documents.flatMap(({ segments }) =>
         segments.filter(({ field }) => field === 'statement'),
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(4);
+    expect(
+      plan.documents
+        .find(({ kind }) => kind === 'item')
+        ?.segments.filter(({ field }) => field === 'statement')
+        .map(({ sourceId }) => sourceId),
+    ).toEqual(['Q1$S2', 'Q1$S1']);
   });
 
   it('requires exact statement authorization coverage', async () => {
@@ -449,8 +449,12 @@ describe('pure Taproot Statement and Item projection planning', () => {
       mixedScope: 'partition',
     });
     expect(plan.documents[0]!.text).toBe(oversizedText);
-    expect(plan.chunks.length).toBeGreaterThan(100);
-    expect(plan.chunks.map(({ text }) => text).join('')).toBe(oversizedText);
+    const itemDocument = plan.documents.find(({ kind }) => kind === 'item')!;
+    const itemChunks = plan.chunks.filter(
+      ({ documentId }) => documentId === itemDocument.id,
+    );
+    expect(itemChunks.length).toBeGreaterThan(100);
+    expect(itemChunks.map(({ text }) => text).join('')).toBe(oversizedText);
   });
 
   it('pins the 1.8MB document and 512-chunk fences without truncation', async () => {
@@ -562,12 +566,17 @@ describe('pure Taproot Statement and Item projection planning', () => {
       statementAuthorizations: mixed,
       mixedScope: 'partition',
     });
-    expect(partitioned.documents).toHaveLength(3);
+    expect(partitioned.documents).toHaveLength(4);
     expect(
       partitioned.documents.flatMap(({ segments }) =>
         segments.filter(({ field }) => field === 'statement'),
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(4);
+    expect(
+      partitioned.documents
+        .filter(({ kind }) => kind === 'item')
+        .map(({ authorization }) => authorization.visibility),
+    ).toEqual(expect.arrayContaining([PUBLIC, WORKSPACE]));
     await expect(
       projectItemForUnifiedSearchV1({
         source,

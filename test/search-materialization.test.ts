@@ -16,6 +16,10 @@ import {
   TaprootMigrationStateError,
   bootstrapTaprootAuthorization,
   applyTaprootMigrations,
+  createAuthorizedSearchServiceV1,
+  createExternalSearchDomainMutationCoordinatorV1,
+  createExternalSearchDomainPolicyAuthorityV1,
+  createExternalSearchProducerGuardV1,
   createInstallationAuthorizationGuard,
   createInstallationSearchSourceGuardV1,
   createItem,
@@ -36,6 +40,8 @@ import {
   taprootCompleteSearchSchemaStatements,
   type AuthorizationContext,
   type CanonicalAuthorizationPolicyInput,
+  type ExternalSearchProducerCallbacksV1,
+  type ExternalSearchProducerGuardV1,
   type TaprootHostWriteCapability,
   type VisibilityScopeV1,
 } from '../src/index.js';
@@ -162,6 +168,11 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
           authorization: policy(2, { [first.id]: [], [second.id]: [] }),
         });
         expect(await count(env.db, 'taproot_search_projection_jobs')).toBe(1);
+        const registeredProducers = await Promise.all(
+          (['task', 'memory', 'prompt'] as const).map((kind) =>
+            registerProducerRuntime(env.db, env.capability, kind),
+          ),
+        );
         await env.db
           .prepare(
             `UPDATE taproot_search_projection_jobs
@@ -228,6 +239,19 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
         expect(
           await count(env.db, 'taproot_search_filter_values'),
         ).toBeGreaterThan(3);
+        const search = createAuthorizedSearchServiceV1(env.db, {
+          installationId,
+        });
+        const statementOnlyResults = await search.search(
+          { text: 'first authored statement' },
+          writeContext(3),
+        );
+        expect([
+          ...new Set(statementOnlyResults.results.map(({ kind }) => kind)),
+        ]).toEqual(expect.arrayContaining(['item', 'statement']));
+        expect(
+          statementOnlyResults.results.filter(({ kind }) => kind === 'item'),
+        ).not.toHaveLength(0);
 
         await setLabel(
           env.db,
@@ -243,6 +267,14 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
           },
         );
         expect(await activeEligibility(env.db)).toBe(0);
+        expect(
+          (
+            await search.search(
+              { text: 'first authored statement' },
+              writeContext(4),
+            )
+          ).results,
+        ).toHaveLength(0);
         await materialization.run(adminContext(4), runOptions());
         const secondStage = await visibleDocuments(env.db);
         expect(secondStage.map(({ document_id }) => document_id)).toEqual(
@@ -252,6 +284,16 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
           secondStage.find(({ document_slot }) => document_slot === 'item')
             ?.document_text,
         ).toContain('Kiln revised');
+        expect([
+          ...new Set(
+            (
+              await search.search(
+                { text: 'first authored statement' },
+                writeContext(4),
+              )
+            ).results.map(({ kind }) => kind),
+          ),
+        ]).toEqual(expect.arrayContaining(['item', 'statement']));
 
         await removeStatement(
           env.db,
@@ -311,10 +353,58 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
         expect(JSON.stringify(health)).not.toMatch(
           /Kiln|statement|claim_token|document_text/u,
         );
+        await Promise.all(
+          registeredProducers.map((producer) =>
+            producer.adoptLegacyPage(adminContext(7), { limit: 10 }),
+          ),
+        );
+        await env.db
+          .prepare(
+            `UPDATE taproot_unified_search_generation_producers
+             SET state = 'ready', producer_fingerprint = ?,
+                 contract_version = 'workshop-search-producer-v1',
+                 projection_version = 'workshop-search-projection-v1',
+                 authorization_contract_version = 'workshop-search-authorization-v1'
+             WHERE installation_id = ? AND source_kind IN ('task','memory','prompt')`,
+          )
+          .bind('a'.repeat(64), installationId)
+          .run();
+        expect(await materialization.health(adminContext(7))).toMatchObject({
+          status: 'healthy',
+          blockedProducerKinds: [],
+          pendingJobs: 0,
+          leasedJobs: 0,
+          deadJobs: 0,
+          staleHeads: 0,
+          lastErrorCode: null,
+        });
+        await env.db
+          .prepare(
+            `UPDATE taproot_search_installation_state
+             SET last_error_code = 'projection-failed'
+             WHERE installation_id = ?`,
+          )
+          .bind(installationId)
+          .run();
+        expect(await materialization.health(adminContext(7))).toMatchObject({
+          status: 'degraded',
+          lastErrorCode: 'projection-failed',
+        });
+        await env.db
+          .prepare(
+            `UPDATE taproot_search_installation_state SET last_error_code = NULL
+             WHERE installation_id = ?`,
+          )
+          .bind(installationId)
+          .run();
+        await materialization.startShadowRebuild(adminContext(7));
+        expect(await materialization.health(adminContext(7))).toMatchObject({
+          status: 'building',
+        });
       } finally {
         await env.close();
       }
-    }, 75_000);
+    }, 120_000);
 
     it('builds and atomically activates a no-hole shadow while dual fanout captures concurrent mutation', async () => {
       const env = await runtime.create();
@@ -1088,6 +1178,69 @@ function runOptions() {
     maxChunkBytes: 64,
     leaseMilliseconds: 30_000,
   };
+}
+
+async function registerProducerRuntime(
+  db: D1DatabaseLike,
+  capability: TaprootHostWriteCapability,
+  sourceKind: 'task' | 'memory' | 'prompt',
+): Promise<ExternalSearchProducerGuardV1> {
+  const binding = {
+    domain: 'workshop',
+    sourceKind,
+    capability: `${sourceKind}:write`,
+    changeClasses: ['canonical'],
+  } as const;
+  const coordinator = await createExternalSearchDomainMutationCoordinatorV1(
+    db,
+    options,
+    capability,
+    binding,
+  );
+  const authority = await createExternalSearchDomainPolicyAuthorityV1(
+    db,
+    options,
+    capability,
+    binding,
+  );
+  const callbacks: ExternalSearchProducerCallbacksV1 = {
+    enumerateLegacyCurrent: () =>
+      Promise.resolve({ sourceIds: [], nextCursor: null }),
+    loadCurrent: () => Promise.resolve(null),
+    projectCurrent: () =>
+      Promise.resolve({
+        version: 1,
+        documents: [],
+        replaceAll: true,
+        removeDocumentSlots: [],
+      }),
+    authorizeCurrentReference: (_authority, input) =>
+      Promise.resolve({
+        version: 1,
+        ...input,
+        workspaceId: 'workspace-1',
+        ownerPrincipalId: 'principal-1',
+        visibility: { version: 1, clauses: [] },
+      }),
+    hydrateCurrentReference: () => Promise.resolve({ version: 1 }),
+  };
+  return createExternalSearchProducerGuardV1(
+    db,
+    options,
+    capability,
+    {
+      version: 1,
+      sourceKind,
+      owningDomain: 'workshop',
+      producerFingerprint: 'a'.repeat(64),
+      contractVersion: 'workshop-search-producer-v1',
+      projectionVersion: 'workshop-search-projection-v1',
+      authorizationContractVersion: 'workshop-search-authorization-v1',
+    },
+    callbacks,
+    authority,
+    coordinator,
+  );
 }
 
 async function count(db: D1DatabaseLike, table: string): Promise<number> {

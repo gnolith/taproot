@@ -1,8 +1,5 @@
-import {
-  encodeTerm,
-  prepareQuadPatch,
-  type SqliteDatabaseLike,
-} from '@gnolith/diamond';
+import { encodeTerm, prepareQuadPatch } from '@gnolith/diamond';
+import type { SqliteDatabaseLike } from './sqlite-types.js';
 import { DataFactory } from 'rdf-data-factory';
 import { parseEntityJson } from './canonical.js';
 import { buildEntityQuads } from './rdf.js';

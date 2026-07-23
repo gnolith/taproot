@@ -787,24 +787,18 @@ export async function projectItemForUnifiedSearchV1(
   const maxChunkBytes = normalizeChunkBytes(input.maxChunkBytes);
   const rootReference = { kind: 'item' as const, itemId: input.item.id };
   const metadataSegments = itemMetadataSegments(input.item);
-  if (metadataSegments.length > 0) {
-    const document = await buildDocument(
-      'item',
-      source,
-      itemAuthorization,
-      'item',
-      rootReference,
-      rootReference,
-      {
-        languages: documentLanguages(metadataSegments),
-        sourceRevisions: [source.sourceRevision],
-        byKind: { item: { typeIds: itemTypeIds(input.item) } },
-      },
-      metadataSegments,
-    );
-    documents.push(document);
-    chunks.push(...(await chunkDocument(document, maxChunkBytes)));
-  }
+  const itemPartitions = new Map<
+    string,
+    {
+      authorization: SearchAuthorizationEnvelopeValueV1;
+      segments: SearchProjectionSegmentV1[];
+    }
+  >();
+  if (metadataSegments.length > 0)
+    itemPartitions.set(itemAuthorization.fingerprint, {
+      authorization: itemAuthorization,
+      segments: [...metadataSegments],
+    });
   for (const statement of statements) {
     const statementAuthorization = authorizationFor(
       input.statementAuthorizations[statement.id],
@@ -823,6 +817,19 @@ export async function projectItemForUnifiedSearchV1(
       throw new MixedSearchProjectionScopeError(
         `Item ${input.item.id} contains mixed authorization scopes`,
       );
+    const partition = itemPartitions.get(effective.fingerprint);
+    const statementSegment = segment(
+      'statement',
+      statement.id,
+      null,
+      statement.text,
+    );
+    if (partition) partition.segments.push(statementSegment);
+    else
+      itemPartitions.set(effective.fingerprint, {
+        authorization: effective,
+        segments: [statementSegment],
+      });
     const canonicalReference = {
       kind: 'statement' as const,
       itemId: input.item.id,
@@ -842,11 +849,43 @@ export async function projectItemForUnifiedSearchV1(
           statement: { predicateIds: [statement.mainsnak.property] },
         },
       },
-      [segment('statement', statement.id, null, statement.text)],
+      [statementSegment],
     );
     documents.push(document);
     chunks.push(...(await chunkDocument(document, maxChunkBytes)));
   }
+  const orderedPartitions = [...itemPartitions.entries()].sort(
+    ([left], [right]) =>
+      left === itemAuthorization.fingerprint
+        ? -1
+        : right === itemAuthorization.fingerprint
+          ? 1
+          : compare(left, right),
+  );
+  const itemDocuments: DerivedSearchDocumentV1[] = [];
+  const itemChunks: DerivedSearchChunkV1[] = [];
+  for (const [fingerprint, partition] of orderedPartitions) {
+    const document = await buildDocument(
+      'item',
+      source,
+      partition.authorization,
+      fingerprint === itemAuthorization.fingerprint
+        ? 'item'
+        : `item:scope:${fingerprint}`,
+      rootReference,
+      rootReference,
+      {
+        languages: documentLanguages(partition.segments),
+        sourceRevisions: [source.sourceRevision],
+        byKind: { item: { typeIds: itemTypeIds(input.item) } },
+      },
+      partition.segments,
+    );
+    itemDocuments.push(document);
+    itemChunks.push(...(await chunkDocument(document, maxChunkBytes)));
+  }
+  documents.unshift(...itemDocuments);
+  chunks.unshift(...itemChunks);
   if (documents.length === 0)
     invalid(`Item ${input.item.id} has no projectable text`);
   return buildPlan(source, documents, chunks);

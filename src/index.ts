@@ -2,7 +2,7 @@ import type {
   D1DatabaseLike,
   SqlitePreparedStatementLike,
   SqliteResultLike,
-} from '@gnolith/diamond';
+} from './sqlite-types.js';
 import { InvalidAuthorizationError } from './errors.js';
 import {
   assertExactSearchSourceReplayV1,
@@ -60,7 +60,7 @@ export type {
   SqliteDatabaseLike,
   SqlitePreparedStatementLike,
   SqliteResultLike,
-} from '@gnolith/diamond';
+} from './sqlite-types.js';
 import {
   TaprootRepository,
   type CreateItemInput,

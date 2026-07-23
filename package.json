@@ -1,6 +1,6 @@
 {
   "name": "@gnolith/taproot",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Portable canonical knowledge, content, authorization, and hybrid search layer for Gnolith.",
   "author": "Gnolith contributors",
   "keywords": [
@@ -50,7 +50,7 @@
     "build": "tsc -p tsconfig.build.json",
     "baseline:hybrid-search": "npm run build && node scripts/hybrid-search-baseline.mjs",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run interop:check && npm run pack:check && npm run consumer:check && npm run licenses:check && npm run repository:check",
-    "consumer:check": "node scripts/consumer-smoke.mjs",
+    "consumer:check": "node scripts/consumer-smoke.mjs && node scripts/typescript-consumer.mjs",
     "interop:check": "vitest run test/interop.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
