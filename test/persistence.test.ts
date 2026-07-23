@@ -13,11 +13,11 @@ import {
   initializeTaproot,
   inspectTaprootPersistence,
   inspectTaprootSchema,
-  legacyTaprootV1Statements,
   planTaprootMigrations,
   type D1DatabaseLike,
   type SqliteDatabaseLike,
 } from '../src/index.js';
+import { legacyTaprootV1Statements } from '../src/schema.js';
 import { TaprootRepository } from '../src/repository.js';
 
 const baseIri = 'https://knowledge.example';
@@ -52,6 +52,7 @@ describe('portable Taproot persistence', () => {
         'pending',
         'pending',
         'pending',
+        'pending',
       ]);
       const tablesBefore = await db
         .prepare(
@@ -66,6 +67,7 @@ describe('portable Taproot persistence', () => {
       const inspection = await inspectTaprootPersistence(db);
       expect(inspection).toMatchObject({ baseIri, current: true });
       expect(inspection.migrations.map(({ status }) => status)).toEqual([
+        'applied',
         'applied',
         'applied',
         'applied',
@@ -248,6 +250,7 @@ describe('portable Taproot persistence', () => {
           id: '0008-complete-search-content-semantic',
           status: 'pending',
         },
+        { id: '0009-architecture-reset', status: 'pending' },
       ]);
       await applyTaprootMigrations(exact, {
         baseIri: 'HTTPS://Knowledge.Example///',

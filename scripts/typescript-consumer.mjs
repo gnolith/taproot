@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolve } from 'node:path';
 
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error('TypeScript consumer must be run through npm');
@@ -35,27 +36,29 @@ writeFileSync(
 );
 writeFileSync(
   join(root, 'consumer.ts'),
-  `import type {
-    AuthorizationContext,
-    D1DatabaseLike,
-    ExternalSearchDomainMutationBindingV1,
-    ExternalSearchProducerCallbacksV1,
+  `import type { AuthorizationContext, D1DatabaseLike } from '@gnolith/taproot';
+  import type {
+    ExternalProducer,
+    ExternalSearchKind,
     SearchMaterializationHealthV1,
-  } from '@gnolith/taproot';
+  } from '@gnolith/taproot/search';
+  import type {
+    LegacyTaproot042AdoptionFragmentV1,
+    ResourceBlobDescriptor,
+  } from '@gnolith/taproot/backup';
 
   declare const db: D1DatabaseLike;
   declare const context: AuthorizationContext;
-  declare const callbacks: ExternalSearchProducerCallbacksV1;
-  const binding: ExternalSearchDomainMutationBindingV1 = {
-    domain: 'workshop',
-    sourceKind: 'task',
-    capability: 'task:write',
-    changeClasses: ['canonical'],
-  };
+  declare const producer: ExternalProducer;
+  declare const kind: ExternalSearchKind;
   declare const health: SearchMaterializationHealthV1;
-  void [db, context, callbacks, binding, health];
+  declare const fragment: LegacyTaproot042AdoptionFragmentV1;
+  declare const blob: ResourceBlobDescriptor;
+  void [db, context, producer, kind, health, fragment, blob];
   `,
 );
+const diamond =
+  process.env.DIAMOND_TARBALL ?? resolve('node_modules', '@gnolith', 'diamond');
 execFileSync(
   process.execPath,
   [
@@ -67,6 +70,7 @@ execFileSync(
     '--prefix',
     root,
     archive,
+    diamond,
     'typescript@5.9.2',
   ],
   { stdio: 'inherit' },

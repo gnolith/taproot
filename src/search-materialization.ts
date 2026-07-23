@@ -31,6 +31,7 @@ import type {
 } from './types.js';
 import {
   buildExternalSearchProjectionPlanInternalV1,
+  loadExternalSearchSourceInternalV1,
   lookupExternalSearchProducerRuntimeInternalV1,
 } from './external-search-producers.js';
 import type { PortableResourcePayloadStoreV1 } from './content-domain.js';
@@ -225,16 +226,10 @@ class SearchMaterializationRuntime {
           .bind(
             this.#installationId,
             kind,
-            BUILTIN_SEARCH_KINDS.includes(
-              kind as (typeof BUILTIN_SEARCH_KINDS)[number],
-            )
+            BUILTIN_SEARCH_KINDS.includes(kind)
               ? 'taproot-builtin-projection-v1'
               : null,
-            BUILTIN_SEARCH_KINDS.includes(
-              kind as (typeof BUILTIN_SEARCH_KINDS)[number],
-            )
-              ? 'ready'
-              : 'blocked',
+            BUILTIN_SEARCH_KINDS.includes(kind) ? 'ready' : 'blocked',
             now,
           ),
       ),
@@ -901,9 +896,7 @@ class SearchMaterializationRuntime {
       const row = byKind.get(kind);
       if (!row || row.state !== 'ready') return true;
       if (
-        BUILTIN_SEARCH_KINDS.includes(
-          kind as (typeof BUILTIN_SEARCH_KINDS)[number],
-        ) &&
+        BUILTIN_SEARCH_KINDS.includes(kind) &&
         row.producer_fingerprint === 'taproot-builtin-projection-v1'
       )
         return false;
@@ -968,10 +961,11 @@ class SearchMaterializationRuntime {
       job.producer_fingerprint,
     );
     if (!runtime) return null;
-    const loaded = await runtime.callbacks.loadCurrent({
-      sourceId: job.source_id,
-      expectedSourceRevision: job.root_revision,
-    });
+    const loaded = await loadExternalSearchSourceInternalV1(
+      runtime,
+      job.source_id,
+      job.root_revision,
+    );
     if (!loaded) return null;
     return buildExternalSearchProjectionPlanInternalV1(
       runtime,

@@ -26,6 +26,7 @@ import {
   isExactPreSearchSourceEventTaprootSchema,
   isExactPreExternalSearchProducerTaprootSchema,
   isExactPreCompleteSearchTaprootSchema,
+  isExactPreArchitectureResetTaprootSchema,
   isExactTaprootSchema,
   isExactTaprootUpgradeSchema,
   isRecognizedLegacyV1,
@@ -38,7 +39,9 @@ import {
   taprootSearchMaterializationSchemaStatements,
   taprootExternalSearchProducerSchemaStatements,
   taprootCompleteSearchSchemaStatements,
+  taprootArchitectureResetSchemaStatements,
   taprootSchemaStatements,
+  prepareArchitectureResetStorageStatements,
   verifyTaprootPackageSeeds,
   verifyPersistedStatementText,
   verifyTaprootSemanticState,
@@ -107,9 +110,14 @@ export const taprootMigrations = [
     id: '0008-complete-search-content-semantic',
     statements: taprootCompleteSearchSchemaStatements,
   },
+  {
+    id: '0009-architecture-reset',
+    statements: taprootArchitectureResetSchemaStatements,
+  },
 ] as const satisfies readonly NamespacedMigration[];
 
-type MigrationPhase = 'structure' | 'revisions' | 'audit' | 'rdf';
+type MigrationPhase =
+  'structure' | 'revisions' | 'audit' | 'rdf' | 'architecture';
 type MigrationSource = 'legacy' | 'current';
 const migrationPhaseKey = 'migration_phase';
 const migrationSourceKey = 'migration_source';
@@ -291,15 +299,17 @@ export async function applyTaprootMigrations(
     applied.length < expected.length
   ) {
     const exactPredecessor =
-      applied.length === 7
-        ? await isExactPreCompleteSearchTaprootSchema(db)
-        : applied.length === 6
-          ? await isExactPreExternalSearchProducerTaprootSchema(db)
-          : applied.length === 5
-            ? await isExactPreSearchMaterializationTaprootSchema(db)
-            : applied.length === 4
-              ? await isExactPreSearchSourceEventTaprootSchema(db)
-              : await isExactPreAuthorizationTaprootSchema(db);
+      applied.length === 8
+        ? await isExactPreArchitectureResetTaprootSchema(db)
+        : applied.length === 7
+          ? await isExactPreCompleteSearchTaprootSchema(db)
+          : applied.length === 6
+            ? await isExactPreExternalSearchProducerTaprootSchema(db)
+            : applied.length === 5
+              ? await isExactPreSearchMaterializationTaprootSchema(db)
+              : applied.length === 4
+                ? await isExactPreSearchSourceEventTaprootSchema(db)
+                : await isExactPreAuthorizationTaprootSchema(db);
     if (!exactPredecessor)
       throw new TaprootMigrationStateError(
         'Pending Taproot migrations require the exact prior package catalog',
@@ -313,13 +323,17 @@ export async function applyTaprootMigrations(
           migration.id !== '0005-unified-search-source-events' &&
           migration.id !== '0006-unified-search-materialization-lifecycle' &&
           migration.id !== '0007-external-search-producers' &&
-          migration.id !== '0008-complete-search-content-semantic',
+          migration.id !== '0008-complete-search-content-semantic' &&
+          migration.id !== '0009-architecture-reset',
       )
     )
       throw new TaprootMigrationStateError(
         'Taproot migration ledger is partial and has no supported upgrade path',
       );
     const appliedAt = new Date().toISOString();
+    const architectureIndex = pending.findIndex(
+      ({ migration }) => migration.id === '0009-architecture-reset',
+    );
     if (
       pending.some(
         ({ migration }) => migration.id === '0003-canonical-statement-text',
@@ -334,11 +348,26 @@ export async function applyTaprootMigrations(
         );
       }
     }
+    if (architectureIndex > 0) {
+      const predecessors = pending.slice(0, architectureIndex);
+      await db.batch([
+        ...predecessors.flatMap(({ migration }) =>
+          migration.statements.map((sql) => db.prepare(sql)),
+        ),
+        ...ledgerStatements(db, predecessors, 0, appliedAt),
+      ]);
+      return applyTaprootMigrations(db, { baseIri: identity });
+    }
+    const architectureStorage =
+      architectureIndex === 0
+        ? await prepareArchitectureResetStorageStatements(db)
+        : [];
     try {
       await db.batch([
         ...pending.flatMap(({ migration }) =>
           migration.statements.map((sql) => db.prepare(sql)),
         ),
+        ...architectureStorage,
         ...ledgerStatements(db, pending, 0, appliedAt),
       ]);
     } catch (cause) {
@@ -460,12 +489,16 @@ export async function applyTaprootMigrations(
     if (phase === 'rdf') {
       await verifyPersistedStatementText(db);
       await verifyTaprootSemanticState(db, identity);
-      await finalizeRecovery(
+      await prepareArchitectureRecovery(db, identity, source !== 'current');
+      phase = 'architecture';
+      continue;
+    }
+    if (phase === 'architecture') {
+      await finalizeArchitectureRecovery(
         db,
         identity,
         expected,
         source !== 'current' || applied.length === 0,
-        source !== 'current',
       );
       phase = undefined;
       continue;
@@ -578,14 +611,11 @@ async function transitionPhase(
   ]);
 }
 
-async function finalizeRecovery(
+async function prepareArchitectureRecovery(
   db: SqliteDatabaseLike,
   identity: string,
-  expected: Awaited<ReturnType<typeof expectedMigrations>>,
-  adopted: boolean,
   applyExternalProducerMigration: boolean,
 ): Promise<void> {
-  const appliedAt = new Date().toISOString();
   await db.batch([
     db
       .prepare(
@@ -614,53 +644,41 @@ async function finalizeRecovery(
     db.prepare(
       `INSERT INTO taproot_assertions(assertion_key)
        SELECT NULL WHERE
-         (SELECT COUNT(*) FROM taproot_migrations) != 8
-         OR NOT EXISTS (
-           SELECT 1 FROM taproot_migrations
-           WHERE version = 1 AND name = 'initial'
-         )
-         OR NOT EXISTS (
-           SELECT 1 FROM taproot_migrations
-           WHERE version = 2 AND name = 'audit-and-operations'
-         )
-         OR NOT EXISTS (
-           SELECT 1 FROM taproot_migrations
-           WHERE version = 3 AND name = 'canonical-statement-text'
-         )
-         OR NOT EXISTS (
-           SELECT 1 FROM taproot_migrations
-           WHERE version = 4 AND name = 'canonical-authorization-policy'
-         )
-         OR NOT EXISTS (
-           SELECT 1 FROM taproot_migrations
-           WHERE version = 5 AND name = 'unified-search-source-events'
-         )
-         OR NOT EXISTS (
-           SELECT 1 FROM taproot_migrations
-           WHERE version = 6 AND name = 'unified-search-materialization-lifecycle'
-         )
-         OR NOT EXISTS (
-           SELECT 1 FROM taproot_migrations
-           WHERE version = 7 AND name = 'external-search-producers'
-         )
-         OR NOT EXISTS (
-           SELECT 1 FROM taproot_migrations
-           WHERE version = 8 AND name = 'complete-search-content-semantic'
-         )`,
+         (SELECT COUNT(*) FROM taproot_migrations) NOT IN (8, 9)
+         OR (SELECT COUNT(*) FROM taproot_migrations WHERE
+              (version = 1 AND name = 'initial')
+           OR (version = 2 AND name = 'audit-and-operations')
+           OR (version = 3 AND name = 'canonical-statement-text')
+           OR (version = 4 AND name = 'canonical-authorization-policy')
+           OR (version = 5 AND name = 'unified-search-source-events')
+           OR (version = 6 AND name = 'unified-search-materialization-lifecycle')
+           OR (version = 7 AND name = 'external-search-producers')
+           OR (version = 8 AND name = 'complete-search-content-semantic')
+           OR (version = 9 AND name = 'architecture-reset'))
+            != (SELECT COUNT(*) FROM taproot_migrations)`,
     ),
-    db.prepare(
-      `INSERT INTO taproot_assertions(assertion_key)
-       SELECT NULL WHERE EXISTS (
-         SELECT 1 FROM taproot_rdf_ownership o
-         WHERE NOT EXISTS (
-           SELECT 1 FROM rdf_quads q
-           WHERE q.subject_key = o.subject_key
-             AND q.predicate_key = o.predicate_key
-             AND q.object_key = o.object_key
-             AND q.graph_key = o.graph_key
-         )
-       )`,
-    ),
+    db
+      .prepare(
+        `UPDATE taproot_metadata SET metadata_value = 'architecture'
+         WHERE metadata_key = ? AND metadata_value = 'rdf'`,
+      )
+      .bind(migrationPhaseKey),
+  ]);
+}
+
+async function finalizeArchitectureRecovery(
+  db: SqliteDatabaseLike,
+  identity: string,
+  expected: Awaited<ReturnType<typeof expectedMigrations>>,
+  adopted: boolean,
+): Promise<void> {
+  const appliedAt = new Date().toISOString();
+  const architectureStorage =
+    await prepareArchitectureResetStorageStatements(db);
+  await db.batch([
+    ...taprootArchitectureResetSchemaStatements.map((sql) => db.prepare(sql)),
+    ...architectureStorage,
+    ...identityStatements(db, identity),
     ...ledgerStatements(db, expected, adopted ? 1 : 0, appliedAt),
     db
       .prepare(
@@ -754,7 +772,9 @@ async function validateRecoveryState(
   phase: string,
   applied: AppliedMigration[],
 ): Promise<void> {
-  if (!['structure', 'revisions', 'audit', 'rdf'].includes(phase))
+  if (
+    !['structure', 'revisions', 'audit', 'rdf', 'architecture'].includes(phase)
+  )
     throw new TaprootMigrationStateError(
       `Unknown Taproot recovery phase ${phase}`,
     );
@@ -765,9 +785,11 @@ async function validateRecoveryState(
   const source = await requireRecoverySource(db);
   const exact =
     source === 'legacy'
-      ? phase === 'structure'
-        ? await isExactTaprootUpgradeSchema(db)
-        : await isExactTaprootPreFinalizeSchema(db)
+      ? phase === 'architecture'
+        ? await isExactPreArchitectureResetTaprootSchema(db)
+        : phase === 'structure'
+          ? await isExactTaprootUpgradeSchema(db)
+          : await isExactTaprootPreFinalizeSchema(db)
       : await isExactTaprootSchema(db);
   if (!exact)
     throw new TaprootMigrationStateError(

@@ -5,15 +5,17 @@ import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SEARCH_ADMIN_CAPABILITY,
+  initializeTaproot,
+  type AuthorizationContext,
+} from '../src/index.js';
+import {
   createOllamaCompatibleEmbeddingProviderV1,
   createOpenAICompatibleEmbeddingProviderV1,
   createSemanticSearchAdminV1,
   createSqliteVectorIndexV1,
-  initializeTaproot,
-  type AuthorizationContext,
   type EmbeddingProviderPortV1,
   type VectorRecordV1,
-} from '../src/index.js';
+} from '../src/semantic-search.js';
 
 const directories: string[] = [];
 afterEach(() => {

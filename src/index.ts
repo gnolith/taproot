@@ -1,41 +1,13 @@
-import type {
-  D1DatabaseLike,
-  SqlitePreparedStatementLike,
-  SqliteResultLike,
-} from './sqlite-types.js';
+import type { D1DatabaseLike } from './sqlite-types.js';
 import { InvalidAuthorizationError } from './errors.js';
 import {
-  assertExactSearchSourceReplayV1,
-  inspectUnifiedSearchSourceReplayV1,
-  normalizeInstallationSearchSourceBindingV1,
-  normalizeUnifiedSearchSourceEventInputV1,
-  prepareUnifiedSearchSourceEventStatementsV1,
-  readPersistedSearchSourceRegistryV1,
-  unifiedSearchSourcePayloadHashV1,
-  type InstallationSearchSourceBindingV1,
-  type InstallationSearchSourceGuardV1,
-  type UnifiedSearchSourceEventInputV1,
-} from './search-source-events.js';
+  assertTaprootHostWriteCapabilityInternal,
+  createTaprootHostWriteCapability,
+  type TaprootHostWriteCapability,
+} from './assembly-authority.js';
 import { canonicalizeTaprootBaseIri } from './migrations.js';
 import {
-  createSearchMaterializationRuntimeV1,
-  type SearchMaterializationAdminGuardV1,
-  type SearchMaterializationContentOptionsV1,
-} from './search-materialization.js';
-import {
-  createExternalSearchDomainMutationCoordinatorInternalV1,
-  createExternalSearchDomainPolicyAuthorityInternalV1,
-  createExternalSearchProducerGuardInternalV1,
-  type ExternalSearchDomainMutationBindingV1,
-  type ExternalSearchDomainMutationCoordinatorV1,
-  type ExternalSearchDomainPolicyAuthorityV1,
-  type ExternalSearchProducerCallbacksV1,
-  type ExternalSearchProducerDescriptorV1,
-  type ExternalSearchProducerGuardV1,
-} from './external-search-producers.js';
-import {
   KNOWLEDGE_WRITE_CAPABILITY,
-  KNOWLEDGE_POLICY_CAPABILITY,
   normalizeAuthorizationContext,
   type InstallationAuthorizationState,
 } from './authorization.js';
@@ -124,49 +96,11 @@ export type AuthorizedBulkImportOptions = Omit<
   authorizations: Readonly<Record<EntityId, CanonicalAuthorizationPolicyInput>>;
 };
 
-export interface TaprootHostWriteCapability {
-  readonly kind: 'taproot-host-write-v1';
-}
-
-const hostWriteCapabilities = new WeakMap<
-  object,
-  { db: D1DatabaseLike; baseIri: string }
->();
+export type { TaprootHostWriteCapability } from './assembly-authority.js';
 
 export interface InstallationAuthorizationGuard {
   readonly kind: 'taproot-installation-authorization-guard-v1';
   readCurrentState(): Promise<InstallationAuthorizationState>;
-  batchWithExpectedRevision(
-    context: AuthorizationContext,
-    statements: readonly SqlitePreparedStatementLike[],
-  ): Promise<readonly SqliteResultLike[]>;
-  batchWithAuthorizationAdvance(
-    context: AuthorizationContext,
-    audit: { advanceId: string; reason: string },
-    statements: readonly SqlitePreparedStatementLike[],
-  ): Promise<{
-    authorizationRevision: number;
-    searchGeneration: number;
-    results: readonly SqliteResultLike[];
-  }>;
-}
-
-export interface InstallationDomainMutationGuard {
-  readonly kind: 'taproot-installation-domain-mutation-guard-v1';
-  readCurrentState(): Promise<InstallationAuthorizationState>;
-  batchWithExpectedRevision(
-    context: AuthorizationContext,
-    statements: readonly SqlitePreparedStatementLike[],
-  ): Promise<{
-    authorizationRevision: number;
-    searchGeneration: number;
-    results: readonly SqliteResultLike[];
-  }>;
-}
-
-export interface InstallationDomainMutationBinding {
-  domain: string;
-  capability: string;
 }
 
 interface InstallationGuardBinding {
@@ -182,26 +116,6 @@ const installationAuthorizationGuards = new WeakMap<
   InstallationGuardBinding
 >();
 
-interface DomainGuardBinding extends InstallationGuardBinding {
-  capability: string;
-}
-
-const installationDomainMutationGuards = new WeakMap<
-  object,
-  DomainGuardBinding
->();
-
-interface SearchSourceGuardBinding extends InstallationGuardBinding {
-  sourceKind: InstallationSearchSourceBindingV1['sourceKind'];
-  capability: string;
-  changeClasses: readonly string[];
-}
-
-const installationSearchSourceGuards = new WeakMap<
-  object,
-  SearchSourceGuardBinding
->();
-
 interface InternalInstallationAuthorizationState extends InstallationAuthorizationState {
   lastAdvanceId: string;
 }
@@ -211,77 +125,22 @@ interface InternalInstallationAuthorizationState extends InstallationAuthorizati
  * non-extractable key is host assembly state and must never enter transport
  * arguments. Taproot uses object identity, not caller-supplied fields.
  */
-export function createTaprootHostWriteCapability(
-  db: D1DatabaseLike,
-  options: Pick<TaprootWriteOptions, 'baseIri'>,
-  key: CryptoKey,
-): TaprootHostWriteCapability {
-  const algorithm = key.algorithm as KeyAlgorithm & {
-    hash?: KeyAlgorithm;
-  };
-  if (
-    key.type !== 'secret' ||
-    key.extractable ||
-    algorithm.name !== 'HMAC' ||
-    algorithm.hash?.name !== 'SHA-256' ||
-    !key.usages.includes('sign')
-  )
-    throw new InvalidAuthorizationError(
-      'write capability key must be non-extractable HMAC-SHA-256 with sign usage',
-    );
-  const capability = Object.freeze({ kind: 'taproot-host-write-v1' as const });
-  hostWriteCapabilities.set(capability, {
-    db,
-    baseIri: canonicalizeTaprootBaseIri(options.baseIri),
-  });
-  return capability;
-}
+export { createTaprootHostWriteCapability };
 
 export * from './canonical.js';
 export * from './content-domain.js';
 export * from './authorization.js';
+export * from './authorization-bootstrap.js';
 export * from './errors.js';
 export * from './migrations.js';
 export * from './rdf.js';
-export * from './search-contract.js';
-export * from './search-service.js';
-export * from './semantic-search.js';
-export * from './snapshot.js';
 export {
-  UNIFIED_SEARCH_SOURCE_KINDS_V1,
-  normalizeInstallationSearchSourceBindingV1,
-  normalizeUnifiedSearchSourceEventInputV1,
-  unifiedSearchSourcePayloadHashV1,
-} from './search-source-events.js';
-export type {
-  ExternalSearchCanonicalMutationInputV1,
-  ExternalSearchCanonicalMutationReceiptV1,
-  ExternalSearchDomainMutationBindingV1,
-  ExternalSearchDomainMutationCoordinatorV1,
-  ExternalSearchDomainPolicyAuthorityV1,
-  ExternalSearchDomainSqlV1,
-  ExternalSearchLoadedSourceV1,
-  ExternalSearchProducerCallbacksV1,
-  ExternalSearchProducerDescriptorV1,
-  ExternalSearchProducerGuardV1,
-  OpaqueExternalSearchCanonicalMutationV1,
-} from './external-search-producers.js';
-export type {
-  SearchMaterializationAdminGuardV1,
-  SearchMaterializationHealthV1,
-  SearchMaterializationRunOptionsV1,
-  SearchMaterializationRunReceiptV1,
-} from './search-materialization.js';
-export type {
-  InstallationSearchSourceBindingV1,
-  InstallationSearchSourceEventReceiptV1,
-  InstallationSearchSourceGuardV1,
-  UnifiedSearchSourceEventInputV1,
-  UnifiedSearchSourceKindV1,
-  UnifiedSearchSourceOperationV1,
-  UnifiedSearchSourcePredecessorV1,
-} from './search-source-events.js';
-export * from './schema.js';
+  TAPROOT_JSON_VERSION,
+  TAPROOT_RDF_VERSION,
+  TAPROOT_SCHEMA_VERSION,
+  initializeTaproot,
+  inspectTaprootSchema,
+} from './schema.js';
 export * from './types.js';
 
 function repository(
@@ -289,15 +148,7 @@ function repository(
   options: Readonly<TaprootWriteOptions>,
   capability: TaprootHostWriteCapability,
 ): TaprootRepository {
-  const binding = hostWriteCapabilities.get(capability);
-  if (
-    !binding ||
-    binding.db !== db ||
-    binding.baseIri !== canonicalizeTaprootBaseIri(options.baseIri)
-  )
-    throw new InvalidAuthorizationError(
-      'host-issued write capability is required',
-    );
+  assertTaprootHostWriteCapabilityInternal(db, options, capability);
   if (
     'validators' in options ||
     'factory' in options ||
@@ -377,184 +228,6 @@ async function readGuardState(
   return state;
 }
 
-async function prepareGuardFence(
-  binding: InstallationGuardBinding,
-  rawContext: AuthorizationContext,
-  requiredCapabilities: readonly string[],
-): Promise<{
-  state: InternalInstallationAuthorizationState;
-  statement: SqlitePreparedStatementLike;
-}> {
-  const context = normalizeAuthorizationContext(rawContext);
-  const state = await readGuardState(binding);
-  if (
-    context.installationId !== state.installationId ||
-    context.authorizationRevision !== state.authorizationRevision ||
-    !requiredCapabilities.every((required) =>
-      context.capabilities.includes(required),
-    )
-  )
-    throw new InvalidAuthorizationError('installation authorization denied');
-  return {
-    state,
-    statement: binding.db
-      .prepare(
-        `INSERT INTO taproot_assertions(assertion_key)
-       SELECT NULL WHERE NOT EXISTS (
-         SELECT 1 FROM taproot_installation_authorization
-          WHERE singleton = 1 AND installation_id = ?
-            AND authorization_revision = ? AND search_generation = ?
-            AND last_advance_id = ?
-       )`,
-      )
-      .bind(
-        state.installationId,
-        state.authorizationRevision,
-        state.searchGeneration,
-        state.lastAdvanceId,
-      ),
-  };
-}
-
-async function prepareGuardAdvance(
-  binding: InstallationGuardBinding,
-  rawContext: AuthorizationContext,
-  audit: { advanceId: string; reason: string },
-) {
-  const context = normalizeAuthorizationContext(rawContext);
-  const state = await readGuardState(binding);
-  if (
-    context.installationId !== state.installationId ||
-    context.authorizationRevision !== state.authorizationRevision ||
-    !context.capabilities.includes(KNOWLEDGE_WRITE_CAPABILITY) ||
-    !context.capabilities.includes(KNOWLEDGE_POLICY_CAPABILITY)
-  )
-    throw new InvalidAuthorizationError('installation authorization denied');
-  for (const [field, value, maximum] of [
-    ['advanceId', audit.advanceId, 128],
-    ['domain', binding.domain, 64],
-    ['reason', audit.reason, 512],
-  ] as const) {
-    if (
-      typeof value !== 'string' ||
-      !value.trim() ||
-      value !== value.trim() ||
-      value.length > maximum ||
-      [...value].some((character) => {
-        const code = character.charCodeAt(0);
-        return code <= 0x1f || code === 0x7f;
-      })
-    )
-      throw new InvalidAuthorizationError(`${field} is invalid`);
-  }
-  const authorizationRevision = state.authorizationRevision + 1;
-  const searchGeneration = state.searchGeneration + 1;
-  const createdAt = binding.clock().toISOString();
-  const statements = Object.freeze([
-    binding.db
-      .prepare(
-        `UPDATE taproot_installation_authorization
-         SET authorization_revision = ?, search_generation = ?, last_advance_id = ?, updated_at = ?
-         WHERE singleton = 1 AND installation_id = ?
-           AND authorization_revision = ? AND search_generation = ?
-           AND last_advance_id = ?`,
-      )
-      .bind(
-        authorizationRevision,
-        searchGeneration,
-        audit.advanceId,
-        createdAt,
-        state.installationId,
-        state.authorizationRevision,
-        state.searchGeneration,
-        state.lastAdvanceId,
-      ),
-    binding.db
-      .prepare(
-        `INSERT INTO taproot_assertions(assertion_key)
-         SELECT NULL WHERE NOT EXISTS (
-           SELECT 1 FROM taproot_installation_authorization
-            WHERE singleton = 1 AND installation_id = ?
-              AND authorization_revision = ? AND search_generation = ?
-              AND last_advance_id = ?
-         )`,
-      )
-      .bind(
-        state.installationId,
-        authorizationRevision,
-        searchGeneration,
-        audit.advanceId,
-      ),
-    binding.db
-      .prepare(
-        `INSERT INTO taproot_installation_authorization_advances(
-           advance_id, installation_id, from_revision, to_revision,
-           search_generation, domain, principal_id, reason, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        audit.advanceId,
-        state.installationId,
-        state.authorizationRevision,
-        authorizationRevision,
-        searchGeneration,
-        binding.domain,
-        context.principalId,
-        audit.reason,
-        createdAt,
-      ),
-  ]);
-  return { authorizationRevision, searchGeneration, statements };
-}
-
-function normalizeDomainGuardBinding(
-  raw: InstallationDomainMutationBinding,
-): InstallationDomainMutationBinding {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-    throw new InvalidAuthorizationError('domain guard binding is invalid');
-  const keys = Object.keys(raw).sort();
-  if (JSON.stringify(keys) !== JSON.stringify(['capability', 'domain']))
-    throw new InvalidAuthorizationError('domain guard binding is invalid');
-  for (const [field, value, maximum] of [
-    ['domain', raw.domain, 64],
-    ['capability', raw.capability, 128],
-  ] as const) {
-    if (
-      typeof value !== 'string' ||
-      value !== value.normalize('NFC') ||
-      value !== value.trim() ||
-      value.length < 1 ||
-      value.length > maximum ||
-      [...value].some((character) => {
-        const code = character.charCodeAt(0);
-        return code <= 0x1f || code === 0x7f;
-      })
-    )
-      throw new InvalidAuthorizationError(`${field} is invalid`);
-  }
-  if (
-    raw.capability === KNOWLEDGE_WRITE_CAPABILITY ||
-    raw.capability === KNOWLEDGE_POLICY_CAPABILITY
-  )
-    throw new InvalidAuthorizationError(
-      'knowledge capabilities require the knowledge authorization guard',
-    );
-  return Object.freeze({ domain: raw.domain, capability: raw.capability });
-}
-
-function validateGuardDomainStatements(
-  statements: readonly SqlitePreparedStatementLike[],
-): void {
-  if (
-    !Array.isArray(statements) ||
-    statements.length < 1 ||
-    statements.length > 100
-  )
-    throw new InvalidAuthorizationError(
-      'an authorization batch must contain 1 through 100 domain statements',
-    );
-}
-
 /**
  * Assembly-only pristine bootstrap for immutable installation authorization.
  * It cannot be used after canonical entities exist.
@@ -596,327 +269,9 @@ export async function createInstallationAuthorizationGuard(
   const guard: InstallationAuthorizationGuard = Object.freeze({
     kind: 'taproot-installation-authorization-guard-v1' as const,
     readCurrentState: () => readGuardState(binding),
-    batchWithExpectedRevision: async (
-      context: AuthorizationContext,
-      statements: readonly SqlitePreparedStatementLike[],
-    ) => {
-      validateGuardDomainStatements(statements);
-      const fence = await prepareGuardFence(binding, context, [
-        KNOWLEDGE_WRITE_CAPABILITY,
-      ]);
-      return binding.db.batch([...statements, fence.statement]);
-    },
-    batchWithAuthorizationAdvance: async (
-      context: AuthorizationContext,
-      audit: { advanceId: string; reason: string },
-      domainStatements: readonly SqlitePreparedStatementLike[],
-    ) => {
-      validateGuardDomainStatements(domainStatements);
-      const advance = await prepareGuardAdvance(binding, context, audit);
-      const results = await binding.db.batch([
-        ...domainStatements,
-        ...advance.statements,
-      ]);
-      return {
-        authorizationRevision: advance.authorizationRevision,
-        searchGeneration: advance.searchGeneration,
-        results,
-      };
-    },
   });
   installationAuthorizationGuards.set(guard, binding);
   return guard;
-}
-
-/** Assembly issues a fence-only guard bound to one exact non-Knowledge domain. */
-export async function createInstallationDomainMutationGuard(
-  db: D1DatabaseLike,
-  options: TaprootWriteOptions,
-  hostCapability: TaprootHostWriteCapability,
-  rawBinding: InstallationDomainMutationBinding,
-): Promise<InstallationDomainMutationGuard> {
-  repository(db, options, hostCapability);
-  const requested = normalizeDomainGuardBinding(rawBinding);
-  const state = await readInstallationAuthorizationState(db);
-  const binding: DomainGuardBinding = {
-    db,
-    baseIri: canonicalizeTaprootBaseIri(options.baseIri),
-    installationId: state.installationId,
-    clock: options.clock ?? (() => new Date()),
-    domain: requested.domain,
-    capability: requested.capability,
-  };
-  const guard: InstallationDomainMutationGuard = Object.freeze({
-    kind: 'taproot-installation-domain-mutation-guard-v1' as const,
-    readCurrentState: () => readGuardState(binding),
-    batchWithExpectedRevision: async (
-      context: AuthorizationContext,
-      statements: readonly SqlitePreparedStatementLike[],
-    ) => {
-      validateGuardDomainStatements(statements);
-      const fence = await prepareGuardFence(binding, context, [
-        binding.capability,
-      ]);
-      const results = await binding.db.batch([...statements, fence.statement]);
-      return {
-        authorizationRevision: fence.state.authorizationRevision,
-        searchGeneration: fence.state.searchGeneration,
-        results: results.slice(0, statements.length),
-      };
-    },
-  });
-  installationDomainMutationGuards.set(guard, binding);
-  return guard;
-}
-
-/** Host assembly issues the only SQL-preparing bridge for Workshop Task/Memory writes. */
-export async function createExternalSearchDomainMutationCoordinatorV1(
-  db: D1DatabaseLike,
-  options: TaprootWriteOptions,
-  hostCapability: TaprootHostWriteCapability,
-  binding: ExternalSearchDomainMutationBindingV1,
-): Promise<ExternalSearchDomainMutationCoordinatorV1> {
-  repository(db, options, hostCapability);
-  const state = await readInstallationAuthorizationState(db);
-  return createExternalSearchDomainMutationCoordinatorInternalV1({
-    db,
-    installationId: state.installationId,
-    domain: binding.domain,
-    sourceKind: binding.sourceKind,
-    capability: binding.capability,
-    changeClasses: binding.changeClasses,
-    clock: options.clock ?? (() => new Date()),
-  });
-}
-
-/** Host assembly issues the opaque policy authority paired with one producer kind. */
-export async function createExternalSearchDomainPolicyAuthorityV1(
-  db: D1DatabaseLike,
-  options: TaprootWriteOptions,
-  hostCapability: TaprootHostWriteCapability,
-  binding: Pick<ExternalSearchDomainMutationBindingV1, 'domain' | 'sourceKind'>,
-): Promise<ExternalSearchDomainPolicyAuthorityV1> {
-  repository(db, options, hostCapability);
-  const state = await readInstallationAuthorizationState(db);
-  return createExternalSearchDomainPolicyAuthorityInternalV1({
-    db,
-    installationId: state.installationId,
-    domain: binding.domain,
-    sourceKind: binding.sourceKind,
-  });
-}
-
-/**
- * Host-sealed external producer boundary. Callbacks receive data and an opaque
- * policy authority only; they never receive the database, SQL, lifecycle
- * guards, mutation handles, or caller-shaped authorization fields.
- */
-export async function createExternalSearchProducerGuardV1(
-  db: D1DatabaseLike,
-  options: TaprootWriteOptions,
-  hostCapability: TaprootHostWriteCapability,
-  descriptor: ExternalSearchProducerDescriptorV1,
-  callbacks: ExternalSearchProducerCallbacksV1,
-  owningDomainPolicyAuthority: ExternalSearchDomainPolicyAuthorityV1,
-  opaqueDomainMutationCoordinator: ExternalSearchDomainMutationCoordinatorV1,
-): Promise<ExternalSearchProducerGuardV1> {
-  repository(db, options, hostCapability);
-  const state = await readInstallationAuthorizationState(db);
-  return createExternalSearchProducerGuardInternalV1(
-    {
-      db,
-      installationId: state.installationId,
-      clock: options.clock ?? (() => new Date()),
-    },
-    descriptor,
-    callbacks,
-    owningDomainPolicyAuthority,
-    opaqueDomainMutationCoordinator,
-  );
-}
-
-/**
- * Assembly issues this opaque guard for exactly one non-Knowledge source kind.
- * It owns source-event persistence only; it does not materialize or query search.
- */
-export async function createInstallationSearchSourceGuardV1(
-  db: D1DatabaseLike,
-  options: TaprootWriteOptions,
-  hostCapability: TaprootHostWriteCapability,
-  rawBinding: InstallationSearchSourceBindingV1,
-): Promise<InstallationSearchSourceGuardV1> {
-  repository(db, options, hostCapability);
-  const requested = normalizeInstallationSearchSourceBindingV1(rawBinding);
-  if (
-    requested.capability === KNOWLEDGE_WRITE_CAPABILITY ||
-    requested.capability === KNOWLEDGE_POLICY_CAPABILITY ||
-    requested.domain === 'knowledge'
-  )
-    throw new InvalidAuthorizationError(
-      'Knowledge source events are emitted by canonical mutation authority',
-    );
-  const state = await readInstallationAuthorizationState(db);
-  const binding: SearchSourceGuardBinding = {
-    db,
-    baseIri: canonicalizeTaprootBaseIri(options.baseIri),
-    installationId: state.installationId,
-    clock: options.clock ?? (() => new Date()),
-    domain: requested.domain,
-    sourceKind: requested.sourceKind,
-    capability: requested.capability,
-    changeClasses: requested.changeClasses,
-  };
-  const guard: InstallationSearchSourceGuardV1 = Object.freeze({
-    kind: 'taproot-installation-search-source-guard-v1' as const,
-    batchWithSourceEvent: async (
-      rawContext: AuthorizationContext,
-      rawEvent: UnifiedSearchSourceEventInputV1,
-      domainStatements: readonly SqlitePreparedStatementLike[],
-    ) => {
-      validateGuardDomainStatements(domainStatements);
-      if (!installationSearchSourceGuards.has(guard))
-        throw new InvalidAuthorizationError(
-          'assembly-issued search source guard is required',
-        );
-      const context = normalizeAuthorizationContext(rawContext);
-      const currentState = await readGuardState(binding);
-      if (
-        context.installationId !== currentState.installationId ||
-        context.authorizationRevision !== currentState.authorizationRevision ||
-        !context.capabilities.includes(binding.capability)
-      )
-        throw new InvalidAuthorizationError(
-          'search source authorization denied',
-        );
-      const event = normalizeUnifiedSearchSourceEventInputV1(rawEvent, binding);
-      const replay = await inspectUnifiedSearchSourceReplayV1(
-        binding.db,
-        binding.installationId,
-        binding.sourceKind,
-        event.sourceId,
-        event.sourceRevision,
-      );
-      if (replay) {
-        const replayHash = await unifiedSearchSourcePayloadHashV1(
-          binding.installationId,
-          binding.domain,
-          binding.sourceKind,
-          event,
-          replay.sourcePolicyRevision,
-          replay.authorizationRevision,
-          replay.searchGeneration,
-        );
-        assertExactSearchSourceReplayV1(replay, event.eventId, replayHash);
-        return {
-          eventId: event.eventId,
-          authorizationRevision: replay.authorizationRevision,
-          searchGeneration: replay.searchGeneration,
-          replayed: true,
-          results: [],
-        };
-      }
-      const predecessor = await readPersistedSearchSourceRegistryV1(
-        binding.db,
-        binding.installationId,
-        binding.sourceKind,
-        event.sourceId,
-      );
-      if (
-        (predecessor === null && event.predecessor !== null) ||
-        (predecessor !== null &&
-          (event.predecessor === null ||
-            predecessor.domain !== binding.domain ||
-            predecessor.eventId !== event.predecessor.eventId ||
-            predecessor.sequence !== event.predecessor.sequence))
-      )
-        throw new InvalidAuthorizationError(
-          'search source predecessor does not match persisted ownership',
-        );
-      const searchGeneration = currentState.searchGeneration + 1;
-      if (!Number.isSafeInteger(searchGeneration))
-        throw new InvalidAuthorizationError('search generation is exhausted');
-      const createdAt = binding.clock().toISOString();
-      const prepared = await prepareUnifiedSearchSourceEventStatementsV1(
-        binding.db,
-        {
-          installationId: binding.installationId,
-          domain: binding.domain,
-          sourceKind: binding.sourceKind,
-          sourcePolicyRevision: currentState.authorizationRevision,
-          authorizationRevision: currentState.authorizationRevision,
-          searchGeneration,
-          createdAt,
-        },
-        event,
-        binding.changeClasses,
-      );
-      const advance = binding.db
-        .prepare(
-          `UPDATE taproot_installation_authorization
-           SET search_generation = ?, last_advance_id = ?, updated_at = ?
-           WHERE singleton = 1 AND installation_id = ?
-             AND authorization_revision = ? AND search_generation = ?
-             AND last_advance_id = ?`,
-        )
-        .bind(
-          searchGeneration,
-          event.eventId,
-          createdAt,
-          binding.installationId,
-          currentState.authorizationRevision,
-          currentState.searchGeneration,
-          currentState.lastAdvanceId,
-        );
-      const fence = binding.db
-        .prepare(
-          `INSERT INTO taproot_assertions(assertion_key)
-           SELECT NULL WHERE NOT EXISTS (
-             SELECT 1 FROM taproot_installation_authorization
-             WHERE singleton = 1 AND installation_id = ?
-               AND authorization_revision = ? AND search_generation = ?
-               AND last_advance_id = ?
-           )`,
-        )
-        .bind(
-          binding.installationId,
-          currentState.authorizationRevision,
-          searchGeneration,
-          event.eventId,
-        );
-      const results = await binding.db.batch([
-        ...domainStatements,
-        advance,
-        fence,
-        ...prepared.statements,
-      ]);
-      return {
-        eventId: event.eventId,
-        authorizationRevision: currentState.authorizationRevision,
-        searchGeneration,
-        replayed: false,
-        results,
-      };
-    },
-  });
-  installationSearchSourceGuards.set(guard, binding);
-  return guard;
-}
-
-/** Assembly-issued, opaque and bounded materialization runner/maintenance guard. */
-export async function createSearchMaterializationAdminGuardV1(
-  db: D1DatabaseLike,
-  options: TaprootWriteOptions,
-  hostCapability: TaprootHostWriteCapability,
-  contentOptions: SearchMaterializationContentOptionsV1 = {},
-): Promise<SearchMaterializationAdminGuardV1> {
-  repository(db, options, hostCapability);
-  const state = await readInstallationAuthorizationState(db);
-  return createSearchMaterializationRuntimeV1({
-    db,
-    installationId: state.installationId,
-    clock: options.clock ?? (() => new Date()),
-    ...contentOptions,
-  });
 }
 
 export const inspectTaprootAuthorizationReadiness = (

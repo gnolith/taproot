@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { createQdrantVectorIndexV1 } from '../dist/index.js';
+import { createQdrantVectorIndexV1 } from '../dist/adapters-qdrant.js';
 
 const IMAGE =
   'qdrant/qdrant:v1.18.2@sha256:da65a06bc75e42702f80c992b99c5144b0fbd675ae7a96d2991de0bf957b7071';

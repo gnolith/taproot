@@ -1,13 +1,13 @@
-/** Runtime-neutral result shape returned by supported SQLite/D1 adapters. */
+/** Runtime-neutral result shape shared with Diamond 0.5 SQL adapters. */
 export interface SqliteResultLike<T = Record<string, unknown>> {
-  results: T[];
+  results: readonly T[];
   success?: boolean;
-  meta?: Record<string, unknown>;
+  meta?: Readonly<Record<string, unknown>>;
 }
 
 /** Minimum prepared-statement capability required by Taproot. */
 export interface SqlitePreparedStatementLike {
-  bind(...values: unknown[]): SqlitePreparedStatementLike;
+  bind(...values: readonly unknown[]): SqlitePreparedStatementLike;
   run<T = Record<string, unknown>>(): Promise<SqliteResultLike<T>>;
   all<T = Record<string, unknown>>(): Promise<SqliteResultLike<T>>;
 }
@@ -16,16 +16,13 @@ export interface SqlitePreparedStatementLike {
 export interface SqliteDatabaseLike {
   prepare(sql: string): SqlitePreparedStatementLike;
   batch<T = Record<string, unknown>>(
-    statements: SqlitePreparedStatementLike[],
-  ): Promise<Array<SqliteResultLike<T>>>;
+    statements: readonly SqlitePreparedStatementLike[],
+  ): Promise<readonly SqliteResultLike<T>[]>;
 }
 
-/** D1-compatible aliases retained for public host bindings. */
 export type D1ResultLike<T = Record<string, unknown>> = SqliteResultLike<T>;
 export type D1PreparedStatementLike = SqlitePreparedStatementLike;
 export type D1DatabaseLike = SqliteDatabaseLike;
-
-/** Optional row convenience supported by adapters that expose `first()`. */
 export interface SqliteFirstCapability {
   first<T = Record<string, unknown>>(): Promise<T | null>;
 }

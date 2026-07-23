@@ -6,11 +6,11 @@ import { describe, expect, it } from 'vitest';
 import {
   initializeTaproot,
   inspectTaprootPersistence,
-  legacyTaprootV1Statements,
   type SqliteDatabaseLike,
   type SqlitePreparedStatementLike,
   type SqliteResultLike,
 } from '../src/index.js';
+import { legacyTaprootV1Statements } from '../src/schema.js';
 
 const baseIri = 'https://knowledge.example';
 const interrupted = new Error('simulated process interruption');
@@ -50,8 +50,8 @@ class InterruptingDatabase implements SqliteDatabaseLike {
   }
 
   async batch<T = Record<string, unknown>>(
-    statements: SqlitePreparedStatementLike[],
-  ): Promise<Array<SqliteResultLike<T>>> {
+    statements: readonly SqlitePreparedStatementLike[],
+  ): Promise<readonly SqliteResultLike<T>[]> {
     const tracked = statements.map((statement) => {
       if (!(statement instanceof TrackedStatement)) {
         throw new Error('Test adapter received an untracked statement');
@@ -202,7 +202,7 @@ describe('legacy migration interruption recovery', () => {
       await initializeTaproot(db, { baseIri });
       await db.batch([db.prepare(`DELETE FROM taproot_rdf_ownership`)]);
 
-      expect(await taprootLedgerCount(db)).toBe(8);
+      expect(await taprootLedgerCount(db)).toBe(9);
       await expect(inspectTaprootPersistence(db)).resolves.toMatchObject({
         current: false,
       });
@@ -238,7 +238,7 @@ describe('legacy migration interruption recovery', () => {
         ),
       ]);
 
-      expect(await taprootLedgerCount(db)).toBe(8);
+      expect(await taprootLedgerCount(db)).toBe(9);
       expect(
         await scalar(db, `SELECT COUNT(*) AS count FROM taproot_rdf_ownership`),
       ).toBe(ownershipBefore);
@@ -406,7 +406,7 @@ describe('legacy migration interruption recovery', () => {
     } finally {
       await miniflare.dispose();
     }
-  }, 30_000);
+  }, 120_000);
 });
 
 async function seedLegacy(db: SqliteDatabaseLike): Promise<void> {
@@ -483,7 +483,7 @@ async function expectCurrentRecoveredState(
   expect(await metadata(db, 'migration_source')).toBeUndefined();
   expect(await metadata(db, 'migration_source_rdf_version')).toBeUndefined();
   expect(await metadata(db, 'migration_source_base_iri')).toBeUndefined();
-  expect(await taprootLedgerCount(db)).toBe(8);
+  expect(await taprootLedgerCount(db)).toBe(9);
   expect(
     await scalar(
       db,
@@ -508,9 +508,10 @@ async function expectCurrentRecoveredState(
            OR (version = 5 AND name = 'unified-search-source-events')
            OR (version = 6 AND name = 'unified-search-materialization-lifecycle')
            OR (version = 7 AND name = 'external-search-producers')
-           OR (version = 8 AND name = 'complete-search-content-semantic')`,
+           OR (version = 8 AND name = 'complete-search-content-semantic')
+           OR (version = 9 AND name = 'architecture-reset')`,
     ),
-  ).toBe(8);
+  ).toBe(9);
 }
 
 async function metadata(

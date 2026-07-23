@@ -9,17 +9,13 @@ import {
 } from './errors.js';
 
 export const UNIFIED_SEARCH_SOURCE_KINDS_V1 = [
-  'statement',
   'item',
-  'task',
-  'memory',
-  'prompt',
+  'statement',
   'resource',
   'annotation',
 ] as const;
 
-export type UnifiedSearchSourceKindV1 =
-  (typeof UNIFIED_SEARCH_SOURCE_KINDS_V1)[number];
+export type UnifiedSearchSourceKindV1 = string;
 export type UnifiedSearchSourceOperationV1 = 'upsert' | 'delete';
 
 export interface UnifiedSearchSourcePredecessorV1 {
@@ -509,9 +505,14 @@ function normalizePredecessor(
 }
 
 function sourceKindV1(value: unknown): UnifiedSearchSourceKindV1 {
-  if (!UNIFIED_SEARCH_SOURCE_KINDS_V1.includes(value as never))
+  if (
+    typeof value !== 'string' ||
+    !/^(?:item|statement|resource|annotation|external:[a-z0-9:._-]+)$/u.test(
+      value,
+    )
+  )
     invalid('sourceKind is invalid');
-  return value as UnifiedSearchSourceKindV1;
+  return value;
 }
 
 function digest(value: unknown, field: string): string {

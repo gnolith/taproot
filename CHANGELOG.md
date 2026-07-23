@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+
+- Reset search to four built-in kinds (`item`, `statement`, `resource`, and
+  `annotation`) plus privately branded, namespace-bound external kinds.
+- Added canonical Resource/Annotation mutation boundaries, sealed
+  authorization bootstrap, scoped SPARQL policy preparation, owner-scoped
+  backup/blob ports, and read-only exact Taproot 0.4.2 adoption inspection.
+- Moved search, semantic, vector/provider adapters, SPARQL policy, and backup
+  into explicit package subpaths and removed raw SQL/foreign-domain bridges.
+- Added restartable migration 0009 with lossless namespaced adoption of
+  historical external search kinds.
+
 ## Unreleased
 
 ## 0.4.2

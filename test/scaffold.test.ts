@@ -17,10 +17,10 @@ describe('package release guard', () => {
     expect(manifest).toMatchObject({
       name: '@gnolith/taproot',
       private: false,
-      version: '0.4.2',
+      version: '0.5.0',
       publishConfig: { access: 'public', provenance: true },
     });
-    expect(manifest.dependencies['@gnolith/diamond']).toBe('0.4.1');
+    expect(manifest.dependencies['@gnolith/diamond']).toBe('0.5.0');
     expect(Object.values(manifest.dependencies)).not.toContainEqual(
       expect.stringMatching(/^(?:file:|link:)/),
     );
@@ -36,8 +36,8 @@ describe('package release guard', () => {
       new URL('scripts/qdrant-conformance.mjs', root),
       'utf8',
     );
-    expect(consumer).toContain("diamondInstances[0] !== '0.4.1'");
-    expect(consumer).not.toContain('DIAMOND_TARBALL');
+    expect(consumer).toContain("uniqueVersions[0] !== '0.5.0'");
+    expect(consumer).toContain('DIAMOND_TARBALL');
     expect(qdrant).toContain(
       'qdrant/qdrant:v1.18.2@sha256:da65a06bc75e42702f80c992b99c5144b0fbd675ae7a96d2991de0bf957b7071',
     );

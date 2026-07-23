@@ -20,7 +20,7 @@ import {
   type Statement,
   type AuthorizationContext,
 } from '@gnolith/taproot';
-import { createSparqlHandler } from '@gnolith/diamond';
+import { createSparqlExecutor } from '@gnolith/diamond/sparql';
 
 export async function runTaprootInteropDemo(db: D1DatabaseLike) {
   await initializeTaproot(db, { baseIri: 'https://knowledge.example' });
@@ -181,17 +181,20 @@ export async function runTaprootInteropDemo(db: D1DatabaseLike) {
     },
   );
 
-  const sparql = createSparqlHandler({ db });
+  const sparql = createSparqlExecutor({ db });
   const query = `SELECT ?occupation WHERE {
     <https://knowledge.example/entity/${created.entityId}>
       <https://knowledge.example/prop/direct/P1> ?occupation
   }`;
-  const response = await sparql(
-    new Request(
-      `https://interop.example/sparql?query=${encodeURIComponent(query)}`,
-      { headers: { accept: 'application/sparql-results+json' } },
-    ),
-  );
+  const execution = await sparql({
+    operation: 'query',
+    text: query,
+    accept: 'application/sparql-results+json',
+  });
+  const response = new Response(execution.body, {
+    status: execution.status,
+    headers: execution.mediaType ? { 'content-type': execution.mediaType } : {},
+  });
 
   let staleRevisionRejected = false;
   try {

@@ -40,6 +40,7 @@ const requiredFiles = [
   'migrations/0006_unified_search_materialization_lifecycle.sql',
   'migrations/0007_external_search_producers.sql',
   'migrations/0008_complete_search_content_semantic.sql',
+  'migrations/0009_architecture_reset.sql',
   'benchmarks/search-source-events-100k.json',
   'benchmarks/search-materialization-100k.json',
   'scripts/search-source-event-baseline.mjs',
@@ -79,8 +80,8 @@ assert.equal(packageJson.private, false);
 assert.equal(packageJson.publishConfig?.access, 'public');
 assert.equal(packageJson.publishConfig?.provenance, true);
 assert.match(packageJson.engines?.node ?? '', /^>=22/);
-assert.equal(packageJson.version, '0.4.2');
-assert.equal(packageJson.dependencies?.['@gnolith/diamond'], '0.4.1');
+assert.equal(packageJson.version, '0.5.0');
+assert.equal(packageJson.dependencies?.['@gnolith/diamond'], '0.5.0');
 assert.equal(
   packageJson.repository?.url,
   'https://github.com/gnolith/taproot.git',
@@ -95,13 +96,13 @@ assert.ok(
   'packed consumer must inspect the complete Diamond dependency graph',
 );
 assert.ok(
-  consumerSmoke.includes("diamondInstances[0] !== '0.4.1'"),
-  'packed consumer must require one Diamond 0.4.1 runtime',
+  consumerSmoke.includes("uniqueVersions[0] !== '0.5.0'"),
+  'packed consumer must require one Diamond 0.5.0 runtime',
 );
-assert.doesNotMatch(
+assert.match(
   consumerSmoke,
-  /DIAMOND_TARBALL|file:|link:/,
-  'packed consumer must use the public Diamond dependency',
+  /DIAMOND_TARBALL/u,
+  'candidate consumer must accept the exact Diamond tarball',
 );
 
 const qdrantConformance = readFileSync(

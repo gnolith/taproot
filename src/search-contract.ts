@@ -2,7 +2,6 @@ import {
   InvalidSearchContractError,
   MixedSearchProjectionScopeError,
   SearchProjectionLimitError,
-  UnsupportedSearchProjectionError,
 } from './errors.js';
 import {
   PersistedEntityAuthorizationSource,
@@ -12,23 +11,24 @@ import {
 } from './authorization.js';
 import type {
   AuthorizationContext,
-  Item,
   PropertyId,
   Statement,
   VisibilityScopeV1,
+  WikibaseEntity,
 } from './types.js';
 
 export const UNIFIED_SEARCH_KINDS = [
-  'statement',
   'item',
-  'task',
-  'memory',
-  'prompt',
+  'statement',
   'resource',
   'annotation',
 ] as const;
 
-export type UnifiedSearchKind = (typeof UNIFIED_SEARCH_KINDS)[number];
+/**
+ * Persisted search kind key. Public callers use BuiltInSearchKind or a branded
+ * ExternalSearchKind; arbitrary storage keys never cross the package boundary.
+ */
+export type UnifiedSearchKind = string;
 
 export const UNIFIED_SEARCH_LIMITS = Object.freeze({
   defaultPageSize: 20,
@@ -51,10 +51,7 @@ export interface StatementSearchFiltersV1 {
 
 export interface ItemSearchFiltersV1 {
   typeIds: readonly string[];
-}
-
-export interface TaskSearchFiltersV1 {
-  statuses: readonly string[];
+  entityTypes: readonly ('item' | 'property')[];
 }
 
 export interface ResourceSearchFiltersV1 {
@@ -67,7 +64,6 @@ export interface UnifiedSearchFiltersV1 {
   byKind: Readonly<{
     statement?: StatementSearchFiltersV1;
     item?: ItemSearchFiltersV1;
-    task?: TaskSearchFiltersV1;
     resource?: ResourceSearchFiltersV1;
   }>;
 }
@@ -84,11 +80,9 @@ export interface UnifiedSearchRequestV1 {
 export type UnifiedSearchReferenceV1 =
   | { kind: 'statement'; itemId: string; statementId: string }
   | { kind: 'item'; itemId: string }
-  | { kind: 'task'; taskId: string }
-  | { kind: 'memory'; memoryId: string }
-  | { kind: 'prompt'; promptId: string }
   | { kind: 'resource'; resourceId: string }
-  | { kind: 'annotation'; annotationId: string };
+  | { kind: 'annotation'; annotationId: string }
+  | { kind: 'external'; registrationId: string; sourceId: string };
 
 export interface UnifiedSearchMatchV1 {
   version: 1;
@@ -189,9 +183,9 @@ export type SearchProjectionFieldV1 =
   | 'statement'
   | 'title'
   | 'content'
-  | 'prompt'
   | 'result'
-  | 'status';
+  | 'state'
+  | 'body';
 
 export interface SearchProjectionSegmentV1 {
   field: SearchProjectionFieldV1;
@@ -272,7 +266,8 @@ export interface StatementProjectionInputV1 {
 
 export interface ItemProjectionInputV1 {
   source: SearchProjectionSourceEventV1;
-  item: Item;
+  /** Item-kind covers both canonical Wikibase entity types. */
+  item: WikibaseEntity;
   authorization: TrustedSearchAuthorizationEnvelopeV1;
   statementAuthorizations: Readonly<
     Record<string, TrustedSearchAuthorizationEnvelopeV1>
@@ -368,43 +363,46 @@ export function normalizeUnifiedSearchFiltersV1(
   );
   const byKindInput =
     input.byKind === undefined ? {} : record(input.byKind, 'filters.byKind');
-  exactKeys(byKindInput, ['statement', 'item', 'task', 'resource']);
+  exactKeys(byKindInput, ['statement', 'item', 'resource']);
   const selectedKinds = new Set(kinds);
   const byKind: {
     statement?: StatementSearchFiltersV1;
     item?: ItemSearchFiltersV1;
-    task?: TaskSearchFiltersV1;
     resource?: ResourceSearchFiltersV1;
   } = {};
-  for (const kind of ['statement', 'item', 'task', 'resource'] as const) {
+  for (const kind of ['statement', 'item', 'resource'] as const) {
     const block = byKindInput[kind];
     if (block === undefined) continue;
     if (!selectedKinds.has(kind))
       invalid(`filters.byKind.${kind} requires ${kind} in kinds`);
     const normalizedBlock = record(block, `filters.byKind.${kind}`);
-    const field =
-      kind === 'statement'
-        ? 'predicateIds'
-        : kind === 'item'
-          ? 'typeIds'
-          : kind === 'task'
-            ? 'statuses'
-            : 'mediaTypes';
+    if (kind === 'item') {
+      exactKeys(normalizedBlock, ['typeIds', 'entityTypes']);
+      const typeIds = normalizeStringCollection(
+        normalizedBlock.typeIds,
+        'filters.byKind.item.typeIds',
+        (candidate) => itemPattern.test(candidate),
+      );
+      const entityTypes = normalizeStringCollection(
+        normalizedBlock.entityTypes,
+        'filters.byKind.item.entityTypes',
+        (candidate) => candidate === 'item' || candidate === 'property',
+      ) as Array<'item' | 'property'>;
+      byKind.item = { typeIds, entityTypes };
+      continue;
+    }
+    const field = kind === 'statement' ? 'predicateIds' : 'mediaTypes';
     exactKeys(normalizedBlock, [field]);
     const pattern =
       kind === 'statement'
         ? (candidate: string) => propertyPattern.test(candidate)
-        : kind === 'item'
-          ? (candidate: string) => itemPattern.test(candidate)
-          : undefined;
+        : undefined;
     const values = normalizeStringCollection(
       normalizedBlock[field],
       `filters.byKind.${kind}.${field}`,
       pattern,
     );
     if (kind === 'statement') byKind.statement = { predicateIds: values };
-    else if (kind === 'item') byKind.item = { typeIds: values };
-    else if (kind === 'task') byKind.task = { statuses: values };
     else byKind.resource = { mediaTypes: values };
   }
   return { languages, sourceRevisions, byKind };
@@ -754,10 +752,11 @@ export async function projectItemForUnifiedSearchV1(
   if (source.operation !== 'upsert' || source.kind !== 'item')
     invalid('item projection requires an item upsert source event');
   if (
-    input.item.type !== 'item' ||
-    checkedItemId(input.item.id, 'item.id') !== source.sourceId
+    (input.item.type === 'item' && !itemPattern.test(input.item.id)) ||
+    (input.item.type === 'property' && !propertyPattern.test(input.item.id)) ||
+    input.item.id !== source.sourceId
   )
-    invalid('item source id does not match the Item');
+    invalid('item source id does not match the canonical entity');
   boundedInteger(
     input.item.lastrevid,
     'item.lastrevid',
@@ -877,7 +876,12 @@ export async function projectItemForUnifiedSearchV1(
       {
         languages: documentLanguages(partition.segments),
         sourceRevisions: [source.sourceRevision],
-        byKind: { item: { typeIds: itemTypeIds(input.item) } },
+        byKind: {
+          item: {
+            typeIds: itemTypeIds(input.item),
+            entityTypes: [input.item.type],
+          },
+        },
       },
       partition.segments,
     );
@@ -889,18 +893,6 @@ export async function projectItemForUnifiedSearchV1(
   if (documents.length === 0)
     invalid(`Item ${input.item.id} has no projectable text`);
   return buildPlan(source, documents, chunks);
-}
-
-export function projectTaskForUnifiedSearchV1(): never {
-  return unsupportedProjection('task');
-}
-
-export function projectMemoryForUnifiedSearchV1(): never {
-  return unsupportedProjection('memory');
-}
-
-export function projectPromptForUnifiedSearchV1(): never {
-  return unsupportedProjection('prompt');
 }
 
 export async function projectResourceForUnifiedSearchV1(
@@ -985,26 +977,30 @@ export async function projectAnnotationForUnifiedSearchV1(
   );
 }
 
-function unsupportedProjection(kind: UnifiedSearchKind): never {
-  throw new UnsupportedSearchProjectionError(
-    `${kind} projection is recognized by contract V1 but is not implemented`,
-  );
-}
-
 function normalizeKinds(value: unknown): UnifiedSearchKind[] {
   if (!Array.isArray(value) || value.length === 0)
     invalid('kinds must be a non-empty array when provided');
   const unique = new Set<UnifiedSearchKind>();
   for (const candidate of value) unique.add(normalizeKind(candidate, 'kinds'));
   return [...unique].sort(
-    (left, right) => kindOrder.get(left)! - kindOrder.get(right)!,
+    (left, right) =>
+      (kindOrder.get(left) ?? Number.MAX_SAFE_INTEGER) -
+        (kindOrder.get(right) ?? Number.MAX_SAFE_INTEGER) ||
+      left.localeCompare(right),
   );
 }
 
 function normalizeKind(value: unknown, name: string): UnifiedSearchKind {
-  if (typeof value !== 'string' || !kindOrder.has(value))
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > 256 ||
+    !/^(?:item|statement|resource|annotation|external:[a-z0-9:._-]+)$/u.test(
+      value,
+    )
+  )
     invalid(`${name} is not a unified search kind`);
-  return value as UnifiedSearchKind;
+  return value;
 }
 
 function normalizeReference(
@@ -1012,6 +1008,19 @@ function normalizeReference(
   expectedKind: UnifiedSearchKind,
 ): UnifiedSearchReferenceV1 {
   const input = record(value, 'reference');
+  if (!kindOrder.has(expectedKind)) {
+    exactKeys(input, ['kind', 'registrationId', 'sourceId']);
+    if (input.kind !== 'external')
+      invalid('external reference kind is invalid');
+    return {
+      kind: 'external',
+      registrationId: identifier(
+        input.registrationId,
+        'reference.registrationId',
+      ),
+      sourceId: identifier(input.sourceId, 'reference.sourceId'),
+    };
+  }
   const kind = normalizeKind(input.kind, 'reference.kind');
   if (kind !== expectedKind)
     invalid('reference kind does not match result kind');
@@ -1026,21 +1035,6 @@ function normalizeReference(
     case 'item':
       exactKeys(input, ['kind', 'itemId']);
       return { kind, itemId: checkedItemId(input.itemId, 'reference.itemId') };
-    case 'task':
-      exactKeys(input, ['kind', 'taskId']);
-      return { kind, taskId: identifier(input.taskId, 'reference.taskId') };
-    case 'memory':
-      exactKeys(input, ['kind', 'memoryId']);
-      return {
-        kind,
-        memoryId: identifier(input.memoryId, 'reference.memoryId'),
-      };
-    case 'prompt':
-      exactKeys(input, ['kind', 'promptId']);
-      return {
-        kind,
-        promptId: identifier(input.promptId, 'reference.promptId'),
-      };
     case 'resource':
       exactKeys(input, ['kind', 'resourceId']);
       return {
@@ -1054,6 +1048,7 @@ function normalizeReference(
         annotationId: identifier(input.annotationId, 'reference.annotationId'),
       };
   }
+  invalid('reference kind is invalid');
 }
 
 function normalizeStringCollection(
@@ -1138,7 +1133,9 @@ async function intersectAuthorization(
   };
 }
 
-function itemMetadataSegments(item: Item): SearchProjectionSegmentV1[] {
+function itemMetadataSegments(
+  item: WikibaseEntity,
+): SearchProjectionSegmentV1[] {
   const segments: SearchProjectionSegmentV1[] = [];
   for (const language of Object.keys(item.labels).sort(compare)) {
     const value = item.labels[language];
@@ -1165,7 +1162,7 @@ function itemMetadataSegments(item: Item): SearchProjectionSegmentV1[] {
   return segments;
 }
 
-function itemTypeIds(item: Item): string[] {
+function itemTypeIds(item: WikibaseEntity): string[] {
   const ids = new Set<string>();
   for (const statement of item.claims.P31 ?? []) {
     const value = statement.mainsnak.datavalue?.value;
@@ -1181,7 +1178,7 @@ function itemTypeIds(item: Item): string[] {
   return [...ids].sort(compare);
 }
 
-function orderedStatements(item: Item): Statement[] {
+function orderedStatements(item: WikibaseEntity): Statement[] {
   return (Object.keys(item.claims) as PropertyId[])
     .sort(compare)
     .flatMap((property) =>

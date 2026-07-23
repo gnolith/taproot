@@ -205,7 +205,7 @@ async function exercise(
   const adminAtOne = context(1, {
     capabilities: [SEARCH_ADMIN_CAPABILITY],
   });
-  const byEntity = new Map<string, typeof revisions.results>();
+  const byEntity = new Map<string, Array<(typeof revisions.results)[number]>>();
   for (const row of revisions.results) {
     const values = byEntity.get(row.entity_id) ?? [];
     values.push(row);

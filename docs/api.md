@@ -4,14 +4,15 @@ The unified-search types, strict normalizers, deterministic serialization
 utilities, and projection planners are documented in
 [search-contract.md](search-contract.md). `createAuthorizedSearchServiceV1`
 exposes the single relevance `search` operation plus owner hydration. Omitted
-kinds cover all seven kinds; explicit kinds narrow; invalid kinds, limits, and
-cursor bindings fail closed. SPARQL remains a separate exact structured path.
+kinds cover all ready built-ins and registered external handles; explicit
+kinds narrow; invalid handles, limits, and cursor bindings fail closed.
+SPARQL remains a separate exact structured path.
 
 The metadata-only persistence boundary is documented in
 [search-source-events.md](search-source-events.md). It records authoritative
 source changes. The separately guarded dormant lifecycle in
 [search-materialization.md](search-materialization.md) materializes Taproot
-Item, Resource, Annotation, and registered Workshop roots.
+Item, Statement, Resource, Annotation, and registered external roots.
 
 `TaprootContentRepositoryV1` owns canonical Resource and Annotation CRUD,
 revision reads, authorization, payload hydration, snapshots, and W3C Web
@@ -113,20 +114,10 @@ guard, or authorization context to request, user, agent, or MCP code.
 
 `bootstrapTaprootAuthorization` initializes a pristine database once.
 `createInstallationAuthorizationGuard` issues the normal-write guard.
-The guard can also execute an ordered cross-package database batch behind an
-exact-revision fence or an inseparable authorization advance. It never returns
-raw fence or advance statements to the caller.
-`createInstallationDomainMutationGuard` issues a separate fence-only opaque
-guard bound at host assembly to one exact non-Knowledge domain and capability.
-Its batches return only the domain-statement results plus the fenced counters;
-they do not advance either counter. Knowledge advances require both
-`knowledge:write` and `knowledge:policy`.
-`createInstallationSearchSourceGuardV1` issues an opaque non-Knowledge guard
-bound to one database, installation, domain, source kind, capability, and set
-of change classes. Its `batchWithSourceEvent` method atomically commits sibling
-domain SQL, one persisted search-generation advance, one immutable source
-event, and the current source registry. Exact replay is a no-op; divergent or
-stale-predecessor replay fails.
+The guard exposes only live-state inspection; it accepts no SQL or foreign
+statements. Canonical writes and policy advances use bounded Taproot operations.
+External search producers coordinate through namespace-bound registration
+capabilities and sealed one-shot owner mutation participants.
 `inspectTaprootAuthorizationReadiness`,
 `planTaprootAuthorizationBackfill`, and
 `applyTaprootAuthorizationBackfill` are host-controlled, exact

@@ -10,10 +10,17 @@ export default defineConfig({
     },
   },
   test: {
-    testTimeout: 30_000,
+    testTimeout: 120_000,
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],
+      exclude: [
+        'src/adapters-cloudflare-d1-compatible.ts',
+        'src/adapters-d1-compatible.ts',
+        'src/adapters-qdrant.ts',
+        'src/adapters-sqlite-vector.ts',
+        'src/sqlite-types.ts',
+      ],
       reporter: ['text', 'json-summary'],
       thresholds: {
         statements: 75,

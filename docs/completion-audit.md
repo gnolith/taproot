@@ -26,10 +26,10 @@ npm ci
 npm run check
 ```
 
-Diamond `0.4.1` supplies the composable patch API, neutral SQLite capability,
+Diamond `0.5.0` supplies the composable patch API, neutral SQLite capability,
 and package-owned migration primitives.
 The packed-consumer gate installs Taproot and Diamond without repository
-siblings or local paths, asserts exactly one Diamond 0.4.1 runtime, and
+the exact candidate tarball, asserts exactly one Diamond 0.5.0 runtime, and
 exercises a fresh Workerd D1 database.
 
 This audit qualifies the Taproot package boundary only. It does not assemble,

@@ -1580,7 +1580,7 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
   async #corpus(): Promise<CorpusRecord[]> {
     const result = await this.#db
       .prepare(
-        `SELECT d.document_kind, d.document_id, d.document_slot, d.document_hash, d.document_text, c.chunk_id, c.chunk_hash, c.chunk_text, c.trace_json, h.root_id, h.root_revision, d.stage_id FROM taproot_search_installation_state i JOIN taproot_search_materialization_heads h ON h.corpus_id=i.active_corpus_id AND h.eligible=1 JOIN taproot_unified_search_source_registry r ON r.installation_id=i.installation_id AND r.source_kind=h.root_kind AND r.source_id=h.root_id AND r.current_event_id=h.source_event_id AND r.operation='upsert' JOIN taproot_search_staged_documents d ON d.stage_id=h.current_stage_id LEFT JOIN taproot_search_chunks c ON c.stage_id=d.stage_id AND c.document_slot=d.document_slot WHERE i.installation_id=? AND d.document_kind IN ('item','task','memory','prompt','resource','annotation') ORDER BY d.document_kind,h.root_id,d.document_slot,c.ordinal`,
+        `SELECT d.document_kind, d.document_id, d.document_slot, d.document_hash, d.document_text, c.chunk_id, c.chunk_hash, c.chunk_text, c.trace_json, h.root_id, h.root_revision, d.stage_id FROM taproot_search_installation_state i JOIN taproot_search_materialization_heads h ON h.corpus_id=i.active_corpus_id AND h.eligible=1 JOIN taproot_unified_search_source_registry r ON r.installation_id=i.installation_id AND r.source_kind=h.root_kind AND r.source_id=h.root_id AND r.current_event_id=h.source_event_id AND r.operation='upsert' JOIN taproot_search_staged_documents d ON d.stage_id=h.current_stage_id LEFT JOIN taproot_search_chunks c ON c.stage_id=d.stage_id AND c.document_slot=d.document_slot WHERE i.installation_id=? ORDER BY d.document_kind,h.root_id,d.document_slot,c.ordinal`,
       )
       .bind(this.#installationId)
       .all<{
@@ -1872,7 +1872,10 @@ function validateVectorRecord(
   token(record.installationId, 'installationId', 128);
   token(record.configurationId, 'configurationId', 128);
   positive(record.generation, 'generation');
-  if (!UNIFIED_SEARCH_KINDS.includes(record.kind))
+  if (
+    !(UNIFIED_SEARCH_KINDS as readonly string[]).includes(record.kind) &&
+    !/^external:[a-z0-9:._-]+$/u.test(record.kind)
+  )
     throw new Error('semantic kind is invalid');
   validateVector(record.vector, dimensions);
   normalizeMetric(metric);

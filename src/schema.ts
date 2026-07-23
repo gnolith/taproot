@@ -1,12 +1,15 @@
 import { encodeTerm, prepareQuadPatch } from '@gnolith/diamond';
-import type { SqliteDatabaseLike } from './sqlite-types.js';
+import type {
+  SqliteDatabaseLike,
+  SqlitePreparedStatementLike,
+} from './sqlite-types.js';
 import { DataFactory } from 'rdf-data-factory';
 import { parseEntityJson } from './canonical.js';
 import { buildEntityQuads } from './rdf.js';
 import type { EntityId, WikibaseEntity } from './types.js';
 import { SchemaMismatchError } from './errors.js';
 
-export const TAPROOT_SCHEMA_VERSION = '7';
+export const TAPROOT_SCHEMA_VERSION = '9';
 export const TAPROOT_JSON_VERSION = '2';
 export const TAPROOT_RDF_VERSION = '2';
 
@@ -15,6 +18,7 @@ const PRE_SEARCH_SOURCE_SCHEMA_VERSION = '3';
 const PRE_SEARCH_MATERIALIZATION_SCHEMA_VERSION = '4';
 const PRE_EXTERNAL_SEARCH_PRODUCER_SCHEMA_VERSION = '5';
 const PRE_COMPLETE_SEARCH_SCHEMA_VERSION = '6';
+const PRE_ARCHITECTURE_RESET_SCHEMA_VERSION = '7';
 
 const preAuthorizationTaprootSchemaStatements = [
   `CREATE TABLE IF NOT EXISTS taproot_entities (
@@ -1320,10 +1324,98 @@ export const taprootCompleteSearchSchemaStatements = [
     BEFORE DELETE ON taproot_semantic_admin_audit
     BEGIN SELECT RAISE(ABORT, 'taproot semantic audit is immutable'); END`,
   `INSERT INTO taproot_metadata(metadata_key, metadata_value)
-    VALUES ('schema_version', '${TAPROOT_SCHEMA_VERSION}')
+    VALUES ('schema_version', '${PRE_ARCHITECTURE_RESET_SCHEMA_VERSION}')
     ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
   `INSERT INTO taproot_migrations(version, name)
     VALUES (8, 'complete-search-content-semantic')
+    ON CONFLICT(version) DO NOTHING`,
+] as const;
+
+/** Sealed bootstrap, generic kind registration, and content RDF ownership. */
+export const taprootArchitectureResetSchemaStatements = [
+  `CREATE TABLE IF NOT EXISTS taproot_external_search_kind_registrations (
+    installation_id TEXT NOT NULL,
+    registration_id TEXT NOT NULL UNIQUE,
+    storage_key TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    local_name TEXT NOT NULL,
+    owner_domain TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (installation_id, storage_key),
+    UNIQUE (installation_id, namespace, local_name)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_authorization_principals (
+    installation_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (installation_id, principal_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_authorization_workspaces (
+    installation_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (installation_id, workspace_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_authorization_grants (
+    installation_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    authorization_revision INTEGER NOT NULL CHECK (authorization_revision >= 1),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (installation_id, principal_id, workspace_id, capability),
+    FOREIGN KEY (installation_id, principal_id)
+      REFERENCES taproot_authorization_principals(installation_id, principal_id),
+    FOREIGN KEY (installation_id, workspace_id)
+      REFERENCES taproot_authorization_workspaces(installation_id, workspace_id)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_authorization_bootstraps (
+    bootstrap_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL UNIQUE,
+    principal_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    authorization_revision INTEGER NOT NULL CHECK (authorization_revision = 1),
+    input_sha256 TEXT NOT NULL,
+    grant_manifest_sha256 TEXT NOT NULL,
+    owner_registration_id TEXT NOT NULL,
+    owner_receipt_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (installation_id, idempotency_key)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_content_authorization_revisions (
+    record_kind TEXT NOT NULL CHECK (record_kind IN ('resource', 'annotation')),
+    record_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    installation_id TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    visibility_json TEXT NOT NULL CHECK (json_valid(visibility_json)),
+    principal_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (record_kind, record_id, revision)
+  ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_content_rdf_ownership (
+    record_kind TEXT NOT NULL CHECK (record_kind IN ('resource', 'annotation')),
+    record_id TEXT NOT NULL,
+    subject_key TEXT NOT NULL,
+    predicate_key TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    graph_key TEXT NOT NULL,
+    PRIMARY KEY (
+      record_kind, record_id, subject_key, predicate_key, object_key, graph_key
+    )
+  ) STRICT`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_content_authorization_no_update
+    BEFORE UPDATE ON taproot_content_authorization_revisions
+    BEGIN SELECT RAISE(ABORT, 'taproot content authorization is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_content_authorization_no_delete
+    BEFORE DELETE ON taproot_content_authorization_revisions
+    BEGIN SELECT RAISE(ABORT, 'taproot content authorization is immutable'); END`,
+  `INSERT INTO taproot_metadata(metadata_key, metadata_value)
+    VALUES ('schema_version', '${TAPROOT_SCHEMA_VERSION}')
+    ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
+  `INSERT INTO taproot_migrations(version, name)
+    VALUES (9, 'architecture-reset')
     ON CONFLICT(version) DO NOTHING`,
 ] as const;
 
@@ -1386,6 +1478,206 @@ const appendColumns = (sql: string, columns: string): string => {
     return `${sql.slice(0, constraint.index)}\n${columns},${sql.slice(constraint.index)}`;
   return sql.replace(/\n {2}\) STRICT$/u, `,\n${columns}\n  ) STRICT`);
 };
+
+const legacySearchKinds =
+  "'statement', 'item', 'task', 'memory', 'prompt', 'resource', 'annotation'";
+const genericKindCheck = (column: string) =>
+  `length(${column}) BETWEEN 1 AND 256 AND ${column} NOT GLOB '*[[:cntrl:]]*'`;
+
+/**
+ * Historical migrations remain checksum-stable, while the 0.5 final catalog
+ * removes the closed host-kind enum. Branded registration is the authority;
+ * persisted kind columns merely retain its opaque storage key.
+ */
+const architectureResetCatalogSql = (sql: string): string =>
+  sql
+    .replaceAll(
+      `source_kind IN (${legacySearchKinds})`,
+      genericKindCheck('source_kind'),
+    )
+    .replaceAll(
+      `root_kind IN (${legacySearchKinds})`,
+      genericKindCheck('root_kind'),
+    )
+    .replaceAll(
+      `document_kind IN (${legacySearchKinds})`,
+      genericKindCheck('document_kind'),
+    )
+    .replaceAll(
+      `kind IN ('item', 'task', 'memory', 'prompt', 'resource', 'annotation')`,
+      genericKindCheck('kind'),
+    )
+    .replace(
+      /,\n {4}CHECK \(\(source_kind IN \('statement', 'item', 'resource', 'annotation'\) AND owning_domain = 'taproot'\)\n {6}OR \(source_kind IN \('task', 'memory', 'prompt'\) AND owning_domain = 'workshop'\)\)/u,
+      '',
+    )
+    .replace(
+      /blocked_producer_count INTEGER NOT NULL DEFAULT 3 CHECK \(blocked_producer_count BETWEEN 0 AND 7\)/u,
+      'blocked_producer_count INTEGER NOT NULL DEFAULT 0 CHECK (blocked_producer_count >= 0)',
+    );
+
+/**
+ * Builds the atomic 0008 -> 0009 storage rewrite. Every package table is
+ * rebuilt together so SQLite cannot retarget a surviving foreign key to a
+ * temporary table name. Legacy non-built-in kind values are adopted under a
+ * generic `legacy` namespace without branching on any particular value.
+ */
+export async function prepareArchitectureResetStorageStatements(
+  db: SqliteDatabaseLike,
+): Promise<readonly SqlitePreparedStatementLike[]> {
+  const tables = await db
+    .prepare(
+      `SELECT name, sql FROM sqlite_schema
+       WHERE type='table' AND name LIKE 'taproot_%' AND sql IS NOT NULL
+       ORDER BY name`,
+    )
+    .all<{ name: string; sql: string }>();
+  const objects = await db
+    .prepare(
+      `SELECT type, name FROM sqlite_schema
+       WHERE type IN ('index', 'trigger') AND name LIKE 'taproot_%'
+         AND sql IS NOT NULL
+       ORDER BY type DESC, name`,
+    )
+    .all<{ type: 'index' | 'trigger'; name: string }>();
+  const tableNames = new Set(tables.results.map(({ name }) => name));
+  const dependencies = new Map<string, Set<string>>();
+  const columns = new Map<string, string[]>();
+  for (const { name } of tables.results) {
+    const foreignKeys = await db
+      .prepare(`PRAGMA foreign_key_list("${name}")`)
+      .all<{ table: string }>();
+    dependencies.set(
+      name,
+      new Set(
+        foreignKeys.results
+          .map(({ table }) => table)
+          .filter((parent) => parent !== name && tableNames.has(parent)),
+      ),
+    );
+    const info = await db
+      .prepare(`PRAGMA table_info("${name}")`)
+      .all<{ name: string }>();
+    columns.set(
+      name,
+      info.results.map(({ name: column }) => column),
+    );
+  }
+  const dropOrder: string[] = [];
+  const remaining = new Set(tableNames);
+  while (remaining.size) {
+    const referenced = new Set<string>();
+    for (const child of remaining)
+      for (const parent of dependencies.get(child) ?? [])
+        if (remaining.has(parent)) referenced.add(parent);
+    const leaves = [...remaining]
+      .filter((name) => !referenced.has(name))
+      .sort();
+    const selected = leaves.length ? leaves : [[...remaining].sort()[0]!];
+    for (const name of selected) {
+      remaining.delete(name);
+      dropOrder.push(name);
+    }
+  }
+  const statements: SqlitePreparedStatementLike[] = [];
+  if (tableNames.has('taproot_unified_search_producer_manifests'))
+    statements.push(
+      db.prepare(
+        `INSERT INTO taproot_external_search_kind_registrations(
+           installation_id, registration_id, storage_key, namespace,
+           local_name, owner_domain, created_at
+         )
+         SELECT installation_id,
+           'legacy-' || source_kind,
+           'external:6:legacy:' || source_kind,
+           'legacy', source_kind, owning_domain, MIN(created_at)
+         FROM taproot_unified_search_producer_manifests
+         WHERE source_kind NOT IN ('item','statement','resource','annotation')
+         GROUP BY installation_id, source_kind, owning_domain
+         ON CONFLICT(installation_id, storage_key) DO NOTHING`,
+      ),
+    );
+  for (const object of objects.results)
+    statements.push(
+      db.prepare(
+        `DROP ${object.type.toUpperCase()} IF EXISTS "${object.name}"`,
+      ),
+    );
+  for (const sql of taprootCurrentCatalogStatements) {
+    const match =
+      /^\s*CREATE\s+(?:UNIQUE\s+)?(INDEX|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z0-9_]+)/iu.exec(
+        sql,
+      );
+    if (match?.[1] && match[2])
+      statements.push(
+        db.prepare(`DROP ${match[1].toUpperCase()} IF EXISTS "${match[2]}"`),
+      );
+  }
+  for (const { name } of tables.results)
+    statements.push(
+      db.prepare(`ALTER TABLE "${name}" RENAME TO "${name}__0008"`),
+    );
+  const tableByName = new Map(tables.results.map((row) => [row.name, row]));
+  for (const { name, sql } of tables.results) {
+    const create = architectureResetCatalogSql(sql).replace(
+      new RegExp(
+        `^(CREATE\\s+TABLE\\s+)(?:IF\\s+NOT\\s+EXISTS\\s+)?["\`]?${name}["\`]?`,
+        'iu',
+      ),
+      `$1${name}`,
+    );
+    statements.push(db.prepare(create));
+  }
+  for (const name of [...dropOrder].reverse()) {
+    const row = tableByName.get(name);
+    if (!row) continue;
+    const names = columns.get(name) ?? [];
+    const mapped = names.map((column) =>
+      architectureKindColumn(name, column)
+        ? `CASE WHEN "${column}" IN ('item','statement','resource','annotation')
+             THEN "${column}" ELSE 'external:6:legacy:' || "${column}" END`
+        : `"${column}"`,
+    );
+    statements.push(
+      db.prepare(
+        `INSERT INTO "${name}"(${names.map((value) => `"${value}"`).join(',')})
+         SELECT ${mapped.join(',')} FROM "${name}__0008"`,
+      ),
+    );
+  }
+  for (const name of dropOrder)
+    statements.push(db.prepare(`DROP TABLE "${name}__0008"`));
+  for (const sql of taprootCurrentCatalogStatements)
+    if (/^\s*CREATE\s+(?:UNIQUE\s+)?(?:INDEX|TRIGGER)\b/iu.test(sql))
+      statements.push(
+        db.prepare(
+          sql
+            .replace(
+              /^\s*CREATE\s+UNIQUE\s+INDEX\s+(?!IF\s+NOT\s+EXISTS)/iu,
+              'CREATE UNIQUE INDEX IF NOT EXISTS ',
+            )
+            .replace(
+              /^\s*CREATE\s+INDEX\s+(?!IF\s+NOT\s+EXISTS)/iu,
+              'CREATE INDEX IF NOT EXISTS ',
+            )
+            .replace(
+              /^\s*CREATE\s+TRIGGER\s+(?!IF\s+NOT\s+EXISTS)/iu,
+              'CREATE TRIGGER IF NOT EXISTS ',
+            ),
+        ),
+      );
+  return statements;
+}
+
+function architectureKindColumn(table: string, column: string): boolean {
+  if (
+    column === 'source_kind' ||
+    column === 'root_kind' ||
+    column === 'document_kind'
+  )
+    return true;
+  return table === 'taproot_embedding_vectors' && column === 'kind';
+}
 
 const finalExternalProducerAlteredCatalogStatements = [
   appendColumns(
@@ -1463,10 +1755,24 @@ const taprootPreCompleteSearchCatalogStatements = [
 const taprootCurrentCatalogStatements = [
   ...taprootPreCompleteSearchCatalogStatements,
   ...taprootCompleteSearchSchemaStatements,
+  ...taprootArchitectureResetSchemaStatements,
+].map(architectureResetCatalogSql);
+
+export const taprootPreArchitectureResetCatalogStatements = [
+  ...taprootPreCompleteSearchCatalogStatements,
+  ...taprootCompleteSearchSchemaStatements,
 ] as const;
 
 /** Ordered executable schema used for fresh initialization and recovery. */
 export const taprootSchemaStatements = [
+  ...preExternalSearchProducerTaprootSchemaStatements,
+  ...taprootExternalSearchProducerSchemaStatements,
+  ...taprootCompleteSearchSchemaStatements,
+  ...taprootArchitectureResetSchemaStatements,
+].map(architectureResetCatalogSql);
+
+/** @internal Executable historical 0008 schema used by upgrade conformance. */
+export const taprootPreArchitectureResetSchemaStatements = [
   ...preExternalSearchProducerTaprootSchemaStatements,
   ...taprootExternalSearchProducerSchemaStatements,
   ...taprootCompleteSearchSchemaStatements,
@@ -1615,7 +1921,7 @@ export async function initializeTaproot(
 
 export async function isRecognizedLegacyV1(
   db: SqliteDatabaseLike,
-  tables: Array<{ name: string }>,
+  tables: readonly { name: string }[],
 ): Promise<boolean> {
   const expectedTables = [
     'taproot_assertions',
@@ -2093,15 +2399,16 @@ export async function verifyTaprootPackageSeeds(
           OR (version = 5 AND name = 'unified-search-source-events')
           OR (version = 6 AND name = 'unified-search-materialization-lifecycle')
           OR (version = 7 AND name = 'external-search-producers')
-          OR (version = 8 AND name = 'complete-search-content-semantic')`,
+          OR (version = 8 AND name = 'complete-search-content-semantic')
+          OR (version = 9 AND name = 'architecture-reset')`,
     )
     .all<{ count: number }>();
   const migrationSeedTotal = await db
     .prepare(`SELECT COUNT(*) AS count FROM taproot_migrations`)
     .all<{ count: number }>();
   if (
-    Number(migrationSeeds.results[0]?.count ?? 0) !== 8 ||
-    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 8
+    Number(migrationSeeds.results[0]?.count ?? 0) !== 9 ||
+    Number(migrationSeedTotal.results[0]?.count ?? 0) !== 9
   )
     throw new SchemaMismatchError(
       'Taproot package migration seeds are incomplete',
@@ -2476,6 +2783,13 @@ export async function isExactPreCompleteSearchTaprootSchema(
   return matchesExactCatalog(db, taprootPreCompleteSearchCatalogStatements);
 }
 
+/** Exact migration-0008 predecessor catalog accepted by migration 0009. */
+export async function isExactPreArchitectureResetTaprootSchema(
+  db: SqliteDatabaseLike,
+): Promise<boolean> {
+  return matchesExactCatalog(db, taprootPreArchitectureResetCatalogStatements);
+}
+
 /** Exact package catalog immediately before canonical authorization migration 0004. */
 export async function isExactPreAuthorizationTaprootSchema(
   db: SqliteDatabaseLike,
@@ -2536,7 +2850,7 @@ function expectedCatalog(statements: readonly string[]): Map<string, string> {
 
 async function readTaprootCatalog(
   db: SqliteDatabaseLike,
-): Promise<Array<{ type: string; name: string; sql: string | null }>> {
+): Promise<readonly { type: string; name: string; sql: string | null }[]> {
   const catalog = await db
     .prepare(
       `SELECT type, name, sql FROM sqlite_schema WHERE name LIKE 'taproot_%' AND type IN ('table', 'index', 'trigger') ORDER BY type, name`,

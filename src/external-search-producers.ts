@@ -3,19 +3,16 @@ import type {
   SqlitePreparedStatementLike,
   SqliteResultLike,
 } from './sqlite-types.js';
-import {
-  normalizeAuthorizationContext,
-  normalizeVisibilityScope,
-} from './authorization.js';
+import type { TaprootHostWriteCapability } from './assembly-authority.js';
+import { assertTaprootHostWriteCapabilityInternal } from './assembly-authority.js';
+import { normalizeAuthorizationContext } from './authorization.js';
 import { InvalidAuthorizationError } from './errors.js';
 import {
-  UNIFIED_SEARCH_LIMITS,
   canonicalSearchHashV1,
   deriveSearchContractIdV1,
-  normalizeUnifiedSearchFiltersV1,
+  UNIFIED_SEARCH_LIMITS,
   type DerivedSearchChunkV1,
   type DerivedSearchDocumentV1,
-  type SearchAuthorizationEnvelopeValueV1,
   type SearchProjectionPlanV1,
   type SearchProjectionSegmentV1,
   type SearchProjectionSourceEventV1,
@@ -23,1564 +20,981 @@ import {
   type UnifiedSearchReferenceV1,
 } from './search-contract.js';
 import {
-  normalizeUnifiedSearchSourceEventInputV1,
+  externalKindBindingInternal,
+  registrationForStorageKeyInternal,
+  type ExternalProducerRegistrationCapability,
+  type ExternalSearchKind,
+} from './search-kinds.js';
+import {
   prepareUnifiedSearchSourceEventStatementsV1,
   readPersistedSearchSourceRegistryV1,
-  type UnifiedSearchSourceKindV1,
   type UnifiedSearchSourcePredecessorV1,
 } from './search-source-events.js';
-import type { AuthorizationContext, VisibilityScopeV1 } from './types.js';
+import type { AuthorizationContext } from './types.js';
 
-const MAX_DOMAIN_STATEMENTS = 100;
-const MAX_SQL_BYTES = 64 * 1024;
 const MAX_COMMIT_ATTEMPTS = 64;
-const BLOCKED_SQL = /(?:^|[^a-z0-9_])(?:taproot_|_gnolith_)/iu;
+const MAX_OWNER_STATEMENTS = 100;
+const encoder = new TextEncoder();
 
-export interface ExternalSearchDomainMutationBindingV1 {
-  domain: string;
-  sourceKind: 'task' | 'memory' | 'prompt';
-  capability: string;
+export interface ProducerDescriptor {
+  registration: ExternalProducerRegistrationCapability;
+  implementationVersion: string;
+  fingerprint: string;
+  projectionVersion: string;
   changeClasses: readonly string[];
 }
 
-export interface ExternalSearchDomainSqlV1 {
-  sql: string;
-  values: readonly unknown[];
-}
-
-export interface ExternalSearchCanonicalMutationInputV1 {
-  context: AuthorizationContext;
-  eventId: string;
-  sourceId: string;
-  operation: 'upsert' | 'delete';
-  changeClass: string;
-  sourceRevision: string;
-  sourcePolicyRevision: number;
-  predecessor: UnifiedSearchSourcePredecessorV1 | null;
-  canonicalPostState: unknown;
-  statements: readonly ExternalSearchDomainSqlV1[];
-}
-
-export interface OpaqueExternalSearchCanonicalMutationV1 {
-  readonly kind: 'taproot-external-search-canonical-mutation-v1';
-}
-
-export interface ExternalSearchDomainMutationCoordinatorV1 {
-  readonly kind: 'taproot-external-search-domain-mutation-coordinator-v1';
-  sealCanonicalMutation(
-    input: ExternalSearchCanonicalMutationInputV1,
-  ): Promise<OpaqueExternalSearchCanonicalMutationV1>;
-}
-
-export interface ExternalSearchCanonicalMutationReceiptV1 {
-  eventId: string;
-  authorizationRevision: number;
-  searchGeneration: number;
-  results: readonly SqliteResultLike[];
-}
-
-export interface ExternalSearchProducerDescriptorV1 {
-  version: 1;
-  sourceKind: 'task' | 'memory' | 'prompt';
-  owningDomain: 'workshop';
-  producerFingerprint: string;
-  contractVersion: string;
-  projectionVersion: string;
-  authorizationContractVersion: string;
-}
-
-export interface ExternalSearchLoadedSourceV1 {
+export interface ProducerSource {
   sourceId: string;
   sourceRevision: string;
   sourcePolicyRevision: number;
   canonical: unknown;
 }
 
-export interface ExternalSearchProducerCallbacksV1 {
-  enumerateLegacyCurrent(input: {
-    cursor: string | null;
-    limit: number;
-  }): Promise<{ sourceIds: readonly string[]; nextCursor: string | null }>;
-  loadCurrent(input: {
-    sourceId: string;
-    expectedSourceRevision: string | null;
-  }): Promise<ExternalSearchLoadedSourceV1 | null>;
-  projectCurrent(input: {
-    source: ExternalSearchLoadedSourceV1;
-    authorization: ExternalSearchAuthorizationV1;
-  }): Promise<ExternalSearchProjectionInputV1>;
-  authorizeCurrentReference(
-    authority: ExternalSearchDomainPolicyAuthorityV1,
-    input: {
-      sourceId: string;
-      sourceRevision: string;
-      sourcePolicyRevision: number;
-    },
-  ): Promise<ExternalSearchAuthorizationV1>;
-  hydrateCurrentReference(
-    authority: ExternalSearchDomainPolicyAuthorityV1,
-    input: {
-      sourceId: string;
-      sourceRevision: string;
-      sourcePolicyRevision: number;
-    },
+export interface ExternalSearchReference {
+  kind: ExternalSearchKind;
+  sourceId: string;
+  sourceRevision: string;
+}
+
+export interface ExternalProjectedSearchDocumentV1 {
+  documentSlot?: string;
+  title?: string;
+  text: string;
+  language?: string;
+  filters?: Readonly<Record<string, unknown>>;
+}
+
+export interface ExternalProducer {
+  descriptor: ProducerDescriptor;
+  enumerate(
+    cursor: string | null,
+    limit: number,
+  ): Promise<{ ids: readonly string[]; cursor: string | null }>;
+  loadExact(sourceId: string, sourceRevision?: string): Promise<ProducerSource>;
+  project(source: ProducerSource): Promise<ExternalProjectedSearchDocumentV1>;
+  authorize(
+    reference: ExternalSearchReference,
+    context: AuthorizationContext,
+  ): Promise<boolean>;
+  hydrate(
+    reference: ExternalSearchReference,
+    context: AuthorizationContext,
   ): Promise<unknown>;
 }
 
-export interface ExternalSearchAuthorizationV1 {
-  version: 1;
-  sourceId: string;
-  sourceRevision: string;
-  sourcePolicyRevision: number;
-  workspaceId: string | null;
-  ownerPrincipalId: string;
-  visibility: VisibilityScopeV1;
+export interface OwnerMutationParticipant {
+  readonly kind: 'taproot-owner-mutation-participant-v1';
+  readonly ownerRegistrationId: string;
+  readonly sourceId: string;
+  readonly sourceRevision: string;
+  readonly generation: number;
 }
 
-export interface ExternalSearchProjectionDocumentInputV1 {
-  documentSlot: string;
-  canonicalReference: UnifiedSearchReferenceV1;
-  filterMetadata: UnifiedSearchFiltersV1;
-  text: string;
-  segments: readonly SearchProjectionSegmentV1[];
+export interface RegisteredProducerMutationIssuer {
+  seal(input: {
+    sourceId: string;
+    sourceRevision: string;
+    predecessor: UnifiedSearchSourcePredecessorV1 | null;
+    ownerMutationToken: unknown;
+  }): Promise<OwnerMutationParticipant>;
 }
 
-export interface ExternalSearchProjectionInputV1 {
-  version: 1;
-  documents: readonly ExternalSearchProjectionDocumentInputV1[];
-  replaceAll: true;
-  removeDocumentSlots: readonly string[];
+export interface ExternalProducerMutationReceiptV1 {
+  eventId: string;
+  authorizationRevision: number;
+  generation: number;
+  results: readonly SqliteResultLike[];
 }
 
-export interface ExternalSearchDomainPolicyAuthorityV1 {
-  readonly kind: 'taproot-external-search-domain-policy-authority-v1';
-}
-
-export interface ExternalSearchProducerGuardV1 {
-  readonly kind: 'taproot-external-search-producer-guard-v1';
-  commitCanonicalMutation(
-    mutation: OpaqueExternalSearchCanonicalMutationV1,
-  ): Promise<ExternalSearchCanonicalMutationReceiptV1>;
-  adoptLegacyPage(
+export interface RegisteredExternalProducerV1 {
+  readonly kind: ExternalSearchKind;
+  readonly issuer: RegisteredProducerMutationIssuer;
+  commit(
+    participant: OwnerMutationParticipant,
+  ): Promise<ExternalProducerMutationReceiptV1>;
+  adopt(
     context: AuthorizationContext,
-    options: { limit: number },
-  ): Promise<{
-    enumerated: number;
-    adopted: number;
-    complete: boolean;
-  }>;
+    input: { cursor?: string | null; limit: number },
+  ): Promise<{ enumerated: number; adopted: number; cursor: string | null }>;
 }
 
-export interface ExternalSearchProducerRuntimeV1 {
-  readonly descriptor: Readonly<ExternalSearchProducerDescriptorV1>;
-  readonly callbacks: ExternalSearchProducerCallbacksV1;
-  readonly policyAuthority: ExternalSearchDomainPolicyAuthorityV1;
-}
-
-interface CoordinatorBinding {
+interface RuntimeBinding {
   db: D1DatabaseLike;
   installationId: string;
-  domain: string;
-  sourceKind: 'task' | 'memory' | 'prompt';
-  capability: string;
-  changeClasses: readonly string[];
-  clock: () => Date;
-  generation: object;
-}
-
-interface MutationBinding {
-  coordinator: ExternalSearchDomainMutationCoordinatorV1;
-  coordinatorGeneration: object;
-  context: AuthorizationContext;
-  event: {
-    eventId: string;
-    sourceId: string;
-    operation: 'upsert' | 'delete';
-    changeClass: string;
-    sourceRevision: string;
-    sourceHash: string;
-    predecessor: UnifiedSearchSourcePredecessorV1 | null;
+  registrationId: string;
+  storageKey: string;
+  ownerDomain: string;
+  adapter: {
+    prepare(ownerMutationToken: unknown): Promise<readonly unknown[]>;
   };
-  sourcePolicyRevision: number;
-  statements: readonly Readonly<ExternalSearchDomainSqlV1>[];
-  attempted: boolean;
+  producer: ExternalProducer;
+  descriptor: Readonly<ProducerDescriptor>;
+  clock: () => Date;
 }
 
-const coordinatorBindings = new WeakMap<object, CoordinatorBinding>();
-const mutationBindings = new WeakMap<object, MutationBinding>();
-const policyAuthorityBindings = new WeakMap<
-  object,
-  Pick<CoordinatorBinding, 'db' | 'installationId' | 'domain' | 'sourceKind'>
->();
-const producerRuntimes = new WeakMap<
-  object,
-  Map<string, ExternalSearchProducerRuntimeV1>
->();
+interface ParticipantBinding {
+  runtime: RuntimeBinding;
+  predecessor: UnifiedSearchSourcePredecessorV1 | null;
+  ownerMutationToken: unknown;
+  eventId: string;
+  status: 'fresh' | 'committing' | 'committed' | 'failed';
+}
+
+const runtimeByConnection = new WeakMap<object, Map<string, RuntimeBinding>>();
+const participantBindings = new WeakMap<object, ParticipantBinding>();
 const commitLocks = new WeakMap<object, Map<string, Promise<void>>>();
 
-/** @internal Host-capability validation is performed by the package entrypoint. */
-export function createExternalSearchDomainPolicyAuthorityInternalV1(
-  binding: Pick<
-    CoordinatorBinding,
-    'db' | 'installationId' | 'domain' | 'sourceKind'
-  >,
-): ExternalSearchDomainPolicyAuthorityV1 {
-  if (binding.domain !== 'workshop')
-    denied('policy authority domain is invalid');
-  const authority: ExternalSearchDomainPolicyAuthorityV1 = Object.freeze({
-    kind: 'taproot-external-search-domain-policy-authority-v1' as const,
-  });
-  policyAuthorityBindings.set(authority, { ...binding });
-  return authority;
-}
-
-/** @internal Host-capability validation is performed by the package entrypoint. */
-export async function createExternalSearchProducerGuardInternalV1(
-  binding: {
-    db: D1DatabaseLike;
-    installationId: string;
-    clock: () => Date;
-  },
-  rawDescriptor: ExternalSearchProducerDescriptorV1,
-  callbacks: ExternalSearchProducerCallbacksV1,
-  policyAuthority: ExternalSearchDomainPolicyAuthorityV1,
-  coordinator: ExternalSearchDomainMutationCoordinatorV1,
-): Promise<ExternalSearchProducerGuardV1> {
-  const descriptor = normalizeProducerDescriptor(rawDescriptor);
-  const policy = policyAuthorityBindings.get(policyAuthority);
-  const mutation = coordinatorBindings.get(coordinator);
-  if (
-    !policy ||
-    !mutation ||
-    policy.db !== binding.db ||
-    mutation.db !== binding.db ||
-    policy.installationId !== binding.installationId ||
-    mutation.installationId !== binding.installationId ||
-    policy.domain !== descriptor.owningDomain ||
-    mutation.domain !== descriptor.owningDomain ||
-    policy.sourceKind !== descriptor.sourceKind ||
-    mutation.sourceKind !== descriptor.sourceKind
-  )
-    denied('external producer binding mismatch');
-  validateCallbacks(callbacks);
-  await registerManifest(binding, descriptor);
-  const runtime = Object.freeze({ descriptor, callbacks, policyAuthority });
-  let runtimes = producerRuntimes.get(binding.db);
+export async function registerExternalProducerV1(
+  db: D1DatabaseLike,
+  options: { baseIri: string; clock?: () => Date },
+  authority: TaprootHostWriteCapability,
+  producer: ExternalProducer,
+): Promise<RegisteredExternalProducerV1> {
+  assertTaprootHostWriteCapabilityInternal(db, options, authority);
+  validateProducer(producer);
+  const kindBinding = externalKindBindingInternal(
+    producer.descriptor.registration,
+  );
+  if (kindBinding.db !== db)
+    denied('external producer registration belongs to another connection');
+  const descriptor = normalizeDescriptor(producer.descriptor);
+  const runtime: RuntimeBinding = {
+    db,
+    installationId: kindBinding.installationId,
+    registrationId: kindBinding.registrationId,
+    storageKey: kindBinding.storageKey,
+    ownerDomain: kindBinding.ownerDomain,
+    adapter: kindBinding.adapter,
+    producer,
+    descriptor,
+    clock: options.clock ?? (() => new Date()),
+  };
+  await persistDescriptor(runtime);
+  let runtimes = runtimeByConnection.get(db);
   if (!runtimes) {
     runtimes = new Map();
-    producerRuntimes.set(binding.db, runtimes);
+    runtimeByConnection.set(db, runtimes);
   }
   const key = runtimeKey(
-    binding.installationId,
-    descriptor.sourceKind,
-    descriptor.producerFingerprint,
+    runtime.installationId,
+    runtime.storageKey,
+    descriptor.fingerprint,
   );
   const existing = runtimes.get(key);
-  if (existing && existing.callbacks !== callbacks)
-    denied('conflicting external producer registration');
+  if (existing && existing.producer !== producer)
+    denied('external producer runtime is already registered');
   runtimes.set(key, runtime);
+
+  const issuer: RegisteredProducerMutationIssuer = Object.freeze({
+    seal: (input: {
+      sourceId: string;
+      sourceRevision: string;
+      predecessor: UnifiedSearchSourcePredecessorV1 | null;
+      ownerMutationToken: unknown;
+    }) => sealParticipant(runtime, input),
+  });
   return Object.freeze({
-    kind: 'taproot-external-search-producer-guard-v1' as const,
-    commitCanonicalMutation: (
-      opaqueMutation: OpaqueExternalSearchCanonicalMutationV1,
-    ) =>
-      commitExternalSearchCanonicalMutationInternalV1(
-        coordinator,
-        opaqueMutation,
-      ),
-    adoptLegacyPage: (
+    kind: descriptor.registration.kind,
+    issuer,
+    commit: (participant: OwnerMutationParticipant) =>
+      commitParticipant(runtime, participant),
+    adopt: (
       context: AuthorizationContext,
-      options: { limit: number },
-    ) =>
-      adoptLegacyPage(
-        binding,
-        descriptor,
-        callbacks,
-        policyAuthority,
-        mutation,
-        context,
-        options,
-      ),
+      input: { cursor?: string | null; limit: number },
+    ) => adopt(runtime, context, input),
   });
 }
 
-/** @internal Materialization uses this process-local lookup before claiming. */
+/** @internal */
 export function lookupExternalSearchProducerRuntimeInternalV1(
   db: D1DatabaseLike,
   installationId: string,
-  sourceKind: UnifiedSearchSourceKindV1,
-  producerFingerprint: string | null,
-): ExternalSearchProducerRuntimeV1 | null {
-  if (!producerFingerprint) return null;
+  storageKey: string,
+  fingerprint: string | null,
+): RuntimeBinding | null {
+  if (!fingerprint) return null;
   return (
-    producerRuntimes
+    runtimeByConnection
       .get(db)
-      ?.get(runtimeKey(installationId, sourceKind, producerFingerprint)) ?? null
+      ?.get(runtimeKey(installationId, storageKey, fingerprint)) ?? null
   );
 }
 
-/** @internal Builds all IDs, hashes, chunks, and authority envelopes in Taproot. */
+/** @internal */
+export async function authorizeExternalSearchReferenceInternalV1(
+  runtime: RuntimeBinding,
+  sourceId: string,
+  sourceRevision: string,
+  context: AuthorizationContext,
+): Promise<boolean> {
+  const normalized = normalizeAuthorizationContext(context);
+  if (normalized.installationId !== runtime.installationId) return false;
+  const before = await currentFence(runtime.db, runtime.installationId);
+  if (before.authorizationRevision !== normalized.authorizationRevision)
+    return false;
+  const allowed = await runtime.producer.authorize(
+    {
+      kind: runtime.descriptor.registration.kind,
+      sourceId,
+      sourceRevision,
+    },
+    normalized,
+  );
+  const after = await currentFence(runtime.db, runtime.installationId);
+  return (
+    allowed === true &&
+    after.authorizationRevision === before.authorizationRevision &&
+    after.generation === before.generation
+  );
+}
+
+/** @internal */
+export async function hydrateExternalSearchReferenceInternalV1(
+  runtime: RuntimeBinding,
+  sourceId: string,
+  sourceRevision: string,
+  context: AuthorizationContext,
+): Promise<unknown> {
+  if (
+    !(await authorizeExternalSearchReferenceInternalV1(
+      runtime,
+      sourceId,
+      sourceRevision,
+      context,
+    ))
+  )
+    denied('external reference is not authorized');
+  const value = await runtime.producer.hydrate(
+    {
+      kind: runtime.descriptor.registration.kind,
+      sourceId,
+      sourceRevision,
+    },
+    normalizeAuthorizationContext(context),
+  );
+  const loaded = normalizeSource(
+    await runtime.producer.loadExact(sourceId, sourceRevision),
+  );
+  if (loaded.sourceId !== sourceId || loaded.sourceRevision !== sourceRevision)
+    denied('external producer advanced during hydration');
+  if (
+    !(await authorizeExternalSearchReferenceInternalV1(
+      runtime,
+      sourceId,
+      sourceRevision,
+      context,
+    ))
+  )
+    denied('external authorization changed during hydration');
+  return value;
+}
+
+/** @internal */
+export async function loadExternalSearchSourceInternalV1(
+  runtime: RuntimeBinding,
+  sourceId: string,
+  sourceRevision: string,
+): Promise<ProducerSource | null> {
+  try {
+    const source = normalizeSource(
+      await runtime.producer.loadExact(sourceId, sourceRevision),
+    );
+    return source.sourceId === sourceId &&
+      source.sourceRevision === sourceRevision
+      ? source
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** @internal */
 export async function buildExternalSearchProjectionPlanInternalV1(
-  runtime: ExternalSearchProducerRuntimeV1,
-  loaded: ExternalSearchLoadedSourceV1,
+  runtime: RuntimeBinding,
+  loaded: ProducerSource,
   source: SearchProjectionSourceEventV1,
   maxChunkBytes: number,
 ): Promise<SearchProjectionPlanV1> {
-  validateLoadedSource(loaded, source.sourceId);
+  const normalized = normalizeSource(loaded);
   if (
-    loaded.sourceRevision !== source.sourceRevision ||
-    loaded.sourcePolicyRevision !== source.sourcePolicyRevision ||
-    (await canonicalSearchHashV1(loaded.canonical)) !== source.sourceHash
+    normalized.sourceId !== source.sourceId ||
+    normalized.sourceRevision !== source.sourceRevision
   )
     denied('external source does not match the persisted event');
-  const rawAuthorization = await runtime.callbacks.authorizeCurrentReference(
-    runtime.policyAuthority,
+  const projected = normalizeProjectedDocument(
+    await runtime.producer.project(normalized),
+  );
+  const registration =
+    registrationForStorageKeyInternal(
+      runtime.db,
+      runtime.installationId,
+      runtime.storageKey,
+    ) ?? runtime.descriptor.registration;
+  const reference: UnifiedSearchReferenceV1 = {
+    kind: 'external',
+    registrationId: registration.registrationId,
+    sourceId: normalized.sourceId,
+  };
+  const filters: UnifiedSearchFiltersV1 = {
+    languages: projected.language ? [projected.language] : [],
+    sourceRevisions: [normalized.sourceRevision],
+    byKind: {},
+  };
+  const slot = projected.documentSlot ?? 'canonical';
+  const id = await deriveSearchContractIdV1('document', {
+    installationId: runtime.installationId,
+    kind: runtime.storageKey,
+    sourceId: normalized.sourceId,
+    slot,
+  });
+  const segments: SearchProjectionSegmentV1[] = [
     {
-      sourceId: loaded.sourceId,
-      sourceRevision: loaded.sourceRevision,
-      sourcePolicyRevision: loaded.sourcePolicyRevision,
+      field: 'body',
+      sourceId: normalized.sourceId,
+      language: projected.language ?? null,
+      text: projected.text,
+      documentStart: 0,
+      documentEnd: projected.text.length,
     },
-  );
-  const authorization = await normalizeExternalAuthorization(
-    rawAuthorization,
-    source,
-  );
-  const rawPlan = await runtime.callbacks.projectCurrent({
-    source: loaded,
-    authorization: rawAuthorization,
-  });
-  exactKeys(rawPlan, [
-    'documents',
-    'removeDocumentSlots',
-    'replaceAll',
-    'version',
-  ]);
-  if (rawPlan.version !== 1 || rawPlan.replaceAll !== true)
-    denied('external projection plan version is invalid');
-  if (!Array.isArray(rawPlan.documents) || rawPlan.documents.length > 100)
-    denied('external projection document limit exceeded');
-  if (
-    !Array.isArray(rawPlan.removeDocumentSlots) ||
-    rawPlan.removeDocumentSlots.length > 100
-  )
-    denied('external projection removals are invalid');
-  const removeDocumentSlots = rawPlan.removeDocumentSlots.map((value) =>
-    token(value, 'removeDocumentSlot', 256),
-  );
-  const documents: DerivedSearchDocumentV1[] = [];
-  const chunks: DerivedSearchChunkV1[] = [];
-  const rawDocuments =
-    rawPlan.documents as readonly ExternalSearchProjectionDocumentInputV1[];
-  for (const rawDocument of rawDocuments) {
-    const document = await buildExternalDocument(
-      runtime.descriptor.sourceKind,
-      source,
-      authorization,
-      rawDocument,
-    );
-    documents.push(document);
-    chunks.push(...(await chunkExternalDocument(document, maxChunkBytes)));
-  }
-  if (
-    new Set(documents.map(({ documentSlot }) => documentSlot)).size !==
-    documents.length
-  )
-    denied('external projection document slots are not unique');
-  const id = await deriveSearchContractIdV1('plan', {
-    source,
-    documentIds: documents.map(({ id: documentId }) => documentId),
-    chunkIds: chunks.map(({ id: chunkId }) => chunkId),
-    replaceAll: true,
-    removeDocumentSlots,
-  });
-  const payload = {
+  ];
+  const authorization = {
     version: 1 as const,
+    sourceKind: runtime.storageKey,
+    sourceId: normalized.sourceId,
+    sourceRevision: normalized.sourceRevision,
+    installationId: runtime.installationId,
+    workspaceId: null,
+    ownerPrincipalId: runtime.ownerDomain,
+    sourcePolicyRevision: normalized.sourcePolicyRevision,
+    authorizationRevision: source.authorizationRevision,
+    visibility: { version: 1 as const, clauses: [] },
+    fingerprint: await canonicalSearchHashV1({
+      registrationId: runtime.registrationId,
+      sourcePolicyRevision: normalized.sourcePolicyRevision,
+    }),
+  };
+  const documentWithoutHash = {
+    version: 1 as const,
+    projectionVersion: 'taproot-unified-search-projection-v1' as const,
     id,
+    documentSlot: slot,
+    kind: runtime.storageKey,
     source,
-    documents,
+    rootReference: reference,
+    canonicalReference: reference,
+    authorization,
+    filterMetadata: filters,
+    text: projected.text,
+    segments,
+  };
+  const document: DerivedSearchDocumentV1 = {
+    ...documentWithoutHash,
+    hash: await canonicalSearchHashV1(documentWithoutHash),
+  };
+  const chunks = await chunkDocument(document, maxChunkBytes);
+  const planWithoutHash = {
+    version: 1 as const,
+    source,
+    documents: [document],
     chunks,
     replaceAll: true as const,
-    removeDocumentSlots,
+    removeDocumentSlots: [] as string[],
   };
-  return { ...payload, hash: await canonicalSearchHashV1(payload) };
+  return {
+    ...planWithoutHash,
+    id: await deriveSearchContractIdV1('plan', {
+      eventId: source.eventId,
+      fingerprint: runtime.descriptor.fingerprint,
+    }),
+    hash: await canonicalSearchHashV1(planWithoutHash),
+  };
 }
 
-/** @internal Host-capability validation is performed by the package entrypoint. */
-export function createExternalSearchDomainMutationCoordinatorInternalV1(
-  binding: Omit<CoordinatorBinding, 'generation'>,
-): ExternalSearchDomainMutationCoordinatorV1 {
-  const normalized = normalizeBinding(binding);
-  const coordinator: ExternalSearchDomainMutationCoordinatorV1 = Object.freeze({
-    kind: 'taproot-external-search-domain-mutation-coordinator-v1' as const,
-    sealCanonicalMutation: async (
-      rawInput: ExternalSearchCanonicalMutationInputV1,
-    ) => sealMutation(coordinator, normalized, rawInput),
+async function sealParticipant(
+  runtime: RuntimeBinding,
+  input: {
+    sourceId: string;
+    sourceRevision: string;
+    predecessor: UnifiedSearchSourcePredecessorV1 | null;
+    ownerMutationToken: unknown;
+  },
+): Promise<OwnerMutationParticipant> {
+  const sourceId = token(input.sourceId, 'sourceId', 256);
+  const sourceRevision = token(input.sourceRevision, 'sourceRevision', 128);
+  const predecessor = normalizePredecessor(input.predecessor);
+  const fence = await currentFence(runtime.db, runtime.installationId);
+  const generation = fence.generation + 1;
+  const eventId = `external-event-${await canonicalSearchHashV1({
+    registrationId: runtime.registrationId,
+    sourceId,
+    sourceRevision,
+    generation,
+  })}`;
+  const participant: OwnerMutationParticipant = Object.freeze({
+    kind: 'taproot-owner-mutation-participant-v1' as const,
+    ownerRegistrationId: runtime.registrationId,
+    sourceId,
+    sourceRevision,
+    generation,
   });
-  coordinatorBindings.set(coordinator, normalized);
-  return coordinator;
+  participantBindings.set(participant, {
+    runtime,
+    predecessor,
+    ownerMutationToken: input.ownerMutationToken,
+    eventId,
+    status: 'fresh',
+  });
+  return participant;
 }
 
-/** @internal The external producer guard is the only caller of this commit. */
-export async function commitExternalSearchCanonicalMutationInternalV1(
-  coordinator: ExternalSearchDomainMutationCoordinatorV1,
-  opaqueMutation: OpaqueExternalSearchCanonicalMutationV1,
-): Promise<ExternalSearchCanonicalMutationReceiptV1> {
-  const coordinatorBinding = coordinatorBindings.get(coordinator);
-  const mutation = mutationBindings.get(opaqueMutation);
+async function commitParticipant(
+  runtime: RuntimeBinding,
+  participant: OwnerMutationParticipant,
+): Promise<ExternalProducerMutationReceiptV1> {
+  const binding = participantBindings.get(participant);
   if (
-    !coordinatorBinding ||
-    !mutation ||
-    mutation.coordinator !== coordinator ||
-    mutation.coordinatorGeneration !== coordinatorBinding.generation ||
-    mutation.attempted
+    !binding ||
+    binding.runtime !== runtime ||
+    participant.ownerRegistrationId !== runtime.registrationId ||
+    binding.status !== 'fresh'
   )
-    denied('canonical mutation handle is invalid');
-  mutation.attempted = true;
-  const release = await acquireCommitLock(
-    coordinatorBinding.db,
-    coordinatorBinding.installationId,
-  );
+    denied('owner mutation participant is invalid or consumed');
+  binding.status = 'committing';
+  const release = await acquireCommitLock(runtime);
   try {
-    const context = normalizeAuthorizationContext(mutation.context);
-    try {
-      for (let attempt = 0; attempt < MAX_COMMIT_ATTEMPTS; attempt += 1) {
-        const state = await currentState(coordinatorBinding.db);
-        if (
-          state.installationId !== coordinatorBinding.installationId ||
-          context.installationId !== state.installationId ||
-          context.authorizationRevision !== state.authorizationRevision ||
-          !context.capabilities.includes(coordinatorBinding.capability)
-        )
-          denied('canonical mutation authorization denied');
-        const predecessor = await readPersistedSearchSourceRegistryV1(
-          coordinatorBinding.db,
-          coordinatorBinding.installationId,
-          coordinatorBinding.sourceKind,
-          mutation.event.sourceId,
-        );
-        if (
-          (predecessor === null && mutation.event.predecessor !== null) ||
-          (predecessor !== null &&
-            (mutation.event.predecessor === null ||
-              predecessor.domain !== coordinatorBinding.domain ||
-              predecessor.eventId !== mutation.event.predecessor.eventId ||
-              predecessor.sequence !== mutation.event.predecessor.sequence))
-        )
-          denied('canonical mutation predecessor is stale');
-
-        const searchGeneration = state.searchGeneration + 1;
-        if (!Number.isSafeInteger(searchGeneration))
-          denied('search generation is exhausted');
-        const createdAt = coordinatorBinding.clock().toISOString();
-        const prepared = await prepareUnifiedSearchSourceEventStatementsV1(
-          coordinatorBinding.db,
-          {
-            installationId: coordinatorBinding.installationId,
-            domain: coordinatorBinding.domain,
-            sourceKind: coordinatorBinding.sourceKind,
-            sourcePolicyRevision: mutation.sourcePolicyRevision,
-            authorizationRevision: state.authorizationRevision,
-            searchGeneration,
-            createdAt,
-          },
-          mutation.event,
-          coordinatorBinding.changeClasses,
-        );
-        const advance = coordinatorBinding.db
-          .prepare(
-            `UPDATE taproot_installation_authorization
+    for (let attempt = 0; attempt < MAX_COMMIT_ATTEMPTS; attempt += 1) {
+      const fence = await currentFence(runtime.db, runtime.installationId);
+      if (participant.generation !== fence.generation + 1) {
+        binding.status = 'failed';
+        denied('owner mutation generation is stale');
+      }
+      const predecessor = await readPersistedSearchSourceRegistryV1(
+        runtime.db,
+        runtime.installationId,
+        runtime.storageKey,
+        participant.sourceId,
+      );
+      if (
+        predecessor?.eventId !== binding.predecessor?.eventId ||
+        predecessor?.sequence !== binding.predecessor?.sequence
+      ) {
+        binding.status = 'failed';
+        denied('owner mutation predecessor is stale');
+      }
+      const prepared = await runtime.adapter.prepare(
+        binding.ownerMutationToken,
+      );
+      const ownerStatements = normalizeOwnerStatements(prepared);
+      const sourceHash = await canonicalSearchHashV1({
+        registrationId: runtime.registrationId,
+        sourceId: participant.sourceId,
+        sourceRevision: participant.sourceRevision,
+      });
+      const now = runtime.clock().toISOString();
+      const sourceEvent = await prepareUnifiedSearchSourceEventStatementsV1(
+        runtime.db,
+        {
+          installationId: runtime.installationId,
+          domain: runtime.ownerDomain,
+          sourceKind: runtime.storageKey,
+          sourcePolicyRevision: fence.authorizationRevision,
+          authorizationRevision: fence.authorizationRevision,
+          searchGeneration: participant.generation,
+          createdAt: now,
+        },
+        {
+          eventId: binding.eventId,
+          sourceId: participant.sourceId,
+          operation: 'upsert',
+          changeClass: runtime.descriptor.changeClasses[0]!,
+          sourceRevision: participant.sourceRevision,
+          sourceHash,
+          predecessor: binding.predecessor,
+        },
+        runtime.descriptor.changeClasses,
+      );
+      const advance = runtime.db
+        .prepare(
+          `UPDATE taproot_installation_authorization
            SET search_generation = ?, last_advance_id = ?, updated_at = ?
-           WHERE singleton = 1 AND installation_id = ?
-             AND authorization_revision = ? AND search_generation = ?
-             AND last_advance_id = ?`,
-          )
-          .bind(
-            searchGeneration,
-            mutation.event.eventId,
-            createdAt,
-            state.installationId,
-            state.authorizationRevision,
-            state.searchGeneration,
-            state.lastAdvanceId,
-          );
-        const fence = coordinatorBinding.db
-          .prepare(
-            `INSERT INTO taproot_assertions(assertion_key)
-           SELECT NULL WHERE NOT EXISTS (
-             SELECT 1 FROM taproot_installation_authorization
-             WHERE singleton = 1 AND installation_id = ?
-               AND authorization_revision = ? AND search_generation = ?
-               AND last_advance_id = ?
-           )`,
-          )
-          .bind(
-            state.installationId,
-            state.authorizationRevision,
-            searchGeneration,
-            mutation.event.eventId,
-          );
-        const domainStatements = mutation.statements.map((statement) =>
-          prepareDomainSql(coordinatorBinding.db, statement),
+           WHERE installation_id = ? AND authorization_revision = ?
+             AND search_generation = ? AND last_advance_id = ?`,
+        )
+        .bind(
+          participant.generation,
+          binding.eventId,
+          now,
+          runtime.installationId,
+          fence.authorizationRevision,
+          fence.generation,
+          fence.lastAdvanceId,
         );
-        try {
-          const results = await coordinatorBinding.db.batch([
-            ...domainStatements,
-            advance,
-            fence,
-            ...prepared.statements,
-          ]);
-          return {
-            eventId: mutation.event.eventId,
-            authorizationRevision: state.authorizationRevision,
-            searchGeneration,
-            results: results.slice(0, domainStatements.length),
-          };
-        } catch (cause) {
-          const latest = await currentState(coordinatorBinding.db);
-          if (
-            latest.installationId !== state.installationId ||
-            latest.authorizationRevision !== state.authorizationRevision
-          )
-            denied('canonical mutation authorization changed during commit');
-          if (
-            latest.searchGeneration === state.searchGeneration &&
-            latest.lastAdvanceId === state.lastAdvanceId
-          )
-            throw cause;
+      try {
+        const results = await runtime.db.batch([
+          ...ownerStatements,
+          ...sourceEvent.statements,
+          advance,
+        ]);
+        const advanceResult = results.at(-1);
+        if (Number(advanceResult?.meta?.changes ?? 0) !== 1) continue;
+        binding.status = 'committed';
+        return {
+          eventId: binding.eventId,
+          authorizationRevision: fence.authorizationRevision,
+          generation: participant.generation,
+          results: results.slice(0, ownerStatements.length),
+        };
+      } catch (cause) {
+        const after = await currentFence(runtime.db, runtime.installationId);
+        if (
+          after.generation === fence.generation &&
+          after.lastAdvanceId === fence.lastAdvanceId
+        ) {
+          binding.status = 'failed';
+          throw cause;
         }
       }
-      denied('canonical mutation contention limit exceeded');
-    } finally {
-      mutationBindings.delete(opaqueMutation);
     }
+    binding.status = 'failed';
+    denied('owner mutation generation contention exceeded the retry bound');
   } finally {
     release();
   }
 }
 
-async function acquireCommitLock(
-  db: D1DatabaseLike,
-  installationId: string,
-): Promise<() => void> {
-  let locks = commitLocks.get(db);
-  if (!locks) {
-    locks = new Map();
-    commitLocks.set(db, locks);
+async function adopt(
+  runtime: RuntimeBinding,
+  rawContext: AuthorizationContext,
+  input: { cursor?: string | null; limit: number },
+): Promise<{ enumerated: number; adopted: number; cursor: string | null }> {
+  const context = normalizeAuthorizationContext(rawContext);
+  if (
+    context.installationId !== runtime.installationId ||
+    !context.capabilities.includes('search:admin')
+  )
+    denied('search administration capability is required');
+  const limit = integer(input.limit, 'limit', 1, 1000);
+  const before = await currentFence(runtime.db, runtime.installationId);
+  if (context.authorizationRevision !== before.authorizationRevision)
+    denied('authorization fence is stale');
+  const page = await runtime.producer.enumerate(input.cursor ?? null, limit);
+  if (!page || !Array.isArray(page.ids))
+    denied('external producer enumeration is invalid');
+  const unique = [...new Set(page.ids.map((id) => token(id, 'sourceId', 256)))];
+  if (unique.length !== page.ids.length || unique.length > limit)
+    denied('external producer enumeration is invalid');
+  let adopted = 0;
+  for (const sourceId of unique) {
+    const source = normalizeSource(await runtime.producer.loadExact(sourceId));
+    if (source.sourceId !== sourceId)
+      denied('external producer returned the wrong source');
+    adopted += 1;
   }
-  const previous = locks.get(installationId) ?? Promise.resolve();
-  let resolveCurrent!: () => void;
-  const current = new Promise<void>((resolve) => {
-    resolveCurrent = resolve;
-  });
-  const tail = previous.then(
-    () => current,
-    () => current,
-  );
-  locks.set(installationId, tail);
-  await previous.catch(() => undefined);
-  return () => {
-    resolveCurrent();
-    if (locks?.get(installationId) === tail) {
-      locks.delete(installationId);
-      if (locks.size === 0) commitLocks.delete(db);
-    }
-  };
-}
-
-/** @internal Exact binding check used by the external producer guard factory. */
-export function inspectExternalSearchDomainMutationCoordinatorInternalV1(
-  coordinator: ExternalSearchDomainMutationCoordinatorV1,
-): Readonly<
-  Pick<
-    CoordinatorBinding,
-    | 'db'
-    | 'installationId'
-    | 'domain'
-    | 'sourceKind'
-    | 'capability'
-    | 'changeClasses'
-  >
-> | null {
-  return coordinatorBindings.get(coordinator) ?? null;
-}
-
-async function sealMutation(
-  coordinator: ExternalSearchDomainMutationCoordinatorV1,
-  binding: CoordinatorBinding,
-  raw: ExternalSearchCanonicalMutationInputV1,
-): Promise<OpaqueExternalSearchCanonicalMutationV1> {
-  exactKeys(raw, [
-    'canonicalPostState',
-    'changeClass',
-    'context',
-    'eventId',
-    'operation',
-    'predecessor',
-    'sourceId',
-    'sourcePolicyRevision',
-    'sourceRevision',
-    'statements',
-  ]);
-  if (!Array.isArray(raw.statements) || raw.statements.length === 0)
-    denied('canonical mutation statements are required');
-  if (raw.statements.length > MAX_DOMAIN_STATEMENTS)
-    denied('canonical mutation statement limit exceeded');
+  const after = await currentFence(runtime.db, runtime.installationId);
   if (
-    !Number.isSafeInteger(raw.sourcePolicyRevision) ||
-    raw.sourcePolicyRevision < 1
+    after.authorizationRevision !== before.authorizationRevision ||
+    after.generation !== before.generation
   )
-    denied('source policy revision is invalid');
-  const sourceHash = await canonicalSearchHashV1(raw.canonicalPostState);
-  const event = normalizeUnifiedSearchSourceEventInputV1(
-    {
-      eventId: raw.eventId,
-      sourceId: raw.sourceId,
-      operation: raw.operation,
-      changeClass: raw.changeClass,
-      sourceRevision: raw.sourceRevision,
-      sourceHash,
-      predecessor: raw.predecessor,
-    },
-    binding,
-  );
-  const rawStatements = raw.statements as readonly ExternalSearchDomainSqlV1[];
-  const statements = rawStatements.map(normalizeDomainSql);
-  const handle: OpaqueExternalSearchCanonicalMutationV1 = Object.freeze({
-    kind: 'taproot-external-search-canonical-mutation-v1' as const,
-  });
-  mutationBindings.set(handle, {
-    coordinator,
-    coordinatorGeneration: binding.generation,
-    context: normalizeAuthorizationContext(raw.context),
-    event,
-    sourcePolicyRevision: raw.sourcePolicyRevision,
-    statements,
-    attempted: false,
-  });
-  return handle;
-}
-
-function normalizeDomainSql(
-  raw: ExternalSearchDomainSqlV1,
-): Readonly<ExternalSearchDomainSqlV1> {
-  exactKeys(raw, ['sql', 'values']);
-  if (
-    typeof raw.sql !== 'string' ||
-    raw.sql.trim().length === 0 ||
-    new TextEncoder().encode(raw.sql).byteLength > MAX_SQL_BYTES ||
-    BLOCKED_SQL.test(raw.sql)
-  )
-    denied('canonical mutation SQL is invalid');
-  if (!Array.isArray(raw.values) || raw.values.length > 256)
-    denied('canonical mutation values are invalid');
-  return Object.freeze({
-    sql: raw.sql,
-    values: Object.freeze(
-      Array.from(raw.values, (value: unknown): unknown => value),
-    ),
-  });
-}
-
-function prepareDomainSql(
-  db: D1DatabaseLike,
-  raw: Readonly<ExternalSearchDomainSqlV1>,
-): SqlitePreparedStatementLike {
-  return db.prepare(raw.sql).bind(...raw.values);
-}
-
-function normalizeBinding(
-  raw: Omit<CoordinatorBinding, 'generation'>,
-): CoordinatorBinding {
-  if (
-    raw.sourceKind !== 'task' &&
-    raw.sourceKind !== 'memory' &&
-    raw.sourceKind !== 'prompt'
-  )
-    denied(
-      'only Task, Memory, and Prompt external mutation coordinators are enabled',
-    );
-  const domain = token(raw.domain, 'domain', 64);
-  if (domain !== 'workshop') denied('external source kind owner is invalid');
-  const capability = token(raw.capability, 'capability', 128);
-  const changeClasses = [
-    ...new Set(
-      raw.changeClasses.map((value) => token(value, 'changeClass', 64)),
-    ),
-  ].sort();
-  if (changeClasses.length === 0 || changeClasses.length > 32)
-    denied('change classes are invalid');
+    denied('authorization changed during external producer adoption');
   return {
-    ...raw,
-    installationId: token(raw.installationId, 'installationId', 128),
-    domain,
-    capability,
-    changeClasses: Object.freeze(changeClasses),
-    generation: Object.freeze({}),
+    enumerated: unique.length,
+    adopted,
+    cursor: page.cursor === null ? null : token(page.cursor, 'cursor', 4096),
   };
 }
 
-function normalizeProducerDescriptor(
-  raw: ExternalSearchProducerDescriptorV1,
-): Readonly<ExternalSearchProducerDescriptorV1> {
-  exactKeys(raw, [
-    'authorizationContractVersion',
-    'contractVersion',
-    'owningDomain',
-    'producerFingerprint',
-    'projectionVersion',
-    'sourceKind',
-    'version',
-  ]);
-  if (raw.version !== 1) denied('external producer version is invalid');
-  if (
-    raw.sourceKind !== 'task' &&
-    raw.sourceKind !== 'memory' &&
-    raw.sourceKind !== 'prompt'
-  )
-    denied('external producer kind is not enabled');
-  if (raw.owningDomain !== 'workshop')
-    denied('external producer owner is invalid');
-  if (!/^[a-f0-9]{64}$/u.test(raw.producerFingerprint))
-    denied('producer fingerprint is invalid');
-  return Object.freeze({
-    version: 1,
-    sourceKind: raw.sourceKind,
-    owningDomain: 'workshop',
-    producerFingerprint: raw.producerFingerprint,
-    contractVersion: token(raw.contractVersion, 'contractVersion', 128),
-    projectionVersion: token(raw.projectionVersion, 'projectionVersion', 128),
-    authorizationContractVersion: token(
-      raw.authorizationContractVersion,
-      'authorizationContractVersion',
-      128,
-    ),
-  });
-}
-
-function validateCallbacks(callbacks: ExternalSearchProducerCallbacksV1): void {
-  exactKeys(callbacks, [
-    'authorizeCurrentReference',
-    'enumerateLegacyCurrent',
-    'hydrateCurrentReference',
-    'loadCurrent',
-    'projectCurrent',
-  ]);
-  for (const value of Object.values(callbacks))
-    if (typeof value !== 'function')
-      denied('external producer callback is invalid');
-}
-
-async function registerManifest(
-  binding: { db: D1DatabaseLike; installationId: string; clock: () => Date },
-  descriptor: Readonly<ExternalSearchProducerDescriptorV1>,
-): Promise<void> {
-  const current = await binding.db
+async function persistDescriptor(runtime: RuntimeBinding): Promise<void> {
+  const state = await currentFence(runtime.db, runtime.installationId);
+  const now = runtime.clock().toISOString();
+  const existing = await runtime.db
     .prepare(
-      `SELECT producer_fingerprint, state, manifest_revision
-       FROM taproot_unified_search_producer_adoptions
-       WHERE installation_id = ? AND source_kind = ?`,
-    )
-    .bind(binding.installationId, descriptor.sourceKind)
-    .all<Record<string, unknown>>();
-  const previous = current.results[0];
-  const previousFingerprint = previous?.producer_fingerprint ?? null;
-  const same = previousFingerprint === descriptor.producerFingerprint;
-  const persistedManifest = await binding.db
-    .prepare(
-      `SELECT owning_domain, contract_version, projection_version,
-              authorization_contract_version, manifest_revision
+      `SELECT producer_fingerprint, projection_version, contract_version,
+              owning_domain
        FROM taproot_unified_search_producer_manifests
        WHERE installation_id = ? AND source_kind = ?
-         AND producer_fingerprint = ?`,
+       ORDER BY manifest_revision DESC LIMIT 1`,
     )
-    .bind(
-      binding.installationId,
-      descriptor.sourceKind,
-      descriptor.producerFingerprint,
+    .bind(runtime.installationId, runtime.storageKey)
+    .all<{
+      producer_fingerprint: string;
+      projection_version: string;
+      contract_version: string;
+      owning_domain: string;
+    }>();
+  const row = existing.results[0];
+  if (row) {
+    if (
+      row.producer_fingerprint !== runtime.descriptor.fingerprint ||
+      row.projection_version !== runtime.descriptor.projectionVersion ||
+      row.contract_version !== runtime.descriptor.implementationVersion ||
+      row.owning_domain !== runtime.ownerDomain
     )
-    .all<Record<string, unknown>>();
-  const manifest = persistedManifest.results[0];
-  if (
-    manifest &&
-    (manifest.owning_domain !== descriptor.owningDomain ||
-      manifest.contract_version !== descriptor.contractVersion ||
-      manifest.projection_version !== descriptor.projectionVersion ||
-      manifest.authorization_contract_version !==
-        descriptor.authorizationContractVersion)
-  )
-    denied('producer fingerprint manifest mismatch');
-  const revision = same
-    ? Number(manifest?.manifest_revision ?? previous?.manifest_revision ?? 1)
-    : Number(previous?.manifest_revision ?? 0) + 1;
-  const now = binding.clock().toISOString();
-  const auditId = await canonicalSearchHashV1({
-    version: 1,
-    installationId: binding.installationId,
-    kind: descriptor.sourceKind,
-    fingerprint: descriptor.producerFingerprint,
-    revision,
-  });
-  await binding.db.batch([
-    binding.db
+      denied('external producer descriptor conflicts with durable state');
+    return;
+  }
+  await runtime.db.batch([
+    runtime.db
       .prepare(
         `INSERT INTO taproot_unified_search_producer_manifests(
            installation_id, source_kind, producer_fingerprint, owning_domain,
            contract_version, projection_version,
            authorization_contract_version, manifest_revision, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(installation_id, source_kind, producer_fingerprint)
-         DO NOTHING`,
+         ) VALUES (?, ?, ?, ?, ?, ?, 'taproot-context-authorization-v1', 1, ?)`,
       )
       .bind(
-        binding.installationId,
-        descriptor.sourceKind,
-        descriptor.producerFingerprint,
-        descriptor.owningDomain,
-        descriptor.contractVersion,
-        descriptor.projectionVersion,
-        descriptor.authorizationContractVersion,
-        revision,
+        runtime.installationId,
+        runtime.storageKey,
+        runtime.descriptor.fingerprint,
+        runtime.ownerDomain,
+        runtime.descriptor.implementationVersion,
+        runtime.descriptor.projectionVersion,
         now,
       ),
-    binding.db
+    runtime.db
       .prepare(
         `INSERT INTO taproot_unified_search_producer_adoptions(
            installation_id, source_kind, producer_fingerprint, state,
-           manifest_revision, updated_at)
-         VALUES (?, ?, ?, 'backfilling', ?, ?)
-         ON CONFLICT(installation_id, source_kind) DO NOTHING`,
+           manifest_revision, updated_at
+         ) VALUES (?, ?, ?, 'ready', 1, ?)
+         ON CONFLICT(installation_id, source_kind) DO UPDATE SET
+           producer_fingerprint=excluded.producer_fingerprint,
+           state='ready', updated_at=excluded.updated_at`,
       )
       .bind(
-        binding.installationId,
-        descriptor.sourceKind,
-        descriptor.producerFingerprint,
-        revision,
+        runtime.installationId,
+        runtime.storageKey,
+        runtime.descriptor.fingerprint,
         now,
       ),
-    binding.db
+    runtime.db
       .prepare(
-        `UPDATE taproot_unified_search_producer_adoptions
-         SET producer_fingerprint = ?, state = ?,
-             opaque_cursor = CASE WHEN ? THEN opaque_cursor ELSE NULL END,
-             enumerated_count = CASE WHEN ? THEN enumerated_count ELSE 0 END,
-             adopted_count = CASE WHEN ? THEN adopted_count ELSE 0 END,
-             manifest_revision = ?, last_error_code = NULL, updated_at = ?
-         WHERE installation_id = ? AND source_kind = ?
-           AND (producer_fingerprint IS NOT ? OR state != 'ready')`,
+        `INSERT INTO taproot_unified_search_generation_producers(
+           corpus_id, installation_id, source_kind, producer_fingerprint,
+           contract_version, projection_version,
+           authorization_contract_version, state, updated_at
+         )
+         SELECT corpus_id, installation_id, ?, ?, ?, ?,
+                'taproot-context-authorization-v1', 'ready', ?
+         FROM taproot_search_corpora WHERE installation_id = ?
+         ON CONFLICT(corpus_id, source_kind) DO UPDATE SET
+           producer_fingerprint=excluded.producer_fingerprint,
+           contract_version=excluded.contract_version,
+           projection_version=excluded.projection_version,
+           authorization_contract_version=excluded.authorization_contract_version,
+           state='ready', updated_at=excluded.updated_at`,
       )
       .bind(
-        descriptor.producerFingerprint,
-        same && previous?.state === 'ready' ? 'ready' : 'backfilling',
-        same ? 1 : 0,
-        same ? 1 : 0,
-        same ? 1 : 0,
-        revision,
+        runtime.storageKey,
+        runtime.descriptor.fingerprint,
+        runtime.descriptor.implementationVersion,
+        runtime.descriptor.projectionVersion,
         now,
-        binding.installationId,
-        descriptor.sourceKind,
-        descriptor.producerFingerprint,
+        runtime.installationId,
       ),
-    binding.db
+    runtime.db
       .prepare(
         `INSERT INTO taproot_unified_search_producer_admin_audit(
            audit_id, installation_id, source_kind, event_type,
-           producer_fingerprint, previous_producer_fingerprint,
-           manifest_revision, principal_id, details_json, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'host-assembly', '{}', ?)
-         ON CONFLICT(audit_id) DO NOTHING`,
+           producer_fingerprint, manifest_revision, principal_id,
+           details_json, created_at
+         ) VALUES (?, ?, ?, 'register', ?, 1, ?, '{}', ?)`,
       )
       .bind(
-        `producer:${auditId}`,
-        binding.installationId,
-        descriptor.sourceKind,
-        same ? 'register' : 'fingerprint-switch',
-        descriptor.producerFingerprint,
-        previousFingerprint,
-        revision,
+        `producer-register-${runtime.registrationId}`,
+        runtime.installationId,
+        runtime.storageKey,
+        runtime.descriptor.fingerprint,
+        runtime.ownerDomain,
         now,
       ),
   ]);
+  if (state.authorizationRevision < 1)
+    denied('external producer installation is invalid');
 }
 
-function runtimeKey(
-  installationId: string,
-  sourceKind: UnifiedSearchSourceKindV1,
-  fingerprint: string,
-): string {
-  return `${installationId}\u0000${sourceKind}\u0000${fingerprint}`;
-}
-
-async function adoptLegacyPage(
-  binding: { db: D1DatabaseLike; installationId: string; clock: () => Date },
-  descriptor: Readonly<ExternalSearchProducerDescriptorV1>,
-  callbacks: ExternalSearchProducerCallbacksV1,
-  policyAuthority: ExternalSearchDomainPolicyAuthorityV1,
-  coordinator: CoordinatorBinding,
-  rawContext: AuthorizationContext,
-  options: { limit: number },
-): Promise<{ enumerated: number; adopted: number; complete: boolean }> {
-  exactKeys(options, ['limit']);
-  if (
-    !Number.isSafeInteger(options.limit) ||
-    options.limit < 1 ||
-    options.limit > 100
-  )
-    denied('legacy adoption limit is invalid');
-  const context = normalizeAuthorizationContext(rawContext);
-  const state = await currentState(binding.db);
-  if (
-    context.installationId !== state.installationId ||
-    context.authorizationRevision !== state.authorizationRevision ||
-    !context.capabilities.includes('search:admin')
-  )
-    denied('legacy adoption authorization denied');
-  const adoption = await binding.db
-    .prepare(
-      `SELECT producer_fingerprint, state, opaque_cursor, enumerated_count,
-              adopted_count, manifest_revision
-       FROM taproot_unified_search_producer_adoptions
-       WHERE installation_id = ? AND source_kind = ?`,
-    )
-    .bind(binding.installationId, descriptor.sourceKind)
-    .all<Record<string, unknown>>();
-  const row = adoption.results[0];
-  if (
-    !row ||
-    row.producer_fingerprint !== descriptor.producerFingerprint ||
-    row.state !== 'backfilling'
-  )
-    denied('legacy adoption is not active');
-  if (row.opaque_cursor !== null && typeof row.opaque_cursor !== 'string')
-    denied('legacy adoption cursor is invalid');
-  try {
-    const page = await callbacks.enumerateLegacyCurrent({
-      cursor: row.opaque_cursor,
-      limit: options.limit,
-    });
-    exactKeys(page, ['nextCursor', 'sourceIds']);
-    if (!Array.isArray(page.sourceIds) || page.sourceIds.length > options.limit)
-      denied('legacy adoption page is invalid');
-    const sourceIds = page.sourceIds.map((value) =>
-      token(value, 'sourceId', 256),
-    );
-    if (new Set(sourceIds).size !== sourceIds.length)
-      denied('legacy adoption page contains duplicates');
-    const nextCursor =
-      page.nextCursor === null
-        ? null
-        : token(page.nextCursor, 'nextCursor', 1024);
-    let adopted = 0;
-    for (const sourceId of sourceIds) {
-      const loaded = await callbacks.loadCurrent({
-        sourceId,
-        expectedSourceRevision: null,
-      });
-      if (!loaded) continue;
-      validateLoadedSource(loaded, sourceId);
-      const authorization = await callbacks.authorizeCurrentReference(
-        policyAuthority,
-        {
-          sourceId,
-          sourceRevision: loaded.sourceRevision,
-          sourcePolicyRevision: loaded.sourcePolicyRevision,
-        },
-      );
-      const rawPlan = await callbacks.projectCurrent({
-        source: loaded,
-        authorization,
-      });
-      await canonicalSearchHashV1(rawPlan);
-      await canonicalSearchHashV1(authorization);
-      if (
-        await adoptOneSource(
-          binding,
-          descriptor,
-          coordinator,
-          loaded,
-          state.authorizationRevision,
-        )
-      )
-        adopted += 1;
-    }
-    const complete = nextCursor === null;
-    const now = binding.clock().toISOString();
-    const auditId = await canonicalSearchHashV1({
-      version: 1,
-      kind: descriptor.sourceKind,
-      fingerprint: descriptor.producerFingerprint,
-      cursor: row.opaque_cursor ?? null,
-      nextCursor,
-      sourceIds,
-    });
-    const adoptionAdvance = binding.db
-      .prepare(
-        `UPDATE taproot_unified_search_producer_adoptions
-           SET state = ?, opaque_cursor = ?,
-               enumerated_count = enumerated_count + ?,
-               adopted_count = adopted_count + ?, last_error_code = NULL,
-               updated_at = ?
-           WHERE installation_id = ? AND source_kind = ?
-             AND producer_fingerprint = ? AND state = 'backfilling'
-             AND opaque_cursor IS ?`,
-      )
-      .bind(
-        complete ? 'ready' : 'backfilling',
-        nextCursor,
-        sourceIds.length,
-        adopted,
-        now,
-        binding.installationId,
-        descriptor.sourceKind,
-        descriptor.producerFingerprint,
-        row.opaque_cursor,
-      );
-    const adoptionFence = binding.db
-      .prepare(
-        `INSERT INTO taproot_assertions(assertion_key)
-         SELECT NULL WHERE NOT EXISTS (
-           SELECT 1 FROM taproot_unified_search_producer_adoptions
-           WHERE installation_id = ? AND source_kind = ?
-             AND producer_fingerprint = ? AND state = ?
-             AND opaque_cursor IS ?
-             AND enumerated_count = ? AND adopted_count = ?
-         )`,
-      )
-      .bind(
-        binding.installationId,
-        descriptor.sourceKind,
-        descriptor.producerFingerprint,
-        complete ? 'ready' : 'backfilling',
-        nextCursor,
-        Number(row.enumerated_count) + sourceIds.length,
-        Number(row.adopted_count) + adopted,
-      );
-    await binding.db.batch([
-      adoptionAdvance,
-      adoptionFence,
-      binding.db
-        .prepare(
-          `INSERT INTO taproot_unified_search_producer_admin_audit(
-             audit_id, installation_id, source_kind, event_type,
-             producer_fingerprint, manifest_revision, principal_id,
-             details_json, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          `adoption:${auditId}`,
-          binding.installationId,
-          descriptor.sourceKind,
-          complete ? 'adoption-ready' : 'adoption-page',
-          descriptor.producerFingerprint,
-          Number(row.manifest_revision),
-          context.principalId,
-          JSON.stringify({ version: 1, enumerated: sourceIds.length, adopted }),
-          now,
-        ),
-    ]);
-    return { enumerated: sourceIds.length, adopted, complete };
-  } catch {
-    const now = binding.clock().toISOString();
-    const failureAuditId = await canonicalSearchHashV1({
-      version: 1,
-      kind: descriptor.sourceKind,
-      fingerprint: descriptor.producerFingerprint,
-      cursor: row.opaque_cursor ?? null,
-      enumeratedCount: Number(row.enumerated_count),
-      adoptedCount: Number(row.adopted_count),
-    });
-    await binding.db.batch([
-      binding.db
-        .prepare(
-          `UPDATE taproot_unified_search_producer_adoptions
-         SET state = 'failed', last_error_code = 'producer-adoption-failed',
-             updated_at = ?
-         WHERE installation_id = ? AND source_kind = ?
-           AND producer_fingerprint = ? AND state = 'backfilling'
-           AND opaque_cursor IS ? AND enumerated_count = ?
-           AND adopted_count = ?`,
-        )
-        .bind(
-          now,
-          binding.installationId,
-          descriptor.sourceKind,
-          descriptor.producerFingerprint,
-          row.opaque_cursor,
-          Number(row.enumerated_count),
-          Number(row.adopted_count),
-        ),
-      binding.db
-        .prepare(
-          `INSERT INTO taproot_unified_search_producer_admin_audit(
-           audit_id, installation_id, source_kind, event_type,
-           producer_fingerprint, manifest_revision, principal_id,
-           details_json, created_at
-         )
-         SELECT ?, installation_id, source_kind, 'adoption-failed',
-                producer_fingerprint, manifest_revision, ?,
-                '{"version":1,"errorCode":"producer-adoption-failed"}', ?
-         FROM taproot_unified_search_producer_adoptions
-         WHERE installation_id = ? AND source_kind = ?
-           AND producer_fingerprint = ? AND state = 'failed'
-           AND opaque_cursor IS ? AND enumerated_count = ?
-           AND adopted_count = ? AND updated_at = ?
-         ON CONFLICT(audit_id) DO NOTHING`,
-        )
-        .bind(
-          `adoption-failed:${failureAuditId}`,
-          context.principalId,
-          now,
-          binding.installationId,
-          descriptor.sourceKind,
-          descriptor.producerFingerprint,
-          row.opaque_cursor,
-          Number(row.enumerated_count),
-          Number(row.adopted_count),
-          now,
-        ),
-    ]);
-    throw new InvalidAuthorizationError('external producer adoption failed');
-  }
-}
-
-async function adoptOneSource(
-  binding: { db: D1DatabaseLike; installationId: string; clock: () => Date },
-  descriptor: Readonly<ExternalSearchProducerDescriptorV1>,
-  coordinator: CoordinatorBinding,
-  loaded: ExternalSearchLoadedSourceV1,
-  expectedAuthorizationRevision: number,
-): Promise<boolean> {
-  const existing = await readPersistedSearchSourceRegistryV1(
-    binding.db,
-    binding.installationId,
-    descriptor.sourceKind,
-    loaded.sourceId,
+function normalizeDescriptor(
+  raw: ProducerDescriptor,
+): Readonly<ProducerDescriptor> {
+  const implementationVersion = token(
+    raw.implementationVersion,
+    'implementationVersion',
+    128,
   );
-  if (existing?.sourceRevision === loaded.sourceRevision) return false;
-  const state = await currentState(binding.db);
-  if (state.authorizationRevision !== expectedAuthorizationRevision)
-    denied('authorization changed during legacy adoption');
-  const sourceHash = await canonicalSearchHashV1(loaded.canonical);
-  const eventHash = await canonicalSearchHashV1({
-    version: 1,
-    installationId: binding.installationId,
-    kind: descriptor.sourceKind,
-    sourceId: loaded.sourceId,
-    sourceRevision: loaded.sourceRevision,
-    sourceHash,
+  const projectionVersion = token(
+    raw.projectionVersion,
+    'projectionVersion',
+    128,
+  );
+  const fingerprint = digest(raw.fingerprint, 'fingerprint');
+  if (
+    !Array.isArray(raw.changeClasses) ||
+    raw.changeClasses.length === 0 ||
+    raw.changeClasses.length > 32
+  )
+    denied('changeClasses is invalid');
+  const changeClasses = [
+    ...new Set(
+      raw.changeClasses.map((value) => token(value, 'changeClass', 64)),
+    ),
+  ].sort();
+  if (changeClasses.length !== raw.changeClasses.length)
+    denied('changeClasses must be unique');
+  return Object.freeze({
+    registration: raw.registration,
+    implementationVersion,
+    fingerprint,
+    projectionVersion,
+    changeClasses: Object.freeze(changeClasses),
   });
-  const event = normalizeUnifiedSearchSourceEventInputV1(
-    {
-      eventId: `adopt:${eventHash}`,
-      sourceId: loaded.sourceId,
-      operation: 'upsert',
-      changeClass: coordinator.changeClasses.includes('canonical')
-        ? 'canonical'
-        : coordinator.changeClasses[0]!,
-      sourceRevision: loaded.sourceRevision,
-      sourceHash,
-      predecessor: existing
-        ? { eventId: existing.eventId, sequence: existing.sequence }
-        : null,
-    },
-    coordinator,
-  );
-  const searchGeneration = state.searchGeneration + 1;
-  const createdAt = binding.clock().toISOString();
-  const prepared = await prepareUnifiedSearchSourceEventStatementsV1(
-    binding.db,
-    {
-      installationId: binding.installationId,
-      domain: descriptor.owningDomain,
-      sourceKind: descriptor.sourceKind,
-      sourcePolicyRevision: loaded.sourcePolicyRevision,
-      authorizationRevision: state.authorizationRevision,
-      searchGeneration,
-      createdAt,
-    },
-    event,
-    coordinator.changeClasses,
-  );
-  const advance = binding.db
-    .prepare(
-      `UPDATE taproot_installation_authorization
-       SET search_generation = ?, last_advance_id = ?, updated_at = ?
-       WHERE singleton = 1 AND installation_id = ?
-         AND authorization_revision = ? AND search_generation = ?
-         AND last_advance_id = ?`,
-    )
-    .bind(
-      searchGeneration,
-      event.eventId,
-      createdAt,
-      binding.installationId,
-      state.authorizationRevision,
-      state.searchGeneration,
-      state.lastAdvanceId,
-    );
-  const fence = binding.db
-    .prepare(
-      `INSERT INTO taproot_assertions(assertion_key)
-       SELECT NULL WHERE NOT EXISTS (
-         SELECT 1 FROM taproot_installation_authorization
-         WHERE singleton = 1 AND installation_id = ?
-           AND authorization_revision = ? AND search_generation = ?
-           AND last_advance_id = ?
-       )`,
-    )
-    .bind(
-      binding.installationId,
-      state.authorizationRevision,
-      searchGeneration,
-      event.eventId,
-    );
-  await binding.db.batch([advance, fence, ...prepared.statements]);
-  return true;
 }
 
-function validateLoadedSource(
-  raw: ExternalSearchLoadedSourceV1,
-  expectedSourceId: string,
-): void {
-  exactKeys(raw, [
-    'canonical',
-    'sourceId',
-    'sourcePolicyRevision',
-    'sourceRevision',
-  ]);
-  if (token(raw.sourceId, 'sourceId', 256) !== expectedSourceId)
-    denied('loaded source identity mismatch');
-  token(raw.sourceRevision, 'sourceRevision', 128);
+function validateProducer(producer: ExternalProducer): void {
   if (
-    !Number.isSafeInteger(raw.sourcePolicyRevision) ||
-    raw.sourcePolicyRevision < 1
+    !producer ||
+    typeof producer.enumerate !== 'function' ||
+    typeof producer.loadExact !== 'function' ||
+    typeof producer.project !== 'function' ||
+    typeof producer.authorize !== 'function' ||
+    typeof producer.hydrate !== 'function' ||
+    !producer.descriptor
   )
-    denied('loaded source policy revision is invalid');
+    denied('external producer is invalid');
 }
 
-async function normalizeExternalAuthorization(
-  raw: ExternalSearchAuthorizationV1,
-  source: SearchProjectionSourceEventV1,
-): Promise<SearchAuthorizationEnvelopeValueV1> {
-  exactKeys(raw, [
-    'ownerPrincipalId',
-    'sourceId',
-    'sourcePolicyRevision',
-    'sourceRevision',
-    'version',
-    'visibility',
-    'workspaceId',
-  ]);
-  if (
-    raw.version !== 1 ||
-    raw.sourceId !== source.sourceId ||
-    raw.sourceRevision !== source.sourceRevision ||
-    raw.sourcePolicyRevision !== source.sourcePolicyRevision
-  )
-    denied('external authorization does not match the source');
-  const normalized = {
-    version: 1 as const,
-    sourceKind: source.kind,
-    sourceId: source.sourceId,
-    sourceRevision: source.sourceRevision,
-    installationId: source.installationId,
-    workspaceId:
-      raw.workspaceId === null
-        ? null
-        : token(raw.workspaceId, 'workspaceId', 128),
-    ownerPrincipalId: token(raw.ownerPrincipalId, 'ownerPrincipalId', 128),
-    sourcePolicyRevision: source.sourcePolicyRevision,
-    authorizationRevision: source.authorizationRevision,
-    visibility: normalizeVisibilityScope(raw.visibility),
-  };
-  return {
-    ...normalized,
-    fingerprint: await canonicalSearchHashV1({
-      version: 1,
-      installationId: normalized.installationId,
-      workspaceId: normalized.workspaceId,
-      ownerPrincipalId: normalized.ownerPrincipalId,
-      sourcePolicyRevision: normalized.sourcePolicyRevision,
-      authorizationRevision: normalized.authorizationRevision,
-      visibility: normalized.visibility,
-    }),
-  };
+function normalizeSource(raw: ProducerSource): ProducerSource {
+  if (!raw || typeof raw !== 'object')
+    denied('external producer source is invalid');
+  return Object.freeze({
+    sourceId: token(raw.sourceId, 'sourceId', 256),
+    sourceRevision: token(raw.sourceRevision, 'sourceRevision', 128),
+    sourcePolicyRevision: integer(
+      raw.sourcePolicyRevision,
+      'sourcePolicyRevision',
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    canonical: raw.canonical,
+  });
 }
 
-async function buildExternalDocument(
-  sourceKind: 'task' | 'memory' | 'prompt',
-  source: SearchProjectionSourceEventV1,
-  authorization: SearchAuthorizationEnvelopeValueV1,
-  raw: ExternalSearchProjectionDocumentInputV1,
-): Promise<DerivedSearchDocumentV1> {
-  exactKeys(raw, [
-    'canonicalReference',
-    'documentSlot',
-    'filterMetadata',
-    'segments',
-    'text',
-  ]);
-  const documentSlot = token(raw.documentSlot, 'documentSlot', 256);
-  const text = boundedText(
+function normalizeProjectedDocument(
+  raw: ExternalProjectedSearchDocumentV1,
+): Required<Pick<ExternalProjectedSearchDocumentV1, 'text'>> &
+  ExternalProjectedSearchDocumentV1 {
+  if (!raw || typeof raw !== 'object') denied('external projection is invalid');
+  const text = token(
     raw.text,
-    'documentText',
+    'projection.text',
     UNIFIED_SEARCH_LIMITS.maxProjectionTextBytes,
   );
-  const canonicalReference = normalizeExternalReference(
-    raw.canonicalReference,
-    sourceKind,
-  );
-  const rootReference = normalizeExternalReference(
-    sourceKind === 'task'
-      ? { kind: 'task', taskId: source.sourceId }
-      : sourceKind === 'memory'
-        ? { kind: 'memory', memoryId: source.sourceId }
-        : { kind: 'prompt', promptId: source.sourceId },
-    sourceKind,
-  );
-  const filterMetadata = normalizeUnifiedSearchFiltersV1(raw.filterMetadata, [
-    sourceKind,
-  ]);
-  if (!Array.isArray(raw.segments) || raw.segments.length > 256)
-    denied('external projection segments are invalid');
-  const rawSegments = raw.segments as readonly SearchProjectionSegmentV1[];
-  const segments = rawSegments.map((segment, index) =>
-    normalizeExternalSegment(segment, text, index),
-  );
-  const identity = {
-    projectionVersion: 'taproot-unified-search-projection-v1',
-    installationId: source.installationId,
-    documentSlot,
-    rootReference,
-    canonicalReference,
-  };
-  const id = await deriveSearchContractIdV1('document', identity);
-  const payload = {
-    version: 1 as const,
-    projectionVersion: 'taproot-unified-search-projection-v1' as const,
-    id,
-    documentSlot,
-    kind: sourceKind,
-    source,
-    rootReference,
-    canonicalReference,
-    authorization,
-    filterMetadata,
-    text,
-    segments,
-  };
-  return { ...payload, hash: await canonicalSearchHashV1(payload) };
-}
-
-function normalizeExternalReference(
-  raw: UnifiedSearchReferenceV1,
-  expectedKind: 'task' | 'memory' | 'prompt',
-): UnifiedSearchReferenceV1 {
-  if (expectedKind === 'task') {
-    exactKeys(raw, ['kind', 'taskId']);
-    if (raw.kind !== 'task')
-      denied('external canonical reference kind mismatch');
-    return { kind: 'task', taskId: token(raw.taskId, 'taskId', 256) };
-  }
-  if (expectedKind === 'memory') {
-    exactKeys(raw, ['kind', 'memoryId']);
-    if (raw.kind !== 'memory')
-      denied('external canonical reference kind mismatch');
-    return { kind: 'memory', memoryId: token(raw.memoryId, 'memoryId', 256) };
-  }
-  exactKeys(raw, ['kind', 'promptId']);
-  if (raw.kind !== 'prompt')
-    denied('external canonical reference kind mismatch');
-  return { kind: 'prompt', promptId: token(raw.promptId, 'promptId', 256) };
-}
-
-function normalizeExternalSegment(
-  raw: SearchProjectionSegmentV1,
-  documentText: string,
-  index: number,
-): SearchProjectionSegmentV1 {
-  exactKeys(raw, [
-    'documentEnd',
-    'documentStart',
-    'field',
-    'language',
-    'sourceId',
-    'text',
-  ]);
-  const fields = new Set([
-    'label',
-    'alias',
-    'description',
-    'type',
-    'statement',
-    'title',
-    'content',
-    'prompt',
-    'result',
-    'status',
-  ]);
-  if (!fields.has(raw.field))
-    denied(`external segment ${index} field is invalid`);
   if (
-    !Number.isSafeInteger(raw.documentStart) ||
-    !Number.isSafeInteger(raw.documentEnd) ||
-    raw.documentStart < 0 ||
-    raw.documentEnd < raw.documentStart ||
-    raw.documentEnd > documentText.length
+    encoder.encode(text).byteLength >
+    UNIFIED_SEARCH_LIMITS.maxProjectionTextBytes
   )
-    denied(`external segment ${index} range is invalid`);
-  const text = boundedText(
-    raw.text,
-    `segment ${index} text`,
-    UNIFIED_SEARCH_LIMITS.maxProjectionTextBytes,
-  );
-  if (documentText.slice(raw.documentStart, raw.documentEnd) !== text)
-    denied(`external segment ${index} text does not match its range`);
-  return {
-    field: raw.field,
-    sourceId: token(raw.sourceId, `segment ${index} sourceId`, 256),
-    language:
-      raw.language === null
-        ? null
-        : token(raw.language, `segment ${index} language`, 64),
+    denied('external projection text is too large');
+  return Object.freeze({
     text,
-    documentStart: raw.documentStart,
-    documentEnd: raw.documentEnd,
-  };
+    ...(raw.documentSlot === undefined
+      ? {}
+      : { documentSlot: token(raw.documentSlot, 'documentSlot', 128) }),
+    ...(raw.title === undefined
+      ? {}
+      : { title: token(raw.title, 'title', 1024) }),
+    ...(raw.language === undefined
+      ? {}
+      : { language: token(raw.language, 'language', 64) }),
+    ...(raw.filters === undefined ? {} : { filters: raw.filters }),
+  });
 }
 
-async function chunkExternalDocument(
+async function chunkDocument(
   document: DerivedSearchDocumentV1,
-  maxChunkBytes: number,
+  rawMaximum: number,
 ): Promise<DerivedSearchChunkV1[]> {
-  if (
-    !Number.isSafeInteger(maxChunkBytes) ||
-    maxChunkBytes < UNIFIED_SEARCH_LIMITS.minChunkBytes ||
-    maxChunkBytes > UNIFIED_SEARCH_LIMITS.maxChunkBytes
-  )
-    denied('external chunk bound is invalid');
-  const encoder = new TextEncoder();
-  const ranges: Array<{ start: number; end: number }> = [];
+  const maximum = integer(
+    rawMaximum,
+    'maxChunkBytes',
+    UNIFIED_SEARCH_LIMITS.minChunkBytes,
+    UNIFIED_SEARCH_LIMITS.maxChunkBytes,
+  );
+  const boundaries: Array<[number, number]> = [];
   let start = 0;
-  let end = 0;
   let bytes = 0;
+  let index = 0;
   for (const codePoint of document.text) {
     const size = encoder.encode(codePoint).byteLength;
-    if (bytes > 0 && bytes + size > maxChunkBytes) {
-      ranges.push({ start, end });
-      start = end;
+    if (bytes > 0 && bytes + size > maximum) {
+      boundaries.push([start, index]);
+      start = index;
       bytes = 0;
     }
-    if (size > maxChunkBytes)
-      denied('external Unicode scalar exceeds chunk bound');
-    end += codePoint.length;
     bytes += size;
+    index += codePoint.length;
   }
-  if (end > start || document.text.length === 0) ranges.push({ start, end });
-  if (ranges.length > UNIFIED_SEARCH_LIMITS.maxChunksPerDocument)
-    denied('external projection chunk limit exceeded');
+  if (index > start || boundaries.length === 0) boundaries.push([start, index]);
+  if (boundaries.length > UNIFIED_SEARCH_LIMITS.maxChunksPerDocument)
+    denied('external projection exceeds the chunk bound');
   const chunks: DerivedSearchChunkV1[] = [];
-  for (const [ordinal, range] of ranges.entries()) {
-    const text = document.text.slice(range.start, range.end);
-    const trace = document.segments
-      .filter(
-        (entry) =>
-          entry.documentStart < range.end && entry.documentEnd > range.start,
-      )
-      .map((entry) => {
-        const overlapStart = Math.max(entry.documentStart, range.start);
-        const overlapEnd = Math.min(entry.documentEnd, range.end);
-        return {
-          field: entry.field,
-          sourceId: entry.sourceId,
-          language: entry.language,
-          documentStart: overlapStart,
-          documentEnd: overlapEnd,
-          chunkStart: overlapStart - range.start,
-          chunkEnd: overlapEnd - range.start,
-        };
-      });
+  for (const [ordinal, [documentStart, documentEnd]] of boundaries.entries()) {
+    const text = document.text.slice(documentStart, documentEnd);
     const id = await deriveSearchContractIdV1('chunk', {
       documentId: document.id,
       ordinal,
-      documentStart: range.start,
-      documentEnd: range.end,
-      text,
     });
-    const payload = {
+    const withoutHash = {
       version: 1 as const,
       id,
       documentId: document.id,
       ordinal,
       canonical: false as const,
       text,
-      documentStart: range.start,
-      documentEnd: range.end,
-      trace,
+      documentStart,
+      documentEnd,
+      trace: [
+        {
+          field: 'body' as const,
+          sourceId: document.source.sourceId,
+          language: document.segments[0]?.language ?? null,
+          documentStart,
+          documentEnd,
+          chunkStart: 0,
+          chunkEnd: text.length,
+        },
+      ],
     };
-    chunks.push({ ...payload, hash: await canonicalSearchHashV1(payload) });
+    chunks.push({
+      ...withoutHash,
+      hash: await canonicalSearchHashV1(withoutHash),
+    });
   }
   return chunks;
 }
 
-function boundedText(
-  value: unknown,
-  name: string,
-  maximumBytes: number,
-): string {
-  if (typeof value !== 'string' || value.length === 0)
-    denied(`${name} is invalid`);
-  const normalized = value.normalize('NFC');
-  if (new TextEncoder().encode(normalized).byteLength > maximumBytes)
-    denied(`${name} exceeds its bound`);
-  return normalized;
+function normalizeOwnerStatements(
+  values: readonly unknown[],
+): SqlitePreparedStatementLike[] {
+  if (!Array.isArray(values) || values.length > MAX_OWNER_STATEMENTS)
+    denied('owner mutation plan is invalid');
+  return values.map((value) => {
+    if (
+      !value ||
+      typeof value !== 'object' ||
+      typeof (value as { run?: unknown }).run !== 'function' ||
+      typeof (value as { bind?: unknown }).bind !== 'function'
+    )
+      denied('owner mutation plan is invalid');
+    return value as SqlitePreparedStatementLike;
+  });
 }
 
-async function currentState(db: D1DatabaseLike): Promise<{
-  installationId: string;
+function normalizePredecessor(
+  raw: UnifiedSearchSourcePredecessorV1 | null,
+): UnifiedSearchSourcePredecessorV1 | null {
+  if (raw === null) return null;
+  if (
+    !raw ||
+    typeof raw !== 'object' ||
+    typeof raw.eventId !== 'string' ||
+    !Number.isSafeInteger(raw.sequence) ||
+    raw.sequence < 1
+  )
+    denied('predecessor is invalid');
+  return Object.freeze({
+    eventId: token(raw.eventId, 'predecessor.eventId', 128),
+    sequence: raw.sequence,
+  });
+}
+
+async function currentFence(
+  db: D1DatabaseLike,
+  installationId: string,
+): Promise<{
   authorizationRevision: number;
-  searchGeneration: number;
+  generation: number;
   lastAdvanceId: string;
 }> {
   const result = await db
     .prepare(
-      `SELECT installation_id, authorization_revision, search_generation,
-              last_advance_id
-       FROM taproot_installation_authorization WHERE singleton = 1`,
+      `SELECT authorization_revision, search_generation, last_advance_id
+       FROM taproot_installation_authorization WHERE installation_id = ?`,
     )
-    .all<Record<string, unknown>>();
+    .bind(installationId)
+    .all<{
+      authorization_revision: number;
+      search_generation: number;
+      last_advance_id: string;
+    }>();
   const row = result.results[0];
-  if (!row) denied('installation authorization is unavailable');
+  if (!row) denied('external producer installation is unavailable');
   return {
-    installationId: String(row.installation_id),
     authorizationRevision: Number(row.authorization_revision),
-    searchGeneration: Number(row.search_generation),
+    generation: Number(row.search_generation),
     lastAdvanceId: String(row.last_advance_id),
   };
 }
 
-function exactKeys(
-  value: unknown,
-  expected: readonly string[],
-): asserts value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    denied('canonical mutation input is invalid');
-  const keys = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  if (
-    keys.length !== wanted.length ||
-    keys.some((key, index) => key !== wanted[index])
-  )
-    denied('canonical mutation input fields are invalid');
+async function acquireCommitLock(runtime: RuntimeBinding): Promise<() => void> {
+  let byInstallation = commitLocks.get(runtime.db);
+  if (!byInstallation) {
+    byInstallation = new Map();
+    commitLocks.set(runtime.db, byInstallation);
+  }
+  const previous =
+    byInstallation.get(runtime.installationId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => current);
+  byInstallation.set(runtime.installationId, queued);
+  await previous;
+  return () => {
+    release();
+    if (byInstallation?.get(runtime.installationId) === queued)
+      byInstallation.delete(runtime.installationId);
+  };
 }
 
-function token(value: unknown, name: string, maximum: number): string {
+function runtimeKey(
+  installationId: string,
+  storageKey: string,
+  fingerprint: string,
+): string {
+  return JSON.stringify([installationId, storageKey, fingerprint]);
+}
+
+function token(value: unknown, field: string, maximum: number): string {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
     value.length > maximum ||
-    !/^[a-z0-9][a-z0-9._:-]*$/u.test(value)
+    // eslint-disable-next-line no-control-regex
+    /[\u0000-\u001f\u007f]/u.test(value)
   )
-    denied(`${name} is invalid`);
+    denied(`${field} is invalid`);
+  return value;
+}
+
+function digest(value: unknown, field: string): string {
+  const normalized = token(value, field, 64);
+  if (!/^[0-9a-f]{64}$/u.test(normalized)) denied(`${field} is invalid`);
+  return normalized;
+}
+
+function integer(
+  value: unknown,
+  field: string,
+  minimum: number,
+  maximum: number,
+): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value < minimum ||
+    value > maximum
+  )
+    denied(`${field} is invalid`);
   return value;
 }
 
