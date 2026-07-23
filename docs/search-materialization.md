@@ -65,6 +65,15 @@ authorization data, and projection fields; they receive no SQL, database,
 lifecycle guard, mutation handle, or caller-shaped authorization context.
 Taproot derives hashes, identifiers, authority envelopes, and chunks.
 
+Every logical Statement text is projected twice: once into its independently
+addressable Statement document and once into an Item aggregate partition whose
+visibility is the intersection of Item and Statement policy. Aggregate slots,
+selectors, chunk boundaries, document identity, and revision fences remain
+deterministic. Health is `healthy` only when the active corpus is caught up and
+has no pending, leased, dead, stale, blocked, or recorded-error state;
+rebuilds, unavailable producers, and failures remain explicitly visible as
+`building`, `blocked`, and `degraded`.
+
 Producer manifests and adoption progress are durable and immutable/audited.
 Each corpus pins an exact fingerprint. A process restart must reconstruct the
 matching callback registration; missing or mismatched registrations leave jobs

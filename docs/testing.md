@@ -29,6 +29,9 @@ persisted native SQLite and real Workerd D1. It covers exact DDL-only 0006,
 document identities, full CNF/filter/chunk persistence, replace-all removal,
 delete/restore eligibility, dual-fanout shadow rebuild and atomic activation,
 redacted blocked health, migration drift, and a true SQLite close/reopen.
+It also proves that a term found only in Statement text returns both the
+authorization-safe Item aggregate and native Statement result, plus honest
+`healthy`, `building`, `blocked`, and `degraded` lifecycle states.
 `npm run baseline:search-materialization` reproduces the checked 100k-root,
 one-million-chunk indexed-path artifact without imposing an SLA. The packed
 consumer exercises the guarded lifecycle from the installed tarball.
@@ -40,6 +43,9 @@ graph, enforces exactly seven staged kinds, and reopens the database.
 handle, same-batch Workshop mutation+event, and data-only external materialization,
 redacted adoption failures, resumable cursor reconstruction, and rejection of
 forged, replayed, cross-kind, or stale-process handles.
+The shared native/Workerd suite additionally commits 18 simultaneous Task,
+Memory, and Prompt mutations, verifies a collision-free global generation
+sequence, and covers same-source races, restart, and injected domain failure.
 
 `test/content-search.test.ts` is shared public-search conformance on persisted
 native SQLite and real Workerd D1. It proves distinct Item/Resource/Annotation
@@ -84,8 +90,11 @@ package, installs the tarball into a fresh temporary project with registry
 Diamond and Miniflare dependencies, initializes a new D1 database, writes an
 entity, and verifies the RDF through privileged package-test SPARQL using only
 public package exports. It additionally requires npm's complete installed tree
-to contain exactly one `@gnolith/diamond@0.4.1` runtime. This proves RDF interoperability, not authorization of
-a user-facing SPARQL endpoint.
+to contain exactly one `@gnolith/diamond@0.4.1` runtime and proves the
+Statement-only Item aggregate query through packed Workerd D1. A second
+disposable consumer compiles representative public types using TypeScript 5.9
+with strict mode and `skipLibCheck: false`. This proves RDF interoperability,
+not authorization of a user-facing SPARQL endpoint.
 
 `npm run check` is the complete local package release-quality gate. Coverage
 thresholds are enforced in `vitest.config.ts`; lowering them requires an

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.4.2
+
+- Mirrored every authorized Statement text into its Item aggregate while
+  preserving independent Statement documents, stable identities, bounded
+  chunks, authorization partitions, and revision fencing.
+- Serialized concurrent external Task, Memory, and Prompt commits across one
+  installation with bounded generation-CAS retries and deterministic
+  same-source conflict and domain-failure behavior.
+- Made lexical health report `healthy` only at a caught-up steady state while
+  retaining explicit `building`, `blocked`, and `degraded` states.
+- Closed the public declaration surface over Taproot-owned structural SQLite/D1
+  types and added a disposable strict TypeScript 5.9 consumer with
+  `skipLibCheck: false`.
+
 ## 0.4.1
 
 - Qualified and pinned the public `@gnolith/diamond@0.4.1` artifact across

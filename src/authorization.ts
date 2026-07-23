@@ -1,4 +1,4 @@
-import type { SqliteDatabaseLike } from '@gnolith/diamond';
+import type { SqliteDatabaseLike } from './sqlite-types.js';
 import {
   AuthorizationDeniedError,
   InvalidAuthorizationError,

@@ -3,9 +3,11 @@ import {
   encodeTerm,
   decodeTerm,
   prepareQuadPatch,
-  type SqliteDatabaseLike,
-  type SqlitePreparedStatementLike,
 } from '@gnolith/diamond';
+import type {
+  SqliteDatabaseLike,
+  SqlitePreparedStatementLike,
+} from './sqlite-types.js';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
 import {

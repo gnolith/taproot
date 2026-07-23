@@ -1,7 +1,7 @@
 import type {
   SqliteDatabaseLike,
   SqlitePreparedStatementLike,
-} from '@gnolith/diamond';
+} from './sqlite-types.js';
 import {
   isVisibleTo,
   normalizeAuthorizationContext,

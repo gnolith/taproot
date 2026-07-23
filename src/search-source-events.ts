@@ -2,7 +2,7 @@ import type {
   SqliteDatabaseLike,
   SqlitePreparedStatementLike,
   SqliteResultLike,
-} from '@gnolith/diamond';
+} from './sqlite-types.js';
 import {
   InvalidSearchSourceEventError,
   SearchSourceReplayConflictError,

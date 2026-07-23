@@ -45,6 +45,7 @@ const requiredFiles = [
   'scripts/search-source-event-baseline.mjs',
   'scripts/search-materialization-baseline.mjs',
   'scripts/consumer-smoke.mjs',
+  'scripts/typescript-consumer.mjs',
   'scripts/release-check.mjs',
 ];
 
@@ -78,7 +79,7 @@ assert.equal(packageJson.private, false);
 assert.equal(packageJson.publishConfig?.access, 'public');
 assert.equal(packageJson.publishConfig?.provenance, true);
 assert.match(packageJson.engines?.node ?? '', /^>=22/);
-assert.equal(packageJson.version, '0.4.1');
+assert.equal(packageJson.version, '0.4.2');
 assert.equal(packageJson.dependencies?.['@gnolith/diamond'], '0.4.1');
 assert.equal(
   packageJson.repository?.url,
