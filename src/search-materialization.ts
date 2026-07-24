@@ -31,6 +31,7 @@ import type {
 } from './types.js';
 import {
   buildExternalSearchProjectionPlanInternalV1,
+  loadExternalSearchSourceInternalV1,
   lookupExternalSearchProducerRuntimeInternalV1,
 } from './external-search-producers.js';
 import type { PortableResourcePayloadStoreV1 } from './content-domain.js';
@@ -225,16 +226,10 @@ class SearchMaterializationRuntime {
           .bind(
             this.#installationId,
             kind,
-            BUILTIN_SEARCH_KINDS.includes(
-              kind as (typeof BUILTIN_SEARCH_KINDS)[number],
-            )
+            BUILTIN_SEARCH_KINDS.includes(kind)
               ? 'taproot-builtin-projection-v1'
               : null,
-            BUILTIN_SEARCH_KINDS.includes(
-              kind as (typeof BUILTIN_SEARCH_KINDS)[number],
-            )
-              ? 'ready'
-              : 'blocked',
+            BUILTIN_SEARCH_KINDS.includes(kind) ? 'ready' : 'blocked',
             now,
           ),
       ),
@@ -263,15 +258,16 @@ class SearchMaterializationRuntime {
            ) VALUES (?, ?, 1, 1, 'blocked-producers', 3, ?, ?)`,
         )
         .bind(this.#installationId, corpusId, now, now),
-      ...UNIFIED_SEARCH_KINDS.map((kind) =>
-        this.#db
-          .prepare(
-            `INSERT INTO taproot_search_kind_checkpoints(
-               corpus_id, source_kind, enqueued_sequence, applied_sequence
-             ) VALUES (?, ?, 0, 0)`,
-          )
-          .bind(corpusId, kind),
-      ),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_search_kind_checkpoints(
+             corpus_id, source_kind, enqueued_sequence, applied_sequence
+           )
+           SELECT ?, source_kind, 0, 0
+           FROM taproot_unified_search_producer_adoptions
+           WHERE installation_id = ?`,
+        )
+        .bind(corpusId, this.#installationId),
       this.#db
         .prepare(
           `INSERT INTO taproot_unified_search_generation_producers(
@@ -574,15 +570,16 @@ class SearchMaterializationRuntime {
           watermark,
           now,
         ),
-      ...UNIFIED_SEARCH_KINDS.map((kind) =>
-        this.#db
-          .prepare(
-            `INSERT INTO taproot_search_kind_checkpoints(
-               corpus_id, source_kind, enqueued_sequence, applied_sequence
-             ) VALUES (?, ?, 0, 0)`,
-          )
-          .bind(corpusId, kind),
-      ),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_search_kind_checkpoints(
+             corpus_id, source_kind, enqueued_sequence, applied_sequence
+           )
+           SELECT ?, source_kind, 0, 0
+           FROM taproot_unified_search_producer_adoptions
+           WHERE installation_id = ?`,
+        )
+        .bind(corpusId, this.#installationId),
       this.#db
         .prepare(
           `INSERT INTO taproot_unified_search_generation_producers(
@@ -901,9 +898,7 @@ class SearchMaterializationRuntime {
       const row = byKind.get(kind);
       if (!row || row.state !== 'ready') return true;
       if (
-        BUILTIN_SEARCH_KINDS.includes(
-          kind as (typeof BUILTIN_SEARCH_KINDS)[number],
-        ) &&
+        BUILTIN_SEARCH_KINDS.includes(kind) &&
         row.producer_fingerprint === 'taproot-builtin-projection-v1'
       )
         return false;
@@ -968,10 +963,11 @@ class SearchMaterializationRuntime {
       job.producer_fingerprint,
     );
     if (!runtime) return null;
-    const loaded = await runtime.callbacks.loadCurrent({
-      sourceId: job.source_id,
-      expectedSourceRevision: job.root_revision,
-    });
+    const loaded = await loadExternalSearchSourceInternalV1(
+      runtime,
+      job.source_id,
+      job.root_revision,
+    );
     if (!loaded) return null;
     return buildExternalSearchProjectionPlanInternalV1(
       runtime,
@@ -1697,6 +1693,17 @@ class SearchMaterializationRuntime {
            )`,
         )
         .bind(claim.job.job_id, claim.generation, transitionId),
+      this.#db
+        .prepare(
+          `UPDATE taproot_search_kind_checkpoints
+           SET applied_sequence = MAX(applied_sequence, ?)
+           WHERE corpus_id = ? AND source_kind = ?`,
+        )
+        .bind(
+          claim.job.source_event_sequence,
+          claim.job.corpus_id,
+          claim.job.source_kind,
+        ),
     ]);
   }
 

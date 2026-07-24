@@ -1,7 +1,19 @@
 import type { SqliteDatabaseLike } from './sqlite-types.js';
 import { isVisibleTo, normalizeAuthorizationContext } from './authorization.js';
 import type { TaprootContentRepositoryV1 } from './content-domain.js';
-import { lookupExternalSearchProducerRuntimeInternalV1 } from './external-search-producers.js';
+import {
+  authorizeExternalSearchReferenceInternalV1,
+  hydrateExternalSearchReferenceInternalV1,
+  lookupExternalSearchProducerRuntimeInternalV1,
+} from './external-search-producers.js';
+import {
+  isBuiltInStorageKindInternal,
+  publicSearchKindInternal,
+  searchKindStorageKeyInternal,
+  type BuiltInSearchKind,
+  type ExternalSearchKind,
+  type SearchKind,
+} from './search-kinds.js';
 import {
   canonicalSearchHashV1,
   createUnifiedSearchCursorBindingV1,
@@ -20,14 +32,13 @@ import type {
 
 export interface SearchRequest {
   text: string;
-  kinds?: readonly UnifiedSearchKind[];
-  filters?: Record<string, unknown>;
+  kinds?: readonly SearchKind[];
+  filters?: Readonly<Record<string, unknown>>;
   limit?: number;
   cursor?: string;
 }
 
-export interface SearchResultV1 {
-  kind: UnifiedSearchKind;
+export interface SearchResultBaseV1 {
   sourceId: string;
   sourceRevision: string;
   score: number;
@@ -37,9 +48,19 @@ export interface SearchResultV1 {
   match?: {
     derivedDocumentId?: string;
     selector?: unknown;
-    contributingStatementIds?: string[];
+    contributingStatementIds?: readonly string[];
   };
 }
+
+export type SearchResultV1 =
+  | (SearchResultBaseV1 & {
+      kind: 'item';
+      entityType: 'item' | 'property';
+    })
+  | (SearchResultBaseV1 & {
+      kind: Exclude<BuiltInSearchKind, 'item'> | ExternalSearchKind;
+      entityType?: never;
+    });
 
 export interface SearchPage {
   results: SearchResultV1[];
@@ -158,7 +179,13 @@ class AuthorizedSearchRuntime {
     const context = normalizeAuthorizationContext(rawContext);
     if (context.installationId !== this.#installationId)
       throw new Error('authorization denied');
-    const request = normalizePublicRequest(rawRequest);
+    const request = normalizePublicRequest(
+      rawRequest.kinds === undefined
+        ? { ...rawRequest, kinds: await this.#readyKinds() }
+        : rawRequest,
+      this.#db,
+      this.#installationId,
+    );
     const state = await this.#state();
     const binding = await createUnifiedSearchCursorBindingV1(
       { ...request, cursor: null },
@@ -176,6 +203,24 @@ class AuthorizedSearchRuntime {
       if (!matchesFilters(row, request.filters)) continue;
       const scope = await this.#scope(row.stage_id, row.document_slot);
       if (!isVisibleTo(scope, context)) continue;
+      if (!isBuiltInStorageKindInternal(row.document_kind)) {
+        const runtime = lookupExternalSearchProducerRuntimeInternalV1(
+          this.#db,
+          this.#installationId,
+          row.document_kind,
+          row.producer_fingerprint,
+        );
+        if (
+          !runtime ||
+          !(await authorizeExternalSearchReferenceInternalV1(
+            runtime,
+            row.root_id,
+            row.root_revision,
+            context,
+          ))
+        )
+          continue;
+      }
       authorized.push({ row, derivedId: row.chunk_id ?? row.document_id });
     }
 
@@ -237,7 +282,9 @@ class AuthorizedSearchRuntime {
     if (offset > ranked.length) throw new Error('stale cursor');
     const page = ranked
       .slice(offset, offset + request.limit)
-      .map((candidate) => toResult(candidate, request.text));
+      .map((candidate) =>
+        toResult(candidate, request.text, this.#db, this.#installationId),
+      );
     const nextOffset = offset + page.length;
     return {
       results: page,
@@ -260,7 +307,11 @@ class AuthorizedSearchRuntime {
     const context = normalizeAuthorizationContext(rawContext);
     if (context.installationId !== this.#installationId)
       throw new Error('authorization denied');
-    const kind = normalizeKind(result.kind);
+    const kind = searchKindStorageKeyInternal(
+      result.kind,
+      this.#db,
+      this.#installationId,
+    );
     const sourceId = identifier(result.sourceId, 'sourceId');
     const revision = opaque(result.sourceRevision, 'sourceRevision');
     if (kind === 'statement')
@@ -290,8 +341,17 @@ class AuthorizedSearchRuntime {
       if (!this.#content) throw new Error('annotation owner is unavailable');
       return this.#content.getAnnotation(sourceId, context);
     }
-    if (kind === 'item')
-      return this.#hydrateKnowledge(kind, sourceId, revision, context);
+    if (kind === 'item') {
+      const entity = (await this.#hydrateKnowledge(
+        kind,
+        sourceId,
+        revision,
+        context,
+      )) as WikibaseEntity;
+      if (entity.type !== result.entityType)
+        throw new Error('stale search result entity type');
+      return entity;
+    }
     const head = await this.#db
       .prepare(
         `SELECT producer_fingerprint FROM taproot_search_materialization_heads h JOIN taproot_search_installation_state s ON s.active_corpus_id = h.corpus_id WHERE s.installation_id = ? AND h.root_kind = ? AND h.root_id = ? AND h.eligible = 1`,
@@ -305,31 +365,21 @@ class AuthorizedSearchRuntime {
       head.results[0]?.producer_fingerprint ?? null,
     );
     if (!runtime) throw new Error('canonical producer is unavailable');
-    const authorization = await runtime.callbacks.authorizeCurrentReference(
-      runtime.policyAuthority,
-      {
+    if (
+      !(await authorizeExternalSearchReferenceInternalV1(
+        runtime,
         sourceId,
-        sourceRevision: revision,
-        sourcePolicyRevision: Number(current.source_policy_revision),
-      },
-    );
-    if (!isVisibleTo(authorization.visibility, context))
+        revision,
+        context,
+      ))
+    )
       throw new Error('authorization denied');
-    const hydrated = await runtime.callbacks.hydrateCurrentReference(
-      runtime.policyAuthority,
-      {
-        sourceId,
-        sourceRevision: revision,
-        sourcePolicyRevision: Number(current.source_policy_revision),
-      },
-    );
-    const loaded = await runtime.callbacks.loadCurrent({
+    return hydrateExternalSearchReferenceInternalV1(
+      runtime,
       sourceId,
-      expectedSourceRevision: revision,
-    });
-    if (!loaded || loaded.sourceRevision !== revision)
-      throw new Error('stale search result');
-    return hydrated;
+      revision,
+      context,
+    );
   }
 
   async #hydrateKnowledge(
@@ -411,9 +461,29 @@ class AuthorizedSearchRuntime {
     return row;
   }
 
+  async #readyKinds(): Promise<readonly SearchKind[]> {
+    const result = await this.#db
+      .prepare(
+        `SELECT a.source_kind
+         FROM taproot_unified_search_producer_adoptions a
+         WHERE a.installation_id = ? AND a.state = 'ready'
+         ORDER BY a.source_kind`,
+      )
+      .bind(this.#installationId)
+      .all<{ source_kind: string }>();
+    return result.results.flatMap((row) => {
+      const kind = publicSearchKindInternal(
+        this.#db,
+        this.#installationId,
+        row.source_kind,
+      );
+      return kind === null ? [] : [kind];
+    });
+  }
+
   async #candidates(
     kinds: readonly UnifiedSearchKind[],
-  ): Promise<CandidateRow[]> {
+  ): Promise<readonly CandidateRow[]> {
     const placeholders = kinds.map(() => '?').join(',');
     const result = await this.#db
       .prepare(
@@ -462,7 +532,11 @@ class AuthorizedSearchRuntime {
   }
 }
 
-function normalizePublicRequest(value: SearchRequest) {
+function normalizePublicRequest(
+  value: SearchRequest,
+  db: SqliteDatabaseLike,
+  installationId: string,
+) {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('invalid search request');
   const keys = Object.keys(value);
@@ -475,7 +549,13 @@ function normalizePublicRequest(value: SearchRequest) {
   return normalizeUnifiedSearchRequestV1({
     version: 1,
     text: value.text,
-    ...(value.kinds === undefined ? {} : { kinds: value.kinds }),
+    ...(value.kinds === undefined
+      ? {}
+      : {
+          kinds: value.kinds.map((kind) =>
+            searchKindStorageKeyInternal(kind, db, installationId),
+          ),
+        }),
     ...(value.filters === undefined ? {} : { filters: value.filters }),
     ...(value.limit === undefined ? {} : { limit: value.limit }),
     cursor: value.cursor ?? null,
@@ -553,7 +633,12 @@ function opaqueScore(
   return Number((lexical + semantic).toFixed(12));
 }
 
-function toResult(candidate: RankedCandidate, query: string): SearchResultV1 {
+function toResult(
+  candidate: RankedCandidate,
+  query: string,
+  db: SqliteDatabaseLike,
+  installationId: string,
+): SearchResultV1 {
   const row = candidate.row;
   const text = row.chunk_text ?? row.document_text;
   const trace = row.trace_json
@@ -582,8 +667,9 @@ function toResult(candidate: RankedCandidate, query: string): SearchResultV1 {
         ]
       : [];
   const resultTitle = title(text);
-  return {
-    kind: row.document_kind,
+  const kind = publicSearchKindInternal(db, installationId, row.document_kind);
+  if (kind === null) throw new Error('canonical producer is unavailable');
+  const common: SearchResultBaseV1 = {
     sourceId,
     sourceRevision: row.root_revision,
     score: candidate.score,
@@ -598,6 +684,19 @@ function toResult(candidate: RankedCandidate, query: string): SearchResultV1 {
         : {}),
     },
   };
+  if (kind === 'item') {
+    const metadata = JSON.parse(
+      row.filter_metadata_json,
+    ) as UnifiedSearchFiltersV1;
+    const entityTypes = metadata.byKind.item?.entityTypes ?? [];
+    if (
+      entityTypes.length !== 1 ||
+      (entityTypes[0] !== 'item' && entityTypes[0] !== 'property')
+    )
+      throw new Error('item materialization has invalid entity type');
+    return { ...common, kind, entityType: entityTypes[0] };
+  }
+  return { ...common, kind };
 }
 
 function referenceId(
@@ -609,16 +708,12 @@ function referenceId(
       return reference.statementId;
     case 'item':
       return reference.itemId;
-    case 'task':
-      return reference.taskId;
-    case 'memory':
-      return reference.memoryId;
-    case 'prompt':
-      return reference.promptId;
     case 'resource':
       return reference.resourceId;
     case 'annotation':
       return reference.annotationId;
+    case 'external':
+      return reference.sourceId;
     default:
       return fallback;
   }
@@ -658,9 +753,16 @@ function tokenize(text: string): string[] {
 }
 
 function compareRows(left: CandidateRow, right: CandidateRow): number {
+  const leftIndex = UNIFIED_SEARCH_KINDS.indexOf(
+    left.document_kind as (typeof UNIFIED_SEARCH_KINDS)[number],
+  );
+  const rightIndex = UNIFIED_SEARCH_KINDS.indexOf(
+    right.document_kind as (typeof UNIFIED_SEARCH_KINDS)[number],
+  );
   const kind =
-    UNIFIED_SEARCH_KINDS.indexOf(left.document_kind) -
-    UNIFIED_SEARCH_KINDS.indexOf(right.document_kind);
+    (leftIndex < 0 ? Number.MAX_SAFE_INTEGER : leftIndex) -
+      (rightIndex < 0 ? Number.MAX_SAFE_INTEGER : rightIndex) ||
+    compare(left.document_kind, right.document_kind);
   return (
     kind ||
     compare(left.root_id, right.root_id) ||
@@ -671,12 +773,6 @@ function compareRows(left: CandidateRow, right: CandidateRow): number {
 
 function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function normalizeKind(value: string): UnifiedSearchKind {
-  if (!(UNIFIED_SEARCH_KINDS as readonly string[]).includes(value))
-    throw new Error('unsupported kind');
-  return value as UnifiedSearchKind;
 }
 
 function identifier(value: unknown, name: string): string {

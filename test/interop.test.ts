@@ -1,4 +1,5 @@
-import { createSparqlHandler, type D1DatabaseLike } from '@gnolith/diamond';
+import type { D1DatabaseLike } from '@gnolith/diamond';
+import { createSparqlExecutor } from '@gnolith/diamond/sparql';
 import { Miniflare } from 'miniflare';
 import { describe, expect, it } from 'vitest';
 import { runTaprootInteropDemo } from '../examples/d1-diamond-interop/demo.js';
@@ -25,7 +26,7 @@ describe('local D1 and Diamond interoperability example', () => {
         result.sparqlResults as { results: { bindings: unknown[] } }
       ).results.bindings;
       expect(bindings.length).toBeGreaterThan(0);
-      expect(typeof createSparqlHandler({ db })).toBe('function');
+      expect(typeof createSparqlExecutor({ db })).toBe('function');
     } finally {
       await miniflare.dispose();
     }

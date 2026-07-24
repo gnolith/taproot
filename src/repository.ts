@@ -8,6 +8,10 @@ import type {
   SqliteDatabaseLike,
   SqlitePreparedStatementLike,
 } from './sqlite-types.js';
+import {
+  coordinatedStatements,
+  permitsVisibilityAdministration,
+} from './atomic-coordination.js';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
 import {
@@ -92,6 +96,7 @@ interface EntityRow {
   entity_json: string;
   deleted_at: string | null;
   redirect_to: string | null;
+  event_id?: string | null;
   content_hash?: string | null;
 }
 
@@ -858,10 +863,17 @@ export class TaprootRepository {
     value: string,
     edit: ExpectedRevision,
   ): Promise<WriteResult> {
-    return this.#mutate(id, edit, (entity) => {
-      entity.labels[language] = { language, value };
-      return entity;
-    });
+    return this.#mutate(
+      id,
+      edit,
+      (entity) => {
+        entity.labels[language] = { language, value };
+        return entity;
+      },
+      undefined,
+      'update',
+      true,
+    );
   }
 
   async removeLabel(
@@ -1264,12 +1276,19 @@ export class TaprootRepository {
   ): Promise<WriteResult> {
     if (!commands.length)
       throw new InvalidEntityError('At least one command is required');
-    if (commands.length > 100)
-      throw new BulkLimitError('An edit may contain at most 100 commands');
-    return this.#mutate(id, edit, (entity) => {
-      for (const command of commands) applyEntityCommand(entity, command);
-      return entity;
-    });
+    if (commands.length > 200)
+      throw new BulkLimitError('An edit may contain at most 200 commands');
+    return this.#mutate(
+      id,
+      edit,
+      (entity) => {
+        for (const command of commands) applyEntityCommand(entity, command);
+        return entity;
+      },
+      undefined,
+      'update',
+      commands.every(({ type }) => type === 'set-label'),
+    );
   }
 
   async exportEntities(options: ListEntitiesOptions = {}): Promise<string> {
@@ -1720,12 +1739,14 @@ export class TaprootRepository {
     const ownership = this.#ownershipPatch(entity.id, [], newQuads);
     const ownershipOffset = statements.length;
     statements.push(...ownership.statements);
+    statements.push(...coordinatedStatements(metadata));
     try {
       const results = await this.#db.batch(statements);
       const result = {
         entityId: entity.id,
         previousRevision: null,
         newRevision: entity.lastrevid,
+        changed: true,
         entity,
         quadPatch: {
           ...patch.readResult(results, patchOffset),
@@ -1795,6 +1816,7 @@ export class TaprootRepository {
     transform: (entity: WikibaseEntity) => WikibaseEntity,
     lifecycleOverride?: Lifecycle,
     eventType: AuditEventType = 'update',
+    allowSemanticNoop = false,
   ): Promise<WriteResult> {
     const started = performance.now();
     if (edit.authorization || edit.authorizationContext)
@@ -1814,8 +1836,6 @@ export class TaprootRepository {
     }
     const previous = stored.entity.lastrevid;
     const next = transform(cloneEntity(stored.entity));
-    next.lastrevid = previous + 1;
-    next.modified = this.#options.clock().toISOString();
     if (next.id !== id || next.type !== stored.entity.type)
       throw new InvalidEntityError('Entity identity and type are immutable');
     if (
@@ -1826,18 +1846,51 @@ export class TaprootRepository {
     ) {
       throw new InvalidEntityError('Property datatype is immutable after use');
     }
-    validateEntity(next);
-    await this.#validatePropertyDatatypes(next);
-    await this.#runValidators(next, stored.entity, edit);
     const oldLifecycle = {
       deletedAt: stored.deletedAt,
       redirectTo: stored.redirectTo,
     };
+    const newLifecycle = lifecycleOverride ?? oldLifecycle;
+    let authorization: PreparedAuthorizationWrite | undefined;
+    if (
+      allowSemanticNoop &&
+      exportEntityJson(next, this.#options.maxEntityBytes) ===
+        row.entity_json &&
+      newLifecycle.deletedAt === oldLifecycle.deletedAt &&
+      newLifecycle.redirectTo === oldLifecycle.redirectTo
+    ) {
+      validateEntity(next);
+      await this.#validatePropertyDatatypes(next);
+      await this.#runValidators(next, stored.entity, edit);
+      authorization = edit.authorization
+        ? await this.#prepareAuthorizationWrite(
+            next,
+            edit.authorization,
+            edit.authorizationContext,
+            previous,
+            permitsVisibilityAdministration(edit),
+          )
+        : undefined;
+      if (!authorization || authorization.action === 'unchanged')
+        return this.#semanticNoopResult(
+          id,
+          row,
+          stored.entity,
+          previous,
+          authorization,
+          eventType,
+          started,
+        );
+    }
+    next.lastrevid = previous + 1;
+    next.modified = this.#options.clock().toISOString();
+    validateEntity(next);
+    await this.#validatePropertyDatatypes(next);
+    await this.#runValidators(next, stored.entity, edit);
     const json = exportEntityJson(next, this.#options.maxEntityBytes);
     const parentHash =
       row.content_hash ??
       (await revisionContentHash(row.entity_json, oldLifecycle));
-    const newLifecycle = lifecycleOverride ?? oldLifecycle;
     const context = await this.#writeContext(
       next,
       json,
@@ -1846,12 +1899,13 @@ export class TaprootRepository {
       eventType,
       newLifecycle,
     );
-    const authorization = edit.authorization
+    authorization ??= edit.authorization
       ? await this.#prepareAuthorizationWrite(
           next,
           edit.authorization,
           edit.authorizationContext,
           previous,
+          permitsVisibilityAdministration(edit),
         )
       : undefined;
     const oldQuads = this.#lifecycleQuads(stored.entity, oldLifecycle);
@@ -1912,12 +1966,14 @@ export class TaprootRepository {
     const ownership = this.#ownershipPatch(id, oldQuads, newQuads);
     const ownershipOffset = statements.length;
     statements.push(...ownership.statements);
+    statements.push(...coordinatedStatements(edit));
     try {
       const results = await this.#db.batch(statements);
       const result = {
         entityId: id,
         previousRevision: previous,
         newRevision: next.lastrevid,
+        changed: true,
         entity: next,
         quadPatch: {
           ...patch.readResult(results, patchOffset),
@@ -1969,11 +2025,90 @@ export class TaprootRepository {
     }
   }
 
+  async #semanticNoopResult(
+    id: EntityId,
+    row: EntityRow,
+    entity: WikibaseEntity,
+    revision: number,
+    authorization: PreparedAuthorizationWrite | undefined,
+    eventType: AuditEventType,
+    started: number,
+  ): Promise<WriteResult> {
+    if (!row.event_id)
+      throw new SchemaMismatchError(
+        `Current revision metadata for ${id}@${revision} is missing`,
+      );
+    const contentHash =
+      row.content_hash ??
+      (await revisionContentHash(row.entity_json, {
+        deletedAt: row.deleted_at,
+        redirectTo: row.redirect_to as EntityId | null,
+      }));
+    const statements = [
+      this.#assertion(
+        `EXISTS (
+          SELECT 1 FROM taproot_entities e
+          JOIN taproot_entity_revisions r
+            ON r.entity_id = e.entity_id AND r.revision = e.revision
+          WHERE e.entity_id = ? AND e.revision = ?
+            AND r.event_id = ? AND r.content_hash = ?
+        )`,
+        id,
+        revision,
+        row.event_id,
+        contentHash,
+      ),
+    ];
+    if (authorization)
+      statements.push(
+        this.#assertion(
+          `EXISTS (
+            SELECT 1 FROM taproot_installation_authorization
+            WHERE singleton = 1
+              AND installation_id = ?
+              AND authorization_revision = ?
+              AND search_generation = ?
+          )`,
+          authorization.policy.installationId,
+          authorization.authorizationRevision - 1,
+          authorization.searchGeneration - 1,
+        ),
+      );
+    try {
+      await this.#db.batch(statements);
+      const result: WriteResult = {
+        entityId: id,
+        previousRevision: revision,
+        newRevision: revision,
+        changed: false,
+        entity,
+        quadPatch: { deleted: 0, inserted: 0 },
+        eventId: row.event_id,
+        contentHash,
+        ...(authorization
+          ? {
+              authorizationRevision: authorization.authorizationRevision - 1,
+              searchGeneration: authorization.searchGeneration - 1,
+            }
+          : {}),
+      };
+      this.#emitObservation(eventType, started, 'success', id, revision);
+      return result;
+    } catch (cause) {
+      this.#emitObservation(eventType, started, 'error', id, revision, cause);
+      throw new RevisionConflictError(
+        `Entity ${id} changed after revision ${revision}`,
+        { cause },
+      );
+    }
+  }
+
   async #prepareAuthorizationWrite(
     entity: WikibaseEntity,
     rawPolicy: CanonicalAuthorizationPolicyInput,
     rawContext: AuthorizationContext | undefined,
     previousRevision: number | undefined,
+    permitsVisibilityWidening = false,
   ): Promise<PreparedAuthorizationWrite> {
     const policy = normalizeCanonicalAuthorizationPolicy(rawPolicy);
     if (!rawContext)
@@ -2088,11 +2223,12 @@ export class TaprootRepository {
         throw new RevisionConflictError(
           'Canonical entity policy is missing, quarantined, or stale',
         );
-      assertScopeDoesNotWiden(
-        policy.visibility,
-        JSON.parse(previousPolicy.visibility_json) as VisibilityScopeV1,
-        'entity visibility',
-      );
+      if (!permitsVisibilityWidening)
+        assertScopeDoesNotWiden(
+          policy.visibility,
+          JSON.parse(previousPolicy.visibility_json) as VisibilityScopeV1,
+          'entity visibility',
+        );
       if (
         !isVisibleTo(
           JSON.parse(
@@ -2142,11 +2278,12 @@ export class TaprootRepository {
       for (const previous of previousStatements.results) {
         const next = nextById.get(previous.statement_id);
         if (!next) continue;
-        assertScopeDoesNotWiden(
-          JSON.parse(next.effectiveVisibilityJson) as VisibilityScopeV1,
-          JSON.parse(previous.effective_visibility_json) as VisibilityScopeV1,
-          `statement ${previous.statement_id} visibility`,
-        );
+        if (!permitsVisibilityWidening)
+          assertScopeDoesNotWiden(
+            JSON.parse(next.effectiveVisibilityJson) as VisibilityScopeV1,
+            JSON.parse(previous.effective_visibility_json) as VisibilityScopeV1,
+            `statement ${previous.statement_id} visibility`,
+          );
       }
       const changed =
         previousPolicy.workspace_id !== policy.workspaceId ||
@@ -2742,7 +2879,8 @@ export class TaprootRepository {
   async #loadRow(id: EntityId): Promise<EntityRow | undefined> {
     const result = await this.#db
       .prepare(
-        `SELECT e.entity_json, e.deleted_at, e.redirect_to, r.content_hash
+        `SELECT e.entity_json, e.deleted_at, e.redirect_to,
+                r.event_id, r.content_hash
          FROM taproot_entities e LEFT JOIN taproot_entity_revisions r
            ON r.entity_id = e.entity_id AND r.revision = e.revision
          WHERE e.entity_id = ?`,

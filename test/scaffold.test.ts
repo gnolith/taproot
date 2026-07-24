@@ -17,10 +17,10 @@ describe('package release guard', () => {
     expect(manifest).toMatchObject({
       name: '@gnolith/taproot',
       private: false,
-      version: '0.4.2',
+      version: '0.5.0',
       publishConfig: { access: 'public', provenance: true },
     });
-    expect(manifest.dependencies['@gnolith/diamond']).toBe('0.4.1');
+    expect(manifest.dependencies['@gnolith/diamond']).toBe('0.5.0');
     expect(Object.values(manifest.dependencies)).not.toContainEqual(
       expect.stringMatching(/^(?:file:|link:)/),
     );
@@ -36,12 +36,39 @@ describe('package release guard', () => {
       new URL('scripts/qdrant-conformance.mjs', root),
       'utf8',
     );
-    expect(consumer).toContain("diamondInstances[0] !== '0.4.1'");
-    expect(consumer).not.toContain('DIAMOND_TARBALL');
+    const materializer = readFileSync(
+      new URL('scripts/materialize-diamond.mjs', root),
+      'utf8',
+    );
+    expect(consumer).toContain("uniqueVersions[0] !== '0.5.0'");
+    expect(consumer).toContain('DIAMOND_TARBALL');
     expect(qdrant).toContain(
       'qdrant/qdrant:v1.18.2@sha256:da65a06bc75e42702f80c992b99c5144b0fbd675ae7a96d2991de0bf957b7071',
     );
     expect(qdrant).toContain("const PLATFORM = 'linux/amd64'");
+    expect(materializer).toContain('e82f58ba8028ff9c16a34f4b8a9a2bc356495b64');
+    expect(materializer).toContain('Diamond tarball integrity mismatch');
+  });
+
+  it('binds deterministic runtime SBOM evidence to package and source hashes', () => {
+    const root = new URL('..', import.meta.url);
+    const candidate = readFileSync(
+      new URL('scripts/release-candidate.mjs', root),
+      'utf8',
+    );
+    const releaseCheck = readFileSync(
+      new URL('scripts/release-check.mjs', root),
+      'utf8',
+    );
+    const ci = readFileSync(new URL('.github/workflows/ci.yml', root), 'utf8');
+    expect(candidate).toContain("'--omit=dev'");
+    expect(candidate).toContain('gnolith:package:integrity');
+    expect(candidate).toContain('gnolith:source:commit');
+    expect(candidate).toContain('gnolith:source:tree');
+    expect(candidate).toContain('SHA256SUMS');
+    expect(releaseCheck).toContain('release candidate inventories differ');
+    expect(releaseCheck).toContain('is not deterministic');
+    expect(ci).toContain('taproot-release-candidate-${{ github.sha }}');
   });
 
   it('rejects malformed input and empty command batches before touching D1', async () => {

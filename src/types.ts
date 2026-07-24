@@ -230,6 +230,8 @@ export interface WriteResult {
   entityId: EntityId;
   previousRevision: number | null;
   newRevision: number;
+  /** True only when this operation committed a new canonical entity revision. */
+  changed: boolean;
   entity: WikibaseEntity;
   quadPatch: { deleted: number; inserted: number };
   eventId: string;

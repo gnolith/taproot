@@ -6,7 +6,8 @@ migration-0004 database creates an empty immutable event log and empty current
 registry without scanning or backfilling canonical rows.
 
 Each event contains only routing and consistency metadata: installation,
-domain, one of the seven V1 source kinds, source ID, upsert/delete operation,
+domain, a built-in or registered opaque storage kind, source ID,
+upsert/delete operation,
 change class, opaque source revision and hash, authorization revision, search
 generation, predecessor event/sequence, payload hash, and timestamp. It cannot
 contain labels, text, statement IDs, visibility lists, SQL, or raw errors.
@@ -19,13 +20,11 @@ indexed.
 
 ## Atomic writer boundary
 
-`createInstallationSearchSourceGuardV1` issues a process-local opaque
-`InstallationSearchSourceGuardV1` bound to the exact database, installation,
-domain, source kind, capability, and allowed change classes. The guard derives
-installation, authorization revision, and current search generation from the
-persisted authorization singleton. `batchWithSourceEvent` executes sibling
-domain SQL, the generation CAS, immutable event, and current-registry CAS in
-one `db.batch` transaction.
+External owners receive a sealed mutation issuer bound to the exact database,
+installation, namespace, owner, registration, and generation. Committing its
+one-shot participant composes the owner's private adapter plan with Taproot's
+generation CAS, immutable event, and current-registry CAS in one batch. No SQL
+or statement array crosses the public boundary.
 
 An exact `(installation, kind, source, revision)` replay with the same event
 and payload hash is a no-op; sibling SQL is not repeated. A divergent replay

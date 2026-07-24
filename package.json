@@ -1,6 +1,6 @@
 {
   "name": "@gnolith/taproot",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Portable canonical knowledge, content, authorization, and hybrid search layer for Gnolith.",
   "author": "Gnolith contributors",
   "keywords": [
@@ -31,6 +31,34 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./search": {
+      "types": "./dist/search.d.ts",
+      "import": "./dist/search.js"
+    },
+    "./adapters/openai-compatible": {
+      "types": "./dist/adapters-openai-compatible.d.ts",
+      "import": "./dist/adapters-openai-compatible.js"
+    },
+    "./adapters/ollama-compatible": {
+      "types": "./dist/adapters-ollama-compatible.d.ts",
+      "import": "./dist/adapters-ollama-compatible.js"
+    },
+    "./adapters/sqlite-vector": {
+      "types": "./dist/adapters-sqlite-vector.d.ts",
+      "import": "./dist/adapters-sqlite-vector.js"
+    },
+    "./adapters/qdrant": {
+      "types": "./dist/adapters-qdrant.d.ts",
+      "import": "./dist/adapters-qdrant.js"
+    },
+    "./sparql-policy": {
+      "types": "./dist/sparql-policy.d.ts",
+      "import": "./dist/sparql-policy.js"
+    },
+    "./backup": {
+      "types": "./dist/backup.d.ts",
+      "import": "./dist/backup.js"
+    },
     "./migrations/*": "./migrations/*",
     "./package.json": "./package.json"
   },
@@ -56,12 +84,14 @@
     "format:check": "prettier --check .",
     "licenses:check": "license-checker-rseidelsohn --production --summary --onlyAllow \"MIT;ISC;BSD-2-Clause;Apache-2.0;BSD-3-Clause;BlueOak-1.0.0;FreeBSD;(WTFPL OR MIT);UNLICENSED\"",
     "lint": "eslint .",
+    "materialize:diamond": "node scripts/materialize-diamond.mjs",
     "pack:check": "npm pack --dry-run",
     "prepack": "npm run build",
     "repository:check": "node scripts/repository-check.mjs",
     "baseline:search-source-events": "npm run build && node scripts/search-source-event-baseline.mjs",
     "baseline:search-materialization": "npm run build && node scripts/search-materialization-baseline.mjs",
     "release:check": "node scripts/release-check.mjs",
+    "release:candidate": "node scripts/release-candidate.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run test/repository.test.ts test/interop.test.ts",
@@ -74,7 +104,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@gnolith/diamond": "0.4.1",
+    "@gnolith/diamond": "0.5.0",
     "@rdfjs/types": "^2.0.1",
     "rdf-data-factory": "^2.0.2"
   },

@@ -12,7 +12,7 @@ editing commands, term search, repairable projections, and a deterministic RDF p
 
 ## Status
 
-Version `0.4.2` supports Node 22 and 24 and depends exactly on Diamond `0.4.1`,
+Version `0.5.0` supports Node 22 and 24 and depends exactly on Diamond `0.5.0`,
 which exposes transaction-composable RDF patches, a runtime-neutral SQLite
 capability, and a process-local `node:sqlite` adapter.
 
@@ -39,10 +39,10 @@ capability, and a process-local `node:sqlite` adapter.
   Annotations with independent revisions, authorization, attribution,
   hydration, import/export, bounded inline text, and injected blob/file/URL
   payload capabilities.
-- One authorized public relevance `search` operation over Statement, Item,
-  Task, Memory, Prompt, Resource, and Annotation projections. Persisted native
-  SQLite and Workerd D1 share strict kind/filter/cursor/snippet/hydration
-  behavior; hidden chunks remain derived and independently ranked.
+- One authorized public relevance `search` operation over four built-in kinds
+  plus privately branded, namespace-bound external kinds. Persisted native
+  SQLite and Workerd D1 share strict filter/cursor/snippet/hydration behavior;
+  hidden chunks remain derived and independently ranked.
 - Optional semantic augmentation behind that same operation, with separate
   OpenAI/Ollama-compatible embedding and SQLite/Qdrant vector ports, retained
   configurations, complete-generation readiness, bounded circuits/reconnect,
@@ -126,9 +126,10 @@ bounded work, inspect redacted health, retry dead work, and manage a shadow
 rebuild.
 
 Migration 0007 preserves existing staged rows while adding immutable producer
-manifests, adoption checkpoints, and generation-pinned fingerprints. Host
-assembly can register data-only Workshop Task, Memory, and Prompt callbacks through a
-DB/installation/kind-sealed boundary. Taproot alone derives source hashes,
+manifests, adoption checkpoints, and generation-pinned fingerprints. Migration
+0009 adopts historical external kinds into a generic namespace. Host assembly
+registers external callbacks through a DB/installation/owner/kind-sealed
+boundary. Taproot alone derives source hashes,
 authorization envelopes, document/chunk IDs, and atomic mutation events. A
 missing or mismatched process-local producer blocks health without claiming or
 incrementing its jobs. Taproot supplies its own Statement, Item, Resource, and
@@ -185,15 +186,11 @@ they do not return canonical JSON, text, RDF counts, hashes, or audit bodies.
 `TaprootRepository` and raw read helpers are intentionally absent from package
 exports in the breaking 0.3 line.
 
-The opaque guard also owns execution of ordered cross-package batches that
-need an exact authorization-revision fence or advance. It does not expose raw
-counter-update statements that a caller could separate from the corresponding
-audit, assertion, or domain writes.
-Hosts issue a distinct fence-only domain guard for each exact non-Knowledge
-domain capability, such as Task or Memory writes. The capability is bound at
-issuance, cannot be supplied at the call site, and an ordinary domain fence
-does not advance authorization or search counters. Knowledge authorization
-advances additionally require `knowledge:policy`.
+The installation guard exposes only live authorization state. It accepts no
+SQL or foreign statements. External owners coordinate through privately
+branded registration capabilities and sealed one-shot mutation participants;
+Taproot composes each private owner adapter plan with its source event and
+authorization fence.
 
 Statement creation and replacement include `text` on the `Statement` itself.
 Rank, qualifier, and reference mutation methods require authored text for the
@@ -230,7 +227,7 @@ Bulk imports default to create-only, can opt into `upsert`, are capped at 100
 entities by default, and commit one entity atomically at a time. Authorized
 bulk policies use sequential expected authorization revisions; Taproot carries
 each successful advance into the next entity's context. Multi-command edits
-apply up to 100 commands in one revision. All list limits are capped at 500.
+apply up to 200 commands in one revision. All list limits are capped at 500.
 
 See the [local D1 and Diamond interoperability example](examples/d1-diamond-interop/README.md),
 [`COMPATIBILITY.md`](COMPATIBILITY.md), and the architecture, API, operations,

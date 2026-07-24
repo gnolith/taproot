@@ -2,28 +2,31 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error('consumer smoke must be run through npm');
-
 const root = mkdtempSync(join(tmpdir(), 'taproot-consumer-'));
 const sourcePackage = JSON.parse(readFileSync('package.json', 'utf8'));
-const packagePath = join(...sourcePackage.name.split('/'));
 const packOutput = execFileSync(
   process.execPath,
   [npmCli, 'pack', '--json', '--pack-destination', root],
   { encoding: 'utf8' },
 );
-const [{ filename, integrity, shasum }] = JSON.parse(packOutput);
+const [{ filename }] = JSON.parse(packOutput);
 const archive = join(root, filename);
-const taprootSha256 = createHash('sha256')
-  .update(readFileSync(archive))
-  .digest('hex');
-console.log(
-  `Taproot packed artifact sha256=${taprootSha256} integrity=${integrity} shasum=${shasum}`,
-);
-
+const sha256 = createHash('sha256').update(readFileSync(archive)).digest('hex');
+const diamond =
+  process.env.DIAMOND_TARBALL ?? resolve('node_modules', '@gnolith', 'diamond');
+const exactLegacySnapshot =
+  process.env.TAPROOT_EXACT_LEGACY_SNAPSHOT ??
+  resolve(
+    '..',
+    'seedbed',
+    'fixtures',
+    'legacy-local-v1',
+    'legacy-local-v1.snapshot',
+  );
 writeFileSync(
   join(root, 'package.json'),
   JSON.stringify({ private: true, type: 'module' }),
@@ -39,604 +42,589 @@ execFileSync(
     '--prefix',
     root,
     archive,
-    'miniflare@^4.20260714.0',
+    diamond,
   ],
   { stdio: 'inherit' },
 );
-const dependencyTree = JSON.parse(
+const tree = JSON.parse(
   execFileSync(
     process.execPath,
     [npmCli, 'ls', '@gnolith/diamond', '--all', '--json', '--prefix', root],
     { encoding: 'utf8' },
   ),
 );
-const diamondInstances = collectDependencyVersions(
-  dependencyTree,
-  '@gnolith/diamond',
-);
-if (diamondInstances.length !== 1 || diamondInstances[0] !== '0.4.1') {
-  throw new Error(
-    `consumer must install one Diamond 0.4.1 runtime; found ${JSON.stringify(diamondInstances)}`,
-  );
-}
+const versions = collectDependencyVersions(tree, '@gnolith/diamond');
+const uniqueVersions = [...new Set(versions)];
+if (uniqueVersions.length !== 1 || uniqueVersions[0] !== '0.5.0')
+  throw new Error(`consumer requires one Diamond 0.5.0; found ${versions}`);
 writeFileSync(
   join(root, 'smoke.mjs'),
   `
-    import { createSparqlHandler } from '@gnolith/diamond';
-    import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
-    import * as taprootApi from '@gnolith/taproot';
     import {
-      addStatement,
-      bootstrapTaprootAuthorization,
-      canonicalSearchBytesV1,
-      createAuthorizedSearchServiceV1,
-      createItem,
-      createProperty,
-      createInstallationAuthorizationGuard,
-      createInstallationDomainMutationGuard,
-      createInstallationSearchSourceGuardV1,
-      createSearchMaterializationAdminGuardV1,
-      createTaprootHostWriteCapability,
-      createSearchProjectionAuthorizationAuthorityV1,
-      createTrustedSearchAuthorizationEnvelopeV1,
-      initializeTaproot,
-      inspectTaprootSchema,
-      KNOWLEDGE_POLICY_CAPABILITY,
-      KNOWLEDGE_WRITE_CAPABILITY,
-      PersistedEntityAuthorizationSource,
-      projectItemForUnifiedSearchV1,
-      projectStatementForUnifiedSearchV1,
-      SEARCH_ADMIN_CAPABILITY,
-    } from '@gnolith/taproot';
-    import { Miniflare } from 'miniflare';
-
-    const miniflare = new Miniflare({
-      modules: true,
-      script: 'export default { fetch() { return new Response("ok") } }',
-      compatibilityDate: '2026-07-19',
-      compatibilityFlags: ['nodejs_compat'],
-      d1Databases: { DB: crypto.randomUUID() },
-    });
-    const installationId = 'packed-consumer-installation';
-    const writer = (authorizationRevision, policyAuthority = false) => ({
-      installationId,
-      principalId: 'packed-consumer-principal',
-      activeWorkspaceId: null,
-      workspaceIds: [],
-      capabilities: [
-        KNOWLEDGE_WRITE_CAPABILITY,
-        ...(policyAuthority ? [KNOWLEDGE_POLICY_CAPABILITY] : []),
-      ],
-      authorizationRevision,
-    });
-    const policy = (expectedAuthorizationRevision, statementRestrictions = {}) => ({
-      installationId,
-      workspaceId: null,
-      ownerPrincipalId: 'packed-consumer-principal',
-      visibility: { version: 1, clauses: [] },
-      statementRestrictions,
-      expectedAuthorizationRevision,
-    });
-    const searchAdmin = (authorizationRevision) => ({
-      installationId,
-      principalId: 'packed-search-admin',
-      activeWorkspaceId: null,
-      workspaceIds: [],
-      capabilities: [SEARCH_ADMIN_CAPABILITY],
-      authorizationRevision,
-    });
-    let d1Guard;
+      createMigrationAssemblyAuthorityV1,
+      createMigrationLedgerBackupV1,
+      migrateDiamondStore,
+      registerMigrationLedgerOwnerV1,
+    } from '@gnolith/diamond';
+    import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
+    import { createHash } from 'node:crypto';
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    import { gunzipSync } from 'node:zlib';
+    import * as taproot from '@gnolith/taproot';
+    import * as search from '@gnolith/taproot/search';
+    import * as backup from '@gnolith/taproot/backup';
+    import * as sparql from '@gnolith/taproot/sparql-policy';
+    const db = new NodeSqliteDatabase(':memory:');
+    const target = new NodeSqliteDatabase(':memory:');
+    const searchDb = new NodeSqliteDatabase(':memory:');
     try {
-      const db = await miniflare.getD1Database('DB');
-      const options = { baseIri: 'https://knowledge.example' };
-      await initializeTaproot(db, options);
-      const d1WriteCapability = createTaprootHostWriteCapability(
-        db,
-        options,
-        await crypto.subtle.generateKey(
-          { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
-        ),
-      );
-      await bootstrapTaprootAuthorization(
-        db, options, d1WriteCapability, installationId,
-      );
-      d1Guard = await createInstallationAuthorizationGuard(
-        db, options, d1WriteCapability,
-      );
-      await createProperty(db, options, d1Guard, writer(1), {
-        id: 'P1', datatype: 'string', authorization: policy(1),
-      });
-      const item = await createItem(db, options, d1Guard, writer(2), {
-        id: 'Q1',
-        labels: { en: { language: 'en', value: 'clean consumer' } },
-        authorization: policy(2),
-      });
-      if ('entity' in item || 'quadPatch' in item || item.status !== 'committed') {
-        throw new Error('public write receipt disclosed canonical state');
+      await taproot.initializeTaproot(db, { baseIri: 'https://consumer.example' });
+      const inspection = await taproot.inspectTaprootSchema(db);
+      if (!inspection.valid) throw new Error('packed schema is invalid');
+      for (const name of [
+        'createInstallationDomainMutationGuard',
+        'createInstallationSearchSourceGuardV1',
+        'createTaprootInstallationSnapshotV1',
+        'restoreTaprootInstallationSnapshotV1',
+      ]) if (name in taproot) throw new Error('removed bridge exported: ' + name);
+      if (typeof taproot.createTaprootWorkshopPortV1 !== 'function')
+        throw new Error('missing export: createTaprootWorkshopPortV1');
+      for (const [module, names] of [
+        [search, ['createAuthorizedSearchServiceV1', 'registerExternalProducerKindV1', 'registerExternalProducerV1']],
+        [backup, ['inspectLegacyTaproot042ForAdoptionV1', 'exportTaprootBackupSectionV1']],
+        [sparql, ['prepareScopedSparqlPolicyV1']],
+      ]) for (const name of names) {
+        if (typeof module[name] !== 'function') throw new Error('missing export: ' + name);
       }
-      await addStatement(
+      const installationId = 'packed-restore-installation';
+      const now = '2026-07-23T00:00:00.000Z';
+      await db.batch([
+        db.prepare(\`INSERT INTO taproot_installation_authorization(
+          singleton, installation_id, authorization_revision,
+          search_generation, last_advance_id, created_at, updated_at
+        ) VALUES (1, ?, 1, 1, 'bootstrap', ?, ?)\`).bind(installationId, now, now),
+        db.prepare(\`INSERT INTO taproot_authorization_principals(
+          installation_id, principal_id, created_at
+        ) VALUES (?, 'principal-1', ?)\`).bind(installationId, now),
+        db.prepare(\`INSERT INTO taproot_authorization_workspaces(
+          installation_id, workspace_id, created_at
+        ) VALUES (?, 'workspace-1', ?)\`).bind(installationId, now),
+        db.prepare(\`INSERT INTO taproot_authorization_grants(
+          installation_id, principal_id, workspace_id, capability,
+          authorization_revision, created_at
+        ) VALUES (?, 'principal-1', 'workspace-1', 'knowledge:write', 1, ?)\`).bind(installationId, now),
+      ]);
+      const sourceAssembly = createMigrationAssemblyAuthorityV1(db, installationId);
+      const sourceOwner = await registerMigrationLedgerOwnerV1({
         db,
-        options,
-        d1Guard,
-        writer(3, true),
-        'Q1',
-        {
-          id: 'Q1$consumer',
-          type: 'statement',
-          text: 'The packed Taproot consumer works.',
-          rank: 'normal',
-          mainsnak: {
-            snaktype: 'value',
-            property: 'P1',
-            datatype: 'string',
-            datavalue: { type: 'string', value: 'works' },
-          },
-          qualifiers: {},
-          'qualifiers-order': [],
-          references: [],
-        },
-        {
-          expectedRevision: item.newRevision,
-          authorization: policy(3, { 'Q1$consumer': [] }),
-        },
-      );
-      const d1Materialization = await createSearchMaterializationAdminGuardV1(
-        db, options, d1WriteCapability,
-      );
-      await d1Materialization.initialize(searchAdmin(4));
-      const d1MaterializationReceipt = await d1Materialization.run(
-        searchAdmin(4),
-        {
-          maxJobs: 10,
-          maxRebuildRoots: 10,
-          maxChunkBytes: 64,
-          leaseMilliseconds: 30_000,
-        },
-      );
-      if (d1MaterializationReceipt.completed !== 1) {
-        throw new Error('packed D1 materialization did not publish the Item root');
-      }
-      const packedSearch = createAuthorizedSearchServiceV1(db, {
         installationId,
+        namespace: taproot.taprootMigrationNamespace,
+        migrations: taproot.taprootMigrations,
+        assemblyAuthority: sourceAssembly,
       });
-      const packedStatementTerm = await packedSearch.search(
-        { text: 'The packed Taproot consumer works' },
-        writer(4),
+      const sourceLedgerBackup = createMigrationLedgerBackupV1(db, sourceAssembly);
+      const sourceKey = await crypto.subtle.generateKey(
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
       );
-      const packedKinds = new Set(
-        packedStatementTerm.results.map(({ kind }) => kind),
+      const sourceHandle = backup.registerTaprootMigrationLedgerOwnerHandleV1(
+        db,
+        { baseIri: 'https://consumer.example' },
+        taproot.createTaprootHostWriteCapability(
+          db,
+          { baseIri: 'https://consumer.example' },
+          sourceKey,
+        ),
+        sourceOwner,
+        sourceLedgerBackup,
       );
-      if (!packedKinds.has('item') || !packedKinds.has('statement')) {
-        throw new Error(
-          'packed D1 statement-only term did not return Item and Statement results',
-        );
-      }
-      const query = 'ASK { <https://knowledge.example/entity/Q1> <https://knowledge.example/prop/direct/P1> "works" }';
-      const response = await createSparqlHandler({ db })(
-        new Request('https://consumer.example/sparql?query=' + encodeURIComponent(query), {
-          headers: { accept: 'application/sparql-results+json' },
-        }),
+      const section = await backup.exportTaprootBackupSectionV1(
+        db,
+        installationId,
+        sourceHandle,
       );
-      const result = await response.json();
-      if (!response.ok || result.boolean !== true) {
-        throw new Error('Diamond could not query Taproot RDF in the packed consumer');
-      }
-      const schema = await inspectTaprootSchema(db);
-      if (!schema.valid) throw new Error('fresh D1 schema inspection failed');
-    } finally {
-      await miniflare.dispose();
-    }
+      await migrateDiamondStore(target);
+      const targetAssembly = createMigrationAssemblyAuthorityV1(target, installationId);
+      const targetOwner = await registerMigrationLedgerOwnerV1({
+        db: target,
+        installationId,
+        namespace: taproot.taprootMigrationNamespace,
+        migrations: taproot.taprootMigrations,
+        assemblyAuthority: targetAssembly,
+      });
+      const targetLedgerBackup = createMigrationLedgerBackupV1(target, targetAssembly);
+      await targetLedgerBackup.restoreNamespace(targetOwner, section.ledger, { mode: 'empty' });
+      const targetKey = await crypto.subtle.generateKey(
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const targetHandle = backup.registerTaprootMigrationLedgerOwnerHandleV1(
+        target,
+        { baseIri: 'https://consumer.example' },
+        taproot.createTaprootHostWriteCapability(
+          target,
+          { baseIri: 'https://consumer.example' },
+          targetKey,
+        ),
+        targetOwner,
+        targetLedgerBackup,
+      );
+      await backup.importTaprootBackupSectionV1(
+        target,
+        section,
+        targetHandle,
+        { dryRun: true },
+      );
+      await backup.importTaprootBackupSectionV1(target, section, targetHandle);
+      const restored = await target.prepare(
+        'SELECT COUNT(*) AS count FROM taproot_authorization_grants',
+      ).all();
+      if (Number(restored.results[0]?.count ?? 0) !== 1)
+        throw new Error('packed owner restore lost authorization grants');
 
-    const local = new NodeSqliteDatabase(':memory:');
-    try {
-      const options = { baseIri: 'https://local.example' };
-      await initializeTaproot(local, options);
-      const localWriteCapability = createTaprootHostWriteCapability(
-        local,
-        options,
-        await crypto.subtle.generateKey(
-          { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
-        ),
+      await taproot.initializeTaproot(searchDb, {
+        baseIri: 'https://packed-search.example',
+      });
+      const searchKey = await crypto.subtle.generateKey(
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
       );
-      await bootstrapTaprootAuthorization(
-        local, options, localWriteCapability, installationId,
+      const searchAuthority = taproot.createTaprootHostWriteCapability(
+        searchDb,
+        { baseIri: 'https://packed-search.example' },
+        searchKey,
       );
-      const localGuard = await createInstallationAuthorizationGuard(
-        local, options, localWriteCapability,
+      await taproot.bootstrapTaprootAuthorization(
+        searchDb,
+        { baseIri: 'https://packed-search.example' },
+        searchAuthority,
+        'packed-search-installation',
       );
-      const taskGuard = await createInstallationDomainMutationGuard(
-        local,
-        options,
-        localWriteCapability,
-        { domain: 'workshop.task', capability: 'task-write' },
-      );
-      await local.prepare(
-        'CREATE TABLE packed_task_probe(id TEXT PRIMARY KEY) STRICT',
-      ).run();
-      const taskContext = {
-        installationId,
-        principalId: 'packed-task-agent',
+      await searchDb.batch([
+        searchDb.prepare(
+          \`INSERT INTO taproot_authorization_principals(
+             installation_id, principal_id, created_at
+           ) VALUES ('packed-search-installation', 'admin', ?)\`,
+        ).bind(now),
+        searchDb.prepare(
+          \`INSERT INTO taproot_authorization_workspaces(
+             installation_id, workspace_id, created_at
+           ) VALUES ('packed-search-installation', 'packed-admin', ?)\`,
+        ).bind(now),
+        searchDb.prepare(
+          \`INSERT INTO taproot_authorization_grants(
+             installation_id, principal_id, workspace_id, capability,
+             authorization_revision, created_at
+           ) VALUES (
+             'packed-search-installation', 'admin', 'packed-admin',
+             'search:admin', 1, ?
+           )\`,
+        ).bind(now),
+      ]);
+      const adminContext = {
+        installationId: 'packed-search-installation',
+        principalId: 'admin',
         activeWorkspaceId: null,
         workspaceIds: [],
-        capabilities: ['task-write'],
+        capabilities: ['search:admin'],
         authorizationRevision: 1,
       };
-      const taskCommit = await taskGuard.batchWithExpectedRevision(
-        taskContext,
-        [local.prepare("INSERT INTO packed_task_probe(id) VALUES ('task-ok') RETURNING id")],
+      const materialization = await search.createSearchMaterializationAdminGuardV1(
+        searchDb,
+        { baseIri: 'https://packed-search.example' },
+        searchAuthority,
       );
-      if (
-        taskCommit.authorizationRevision !== 1 ||
-        taskCommit.searchGeneration !== 1 ||
-        taskCommit.results[0]?.results[0]?.id !== 'task-ok'
-      ) throw new Error('packed domain guard did not preserve ordered results');
-      let crossCapabilityRejected = false;
-      try {
-        await taskGuard.batchWithExpectedRevision(writer(1), [
-          local.prepare("INSERT INTO packed_task_probe(id) VALUES ('knowledge-denied')"),
-        ]);
-      } catch {
-        crossCapabilityRejected = true;
-      }
-      if (!crossCapabilityRejected) {
-        throw new Error('packed domain guard accepted a cross-domain capability');
-      }
-      let forgedSourceAuthorityRejected = false;
-      try {
-        await createInstallationSearchSourceGuardV1(
-          local,
-          options,
-          { kind: 'taproot-host-write-v1' },
-          {
-            domain: 'workshop.task',
-            sourceKind: 'task',
-            capability: 'task-write',
+      await materialization.initialize(adminContext);
+      await searchDb.prepare(
+        'CREATE TABLE packed_owner_records(source_id TEXT PRIMARY KEY, revision TEXT NOT NULL) STRICT',
+      ).run();
+      const externalKind = await search.registerExternalProducerKindV1(
+        searchDb,
+        { baseIri: 'https://packed-search.example' },
+        searchAuthority,
+        {
+          installationId: 'packed-search-installation',
+          namespace: 'packed.example',
+          localName: 'task',
+          ownerDomain: 'packed-owner',
+          adapter: {
+            kind: 'taproot-external-owner-transaction-adapter-v1',
+            prepare(token) {
+              return Promise.resolve([
+                searchDb.prepare(
+                  \`INSERT INTO packed_owner_records(source_id, revision)
+                   VALUES (?, ?) ON CONFLICT(source_id)
+                   DO UPDATE SET revision=excluded.revision\`,
+                ).bind(token.sourceId, token.revision),
+              ]);
+            },
+          },
+        },
+      );
+      const packedSource = {
+        sourceId: 'packed-task-1',
+        sourceRevision: '1',
+        sourcePolicyRevision: 1,
+        canonical: { title: 'Packed task' },
+      };
+      const packedProducer = await search.registerExternalProducerV1(
+        searchDb,
+        { baseIri: 'https://packed-search.example' },
+        searchAuthority,
+        {
+          descriptor: {
+            registration: externalKind.registration,
+            implementationVersion: '1.0.0',
+            fingerprint: 'f'.repeat(64),
+            projectionVersion: 'packed-task-v1',
             changeClasses: ['canonical'],
           },
+          enumerate: () => Promise.resolve({ ids: [packedSource.sourceId], cursor: null }),
+          loadExact: () => Promise.resolve(packedSource),
+          project: () => Promise.resolve({ text: 'packed task lexical result' }),
+          authorize: () => Promise.resolve(true),
+          hydrate: () => Promise.resolve(packedSource.canonical),
+        },
+      );
+      let predecessor = null;
+      for (const revision of ['1', '2']) {
+        packedSource.sourceRevision = revision;
+        const participant = await packedProducer.issuer.seal({
+          sourceId: packedSource.sourceId,
+          sourceRevision: revision,
+          predecessor,
+          ownerMutationToken: {
+            sourceId: packedSource.sourceId,
+            revision,
+          },
+        });
+        await packedProducer.commit(participant);
+        predecessor = await packedProducer.currentPredecessor(
+          packedSource.sourceId,
         );
-      } catch {
-        forgedSourceAuthorityRejected = true;
       }
-      if (!forgedSourceAuthorityRejected) {
-        throw new Error('packed source guard accepted caller-shaped host authority');
-      }
-      const taskSourceGuard = await createInstallationSearchSourceGuardV1(
-        local,
-        options,
-        localWriteCapability,
-        {
-          domain: 'workshop.task',
-          sourceKind: 'task',
-          capability: 'task-write',
-          changeClasses: ['canonical'],
-        },
-      );
-      const sourceCommit = await taskSourceGuard.batchWithSourceEvent(
-        taskContext,
-        {
-          eventId: 'packed-task-source-1',
-          sourceId: 'task-1',
-          operation: 'upsert',
-          changeClass: 'canonical',
-          sourceRevision: 'opaque-r1',
-          sourceHash: 'a'.repeat(64),
-          predecessor: null,
-        },
-        [local.prepare("INSERT INTO packed_task_probe(id) VALUES ('task-source-ok')")],
-      );
-      if (
-        sourceCommit.replayed ||
-        sourceCommit.authorizationRevision !== 1 ||
-        sourceCommit.searchGeneration !== 2
-      ) throw new Error('packed source guard did not atomically advance one generation');
-      const fencedState = await taskGuard.readCurrentState();
-      if (
-        fencedState.authorizationRevision !== 1 ||
-        fencedState.searchGeneration !== 2
-      ) throw new Error('packed source generation was not persisted');
-      await createItem(local, options, localGuard, writer(1), {
-        id: 'Q1',
-        labels: { en: { language: 'en', value: 'packed local consumer' } },
-        authorization: policy(1),
-      });
-      const materialization = await createSearchMaterializationAdminGuardV1(
-        local, options, localWriteCapability,
-      );
-      await materialization.initialize(searchAdmin(2));
-      const materializationReceipt = await materialization.run(searchAdmin(2), {
+      const packedRun = await materialization.run(adminContext, {
         maxJobs: 10,
         maxRebuildRoots: 10,
-        maxChunkBytes: 64,
-        leaseMilliseconds: 30_000,
       });
+      if (packedRun.completed !== 1 || packedRun.superseded !== 1)
+        throw new Error('packed materialization did not process supersession');
+      const packedHealth = await materialization.health(adminContext);
       if (
-        materializationReceipt.completed !== 1 ||
-        materializationReceipt.deferred !== 0 ||
-        materializationReceipt.dead !== 0
-      ) throw new Error('packed materialization did not process Item without attempting blocked Task');
-      const blockedTaskJobs = await local.prepare(
-        "SELECT COUNT(*) AS count FROM taproot_search_projection_jobs WHERE source_kind = 'task'",
-      ).all();
-      if (Number(blockedTaskJobs.results[0]?.count) !== 0) {
-        throw new Error('packed materialization enqueued blocked Task work');
-      }
-      const visible = await local.prepare(
-        \`SELECT d.document_slot, d.document_text
-           FROM taproot_search_installation_state s
-           JOIN taproot_search_materialization_heads h
-             ON h.corpus_id = s.active_corpus_id AND h.eligible = 1
-           JOIN taproot_search_staged_documents d
-             ON d.stage_id = h.current_stage_id
-           WHERE s.installation_id = ? AND h.root_kind = 'item'
-           ORDER BY d.document_slot\`,
-      ).bind(installationId).all();
-      if (
-        visible.results.length !== 1 ||
-        visible.results[0]?.document_slot !== 'item' ||
-        !String(visible.results[0]?.document_text).includes('packed local consumer')
-      ) throw new Error('packed materialization did not publish the Item document');
-      const materializationHealth = await materialization.health(searchAdmin(2));
-      if (
-        materializationHealth.status !== 'blocked' ||
-        !materializationHealth.blockedProducerKinds.includes('task') ||
-        JSON.stringify(materializationHealth).includes('packed local consumer')
-      ) throw new Error('packed materialization health was not blocked and redacted');
-      const projectionAuthority = createSearchProjectionAuthorizationAuthorityV1(
-        new PersistedEntityAuthorizationSource(local),
+        packedHealth.status !== 'healthy' ||
+        packedHealth.pendingJobs !== 0 ||
+        packedHealth.sourceHighWatermark !== 2 ||
+        packedHealth.activeAppliedWatermark !== 2
+      ) throw new Error('packed materialization health did not converge');
+      const packedSearch = search.createAuthorizedSearchServiceV1(searchDb, {
+        installationId: 'packed-search-installation',
+      });
+      const packedPage = await packedSearch.search(
+        { text: 'packed task lexical', kinds: [packedProducer.kind] },
+        { ...adminContext, capabilities: [] },
       );
-      const statementAuthorizationInput = {
+      if (
+        packedPage.results.length !== 1 ||
+        packedPage.results[0].sourceId !== packedSource.sourceId
+      ) throw new Error('packed external lexical search lost its result');
+      const packedEmpty = await packedSearch.search(
+        { text: 'absent lexical value', kinds: [packedProducer.kind] },
+        { ...adminContext, capabilities: [] },
+      );
+      if (packedEmpty.results.length !== 0)
+        throw new Error('packed external lexical empty query was not safe');
+
+      const semantic = search.createSemanticSearchAdminV1(searchDb, {
+        installationId: 'packed-search-installation',
+        fetch: async (_input, init) => {
+          if (init?.redirect !== 'error')
+            throw new Error('packed semantic redirect policy was not enforced');
+          return new Response(JSON.stringify({
+            embeddings: [[1, 0]],
+            usage: { total_tokens: 1 },
+          }), { status: 200 });
+        },
+        resolveCredential: selector =>
+          selector === 'packed-ollama' ? 'packed-runtime-secret' : undefined,
+      });
+      await semantic.configure({
         version: 1,
-        sourceKind: 'statement',
-        sourceId: 'Q1$packed-search',
-        sourceRevision: '2',
-        sourcePolicyRevision: 2,
-        installationId,
-        workspaceId: null,
-        ownerPrincipalId: 'packed-consumer-principal',
-        authorizationRevision: 2,
-        visibility: { version: 1, clauses: [] },
-      };
-      let forgedProjectionAuthorityRejected = false;
-      try {
-        await createTrustedSearchAuthorizationEnvelopeV1(
-          { kind: 'taproot-search-projection-authorization-authority-v1' },
-          statementAuthorizationInput,
-        );
-      } catch {
-        forgedProjectionAuthorityRejected = true;
-      }
-      if (!forgedProjectionAuthorityRejected) {
-        throw new Error('request data constructed a trusted projection envelope');
-      }
-      const statementAuthorization = await createTrustedSearchAuthorizationEnvelopeV1(
-        projectionAuthority,
-        statementAuthorizationInput,
-      );
-      const statementPlan = await projectStatementForUnifiedSearchV1({
-        source: {
-          version: 1,
-          eventId: 'packed-search-event',
-          operation: 'upsert',
-          installationId,
-          kind: 'statement',
-          sourceId: 'Q1$packed-search',
-          sourceRevision: '2',
-          sourceHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          sourcePolicyRevision: 2,
-          authorizationRevision: 2,
-          searchGeneration: 2,
+        id: 'packed-semantic',
+        name: 'packed-semantic',
+        provider: {
+          kind: 'ollama-compatible',
+          endpoint: 'http://127.0.0.1:11434/api/embed',
+          model: 'packed-model',
+          dimensions: 2,
+          metric: 'cosine',
+          credentialSelector: 'packed-ollama',
+          allowPrivateEndpoint: true,
+          redirectPolicy: 'error',
         },
-        itemId: 'Q1',
-        statement: {
-          id: 'Q1$packed-search',
-          type: 'statement',
-          text: 'Packed projection text.',
-          rank: 'normal',
-          mainsnak: {
-            snaktype: 'value',
-            property: 'P1',
-            datatype: 'string',
-            datavalue: { type: 'string', value: 'not projected' },
+        vector: { kind: 'sqlite' },
+      }, {
+        expectedRevision: 0,
+        idempotencyKey: 'packed-semantic-v1',
+      }, adminContext);
+      const packedSemantic = await searchDb.prepare(
+        \`SELECT configuration_revision, provider_credential_selector
+         FROM taproot_semantic_configurations
+         WHERE configuration_id='packed-semantic'\`,
+      ).all();
+      if (
+        Number(packedSemantic.results[0]?.configuration_revision) !== 1 ||
+        packedSemantic.results[0]?.provider_credential_selector !== 'packed-ollama'
+      ) throw new Error('packed semantic configuration was not durable');
+
+      const administrationOwner =
+        await taproot.registerAuthorizationAdministrationOwnerV1(
+          searchDb,
+          { baseIri: 'https://packed-search.example' },
+          searchAuthority,
+          {
+            installationId: 'packed-search-installation',
+            ownerRegistrationId: 'packed-workshop-owner',
+            adapter: {
+              kind: 'taproot-authorization-administration-owner-adapter-v1',
+              prepare: () => Promise.resolve({
+                statements: [],
+                receipt: { selector: 'packed-owner-selector' },
+              }),
+            },
           },
-          qualifiers: {},
-          'qualifiers-order': [],
-          references: [],
-        },
-        authorization: statementAuthorization,
-        maxChunkBytes: 8,
-      });
-      if (
-        statementPlan.documents[0]?.text !== 'Packed projection text.' ||
-        statementPlan.chunks.map(({ text }) => text).join('') !== 'Packed projection text.' ||
-        statementPlan.chunks.some(({ canonical }) => canonical !== false) ||
-        new TextDecoder().decode(canonicalSearchBytesV1({ z: null, a: 'e\\u0301' })) !==
-          '{"a":"é","z":null}'
-      ) {
-        throw new Error('packed unified search projection contract failed');
-      }
-      let sparseCanonicalRejected = false;
-      try {
-        canonicalSearchBytesV1(Array(1));
-      } catch {
-        sparseCanonicalRejected = true;
-      }
-      if (!sparseCanonicalRejected) {
-        throw new Error('packed canonical search bytes accepted a sparse array');
-      }
-      const itemAuthorization = await createTrustedSearchAuthorizationEnvelopeV1(
-        projectionAuthority,
-        {
-          ...statementAuthorizationInput,
-          sourceKind: 'item',
-          sourceId: 'Q9',
-        },
-      );
-      const separatorPlan = await projectItemForUnifiedSearchV1({
-        source: {
-          version: 1,
-          eventId: 'packed-item-event',
-          operation: 'upsert',
-          installationId,
-          kind: 'item',
-          sourceId: 'Q9',
-          sourceRevision: '2',
-          sourceHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-          sourcePolicyRevision: 2,
-          authorizationRevision: 2,
-          searchGeneration: 2,
-        },
-        item: {
-          id: 'Q9',
-          type: 'item',
-          labels: { en: { language: 'en', value: 'aaaa' } },
-          aliases: { en: [{ language: 'en', value: '🔥' }] },
-          descriptions: {},
-          claims: {},
-          sitelinks: {},
-          lastrevid: 2,
-          modified: '2026-07-22T00:00:00.000Z',
-        },
-        authorization: itemAuthorization,
-        statementAuthorizations: {},
-        mixedScope: 'partition',
-        maxChunkBytes: 4,
-      });
-      if (
-        separatorPlan.chunks.map(({ text }) => text).join('|') !== 'aaaa|\\n|🔥' ||
-        separatorPlan.chunks.some(({ trace }) => trace.length === 0)
-      ) {
-        throw new Error('packed projection emitted an untraced separator chunk');
-      }
-      if (
-        'prepareAuthorizationAdvance' in localGuard ||
-        'prepareExpectedRevisionFence' in localGuard
-      ) {
-        throw new Error('guard exposed splittable authorization statements');
-      }
-      const beforeOmission = await local.prepare(
-        'SELECT (SELECT COUNT(*) FROM taproot_entities) AS entities, (SELECT COUNT(*) FROM taproot_entity_authorization) AS policies, (SELECT COUNT(*) FROM taproot_authorization_projection_outbox) AS outbox, authorization_revision AS authorizationRevision FROM taproot_installation_authorization WHERE singleton = 1',
-      ).all();
-      let omissionRejected = false;
-      try {
-        await createItem(local, options, localGuard, writer(2), { id: 'Q2' });
-      } catch {
-        omissionRejected = true;
-      }
-      if (!omissionRejected) throw new Error('runtime authorization omission committed');
-      const afterOmission = await local.prepare(
-        'SELECT (SELECT COUNT(*) FROM taproot_entities) AS entities, (SELECT COUNT(*) FROM taproot_entity_authorization) AS policies, (SELECT COUNT(*) FROM taproot_authorization_projection_outbox) AS outbox, authorization_revision AS authorizationRevision FROM taproot_installation_authorization WHERE singleton = 1',
-      ).all();
-      if (JSON.stringify(beforeOmission.results) !== JSON.stringify(afterOmission.results)) {
-        throw new Error('runtime authorization omission left durable side effects');
-      }
-      for (const forbidden of [
-        'TaprootRepository', 'createTaproot', 'getEntity', 'listEntities',
-        'searchEntities', 'listAuditEvents', 'exportEntities',
-        'inspectEntityIntegrity', 'repairEntityProjection',
-      ]) {
-        if (forbidden in taprootApi) throw new Error('raw read bypass exported: ' + forbidden);
-      }
-      let validatorsRejected = false;
-      try {
-        await createItem(local, { ...options, validators: [] }, localGuard, writer(2), {
-          id: 'Q2', authorization: policy(2),
-        });
-      } catch {
-        validatorsRejected = true;
-      }
-      if (!validatorsRejected) throw new Error('write validator read bypass remained');
-      for (const forbiddenOptions of [
-        { ...options, factory: {} },
-        { ...options, maxEntityBytes: 1 },
-      ]) {
-        let rejected = false;
-        try {
-          await createItem(local, forbiddenOptions, localGuard, writer(2), {
-            id: 'Q2', authorization: policy(2),
-          });
-        } catch {
-          rejected = true;
-        }
-        if (!rejected) throw new Error('write configuration read bypass remained');
-      }
-      for (const forbiddenCapability of [
-        undefined,
-        localWriteCapability,
-        { kind: 'taproot-installation-authorization-guard-v1' },
-        JSON.parse(JSON.stringify(localGuard)),
-        d1Guard,
-      ]) {
-        let rejected = false;
-        try {
-          await createItem(local, options, forbiddenCapability, writer(2), {
-            id: 'Q2', authorization: policy(2),
-          });
-        } catch {
-          rejected = true;
-        }
-        if (!rejected) throw new Error('write capability boundary was forgeable');
-      }
-      let crossInstallationRejected = false;
-      try {
-        await createItem(
-          local,
-          { baseIri: 'https://other.example' },
-          localGuard,
-          writer(2),
-          { id: 'Q2', authorization: policy(2) },
         );
-      } catch {
-        crossInstallationRejected = true;
+      const administration =
+        await taproot.prepareAuthorizationAdministrationV1(
+          searchDb,
+          { baseIri: 'https://packed-search.example' },
+          searchAuthority,
+          {
+            installationId: 'packed-search-installation',
+            expectedAuthorizationRevision: 1,
+            idempotencyKey: 'packed-workspace-2',
+            command: {
+              type: 'put-workspace',
+              workspaceId: 'packed-workspace-2',
+            },
+          },
+          adminContext,
+        );
+      const administrationReceipt =
+        await taproot.commitAuthorizationAdministrationV1(
+          administration,
+          await administrationOwner.seal(administration, {}),
+        );
+      if (
+        administrationReceipt.authorizationRevision !== 2 ||
+        administrationReceipt.searchGeneration <= 1
+      ) throw new Error('packed authorization administration did not advance');
+
+      const legacySnapshotPath = process.env.TAPROOT_EXACT_LEGACY_SNAPSHOT;
+      if (legacySnapshotPath) {
+        const snapshotBytes = readFileSync(legacySnapshotPath);
+        if (
+          createHash('sha256').update(snapshotBytes).digest('hex') !==
+          '7e9722a1a1d993e13207d5bb2900e2f7e5457ee70c572566c6c9ddb2e637d736'
+        ) throw new Error('exact legacy snapshot hash changed');
+        const snapshot = JSON.parse(gunzipSync(snapshotBytes));
+        if (
+          snapshot.manifest?.format !== 'gnolith-seedbed-snapshot-v1' ||
+          snapshot.manifest?.packages?.diamond !== '0.4.1' ||
+          snapshot.manifest?.packages?.taproot !== '0.4.2' ||
+          snapshot.manifest?.packages?.workshop !== '0.4.2' ||
+          snapshot.manifest?.packages?.seedbed !== '0.3.2'
+        ) throw new Error('exact legacy tuple manifest changed');
+        const legacyDatabaseBytes = Buffer.from(snapshot.database, 'base64');
+        if (
+          createHash('sha256').update(legacyDatabaseBytes).digest('hex') !==
+          snapshot.manifest.database.sha256
+        ) throw new Error('exact legacy database hash changed');
+        const legacyDatabasePath = join(process.cwd(), 'exact-legacy.sqlite');
+        writeFileSync(legacyDatabasePath, legacyDatabaseBytes);
+        const legacyDb = new NodeSqliteDatabase(legacyDatabasePath);
+        try {
+          const fragment = await backup.inspectLegacyTaproot042ForAdoptionV1(
+            legacyDb,
+            {
+              packageName: '@gnolith/taproot',
+              packageVersion: '0.4.2',
+            },
+          );
+          const expectedCounts = {
+            items: 1,
+            properties: 1,
+            statements: 1,
+            resources: 1,
+            annotations: 1,
+            revisions: 8,
+          };
+          if (JSON.stringify(fragment.domainCounts) !== JSON.stringify(expectedCounts))
+            throw new Error('packed exact legacy tuple counts changed');
+          const descriptor = fragment.blobDescriptors[0];
+          if (
+            fragment.blobDescriptors.length !== 1 ||
+            descriptor.referenceId !== 'fixture/payload.txt' ||
+            descriptor.resourceId !== 'fixture-resource' ||
+            descriptor.revision !== 2 ||
+            descriptor.byteLength !== 35 ||
+            descriptor.sha256 !==
+              '9fc576a110e5c41d15e4e51630c974a7dfc3edcea06ff92cfa720ded5a4210ce'
+          ) throw new Error('packed exact legacy payload evidence changed');
+          const canonical = JSON.parse(
+            new TextDecoder().decode(fragment.canonicalPayload),
+          );
+          const resource = JSON.parse(
+            canonical.tables.taproot_resources[0].record_json,
+          );
+          const annotation = JSON.parse(
+            canonical.tables.taproot_annotations[0].record_json,
+          );
+          if (
+            resource.revision !== 2 ||
+            resource.title !== 'Fixture resource revision two' ||
+            annotation.revision !== 2 ||
+            annotation.body?.text !==
+              'Fixture annotation body, revision two.'
+          ) throw new Error('packed exact legacy revision evidence changed');
+
+          const legacyTarget = new NodeSqliteDatabase(':memory:');
+          try {
+            await taproot.initializeTaproot(legacyTarget, {
+              baseIri: fragment.baseIri,
+            });
+            const legacyAssembly = createMigrationAssemblyAuthorityV1(
+              legacyTarget,
+              fragment.installationId,
+            );
+            const legacyOwner = await registerMigrationLedgerOwnerV1({
+              db: legacyTarget,
+              installationId: fragment.installationId,
+              namespace: taproot.taprootMigrationNamespace,
+              migrations: taproot.taprootMigrations,
+              assemblyAuthority: legacyAssembly,
+            });
+            const legacyLedgerBackup = createMigrationLedgerBackupV1(
+              legacyTarget,
+              legacyAssembly,
+            );
+            const legacyKey = await crypto.subtle.generateKey(
+              { name: 'HMAC', hash: 'SHA-256' },
+              false,
+              ['sign'],
+            );
+            const legacyHandle =
+              backup.registerTaprootMigrationLedgerOwnerHandleV1(
+                legacyTarget,
+                { baseIri: fragment.baseIri },
+                taproot.createTaprootHostWriteCapability(
+                  legacyTarget,
+                  { baseIri: fragment.baseIri },
+                  legacyKey,
+                ),
+                legacyOwner,
+                legacyLedgerBackup,
+              );
+            const converted =
+              await backup.convertLegacyTaproot042ToBackupSectionV1(
+                legacyTarget,
+                fragment,
+                legacyHandle,
+              );
+            await backup.importTaprootBackupSectionV1(
+              legacyTarget,
+              converted,
+              legacyHandle,
+            );
+            const ready = await taproot.inspectTaprootSchema(legacyTarget);
+            if (!ready.valid || ready.versions.schema_version !== '9')
+              throw new Error('packed legacy import is not migration-ready');
+            const currentLedger = await legacyLedgerBackup.exportNamespace(
+              legacyOwner,
+            );
+            if (
+              currentLedger.entries.length !== 9 ||
+              currentLedger.entries[8]?.id !== '0009-architecture-reset'
+            ) throw new Error('packed legacy import lost current ledger');
+            const roundTrip = await backup.exportTaprootBackupSectionV1(
+              legacyTarget,
+              fragment.installationId,
+              legacyHandle,
+            );
+            const importedCanonical = JSON.parse(
+              new TextDecoder().decode(roundTrip.canonicalPayload),
+            );
+            const importedResource = JSON.parse(
+              importedCanonical.tables.taproot_resources[0].record_json,
+            );
+            const importedAnnotation = JSON.parse(
+              importedCanonical.tables.taproot_annotations[0].record_json,
+            );
+            if (
+              importedCanonical.tables.taproot_entities.length !== 2 ||
+              importedCanonical.tables.taproot_entity_revisions.length +
+                importedCanonical.tables.taproot_content_revisions.length !==
+                8 ||
+              importedResource.title !== 'Fixture resource revision two' ||
+              importedAnnotation.body?.text !==
+                'Fixture annotation body, revision two.'
+            ) throw new Error('packed legacy import lost canonical evidence');
+          } finally {
+            await legacyTarget.close();
+          }
+        } finally {
+          await legacyDb.close();
+        }
       }
-      if (!crossInstallationRejected) throw new Error('write capability crossed installation');
-      let deepImportRejected = false;
-      try {
-        await import('@gnolith/taproot/dist/repository.js');
-      } catch (error) {
-        deepImportRejected = error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED';
-      }
-      if (!deepImportRejected) throw new Error('raw repository deep import remained available');
-      const schema = await inspectTaprootSchema(local);
-      if (!schema.valid) throw new Error('fresh node:sqlite schema inspection failed');
     } finally {
-      await local.close();
+      await db.close();
+      await target.close();
+      await searchDb.close();
     }
   `,
 );
 execFileSync(process.execPath, [join(root, 'smoke.mjs')], {
   cwd: root,
   stdio: 'inherit',
+  env: {
+    ...process.env,
+    ...(existsSync(exactLegacySnapshot)
+      ? { TAPROOT_EXACT_LEGACY_SNAPSHOT: exactLegacySnapshot }
+      : {}),
+  },
 });
-
-const installed = JSON.parse(
-  readFileSync(join(root, 'node_modules', packagePath, 'package.json'), 'utf8'),
+const labelNoopSmoke = join(root, 'label-noop-consumer-smoke.mjs');
+writeFileSync(
+  labelNoopSmoke,
+  readFileSync(resolve('scripts', 'label-noop-consumer-smoke.mjs'), 'utf8'),
 );
-if (
-  installed.private !== false ||
-  installed.version !== sourcePackage.version
-) {
-  throw new Error('packed metadata differs from the public source package');
+execFileSync(process.execPath, [labelNoopSmoke], {
+  cwd: root,
+  stdio: 'inherit',
+});
+if (existsSync(exactLegacySnapshot)) {
+  const crossProcessSmoke = join(root, 'legacy-cross-process-smoke.mjs');
+  writeFileSync(
+    crossProcessSmoke,
+    readFileSync(resolve('scripts', 'legacy-cross-process-smoke.mjs'), 'utf8'),
+  );
+  execFileSync(
+    process.execPath,
+    [
+      crossProcessSmoke,
+      'run',
+      exactLegacySnapshot,
+      join(root, 'legacy-section.json'),
+    ],
+    { cwd: root, stdio: 'inherit' },
+  );
 }
-for (const path of [
-  'SECURITY.md',
-  'SUPPORT.md',
-  'docs/api.md',
-  'docs/threat-model.md',
-  'migrations/0001_taproot.sql',
-  'migrations/0002_audit_operations.sql',
-  'migrations/0003_canonical_statement_text.sql',
-  'migrations/0004_canonical_authorization_policy.sql',
-  'migrations/0005_unified_search_source_events.sql',
-  'migrations/0006_unified_search_materialization_lifecycle.sql',
-  'migrations/0007_external_search_producers.sql',
-  'migrations/0008_complete_search_content_semantic.sql',
-]) {
-  if (!existsSync(join(root, 'node_modules', packagePath, path))) {
-    throw new Error(`packed artifact is missing ${path}`);
-  }
-}
-console.log(`consumer smoke passed for ${installed.name}@${installed.version}`);
-console.log('consumer dependency graph contains one @gnolith/diamond@0.4.1');
+console.log(
+  `consumer smoke passed for ${sourcePackage.name}@${sourcePackage.version}; sha256=${sha256}`,
+);
 
 function collectDependencyVersions(node, dependencyName) {
   const versions = [];

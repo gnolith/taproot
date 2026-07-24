@@ -4,14 +4,15 @@ The unified-search types, strict normalizers, deterministic serialization
 utilities, and projection planners are documented in
 [search-contract.md](search-contract.md). `createAuthorizedSearchServiceV1`
 exposes the single relevance `search` operation plus owner hydration. Omitted
-kinds cover all seven kinds; explicit kinds narrow; invalid kinds, limits, and
-cursor bindings fail closed. SPARQL remains a separate exact structured path.
+kinds cover all ready built-ins and registered external handles; explicit
+kinds narrow; invalid handles, limits, and cursor bindings fail closed.
+SPARQL remains a separate exact structured path.
 
 The metadata-only persistence boundary is documented in
 [search-source-events.md](search-source-events.md). It records authoritative
 source changes. The separately guarded dormant lifecycle in
 [search-materialization.md](search-materialization.md) materializes Taproot
-Item, Resource, Annotation, and registered Workshop roots.
+Item, Statement, Resource, Annotation, and registered external roots.
 
 `TaprootContentRepositoryV1` owns canonical Resource and Annotation CRUD,
 revision reads, authorization, payload hydration, snapshots, and W3C Web
@@ -78,6 +79,12 @@ a `TaprootHostWriteCapability` after authorization bootstrap and is bound to
 the exact database object and normalized base IRI. Neither token can be
 serialized or reused across bindings or installations. Redirects must target a live entity of the same type and cannot
 create a cycle. `resolveEntity` follows a bounded chain and reports every hop.
+`MutationReceipt.changed` is `true` only when the operation committed a new
+canonical entity revision. An identical Item or Property label update returns
+`changed: false`, preserves `previousRevision === newRevision`, and does not
+advance RDF, authorization, source-event, search, or materialization state.
+The Workshop port exposes the same required field on its `WriteResult`; callers
+must consume it instead of inferring disposition from mutable counters.
 
 `createStatement` and `createReference` build correctly shaped values. Import
 accepts trusted explicit Q/P IDs and advances counters. `importEntities`
@@ -86,6 +93,32 @@ authorized bulk import supplies one policy per entity. Those policies name the
 sequential expected installation authorization revisions; after each success,
 Taproot advances the context revision used for the next entity while preserving
 the same authenticated principal, grants, and capabilities.
+
+`createTaprootWorkshopPortV1` is the packed owner-integration boundary for
+Workshop. Assembly binds it to an installation, exact database connection, and
+opaque `TaprootHostWriteCapability`. It resolves an already-authenticated
+principal identity into a live persisted `AuthorizationContext` and provides
+bounded opaque-cursor statement, Resource, and Annotation revision history.
+Every read checks the current authorization fence before lookup and again after
+hydration; the port exposes neither credentials nor storage/query primitives.
+
+The same port provides item, property, entity-command, Resource, and Annotation
+mutations. Callers supply a required idempotency key and, for updates, the
+expected revision; Taproot derives new authorization policy from the live
+principal/workspace context and preserves existing policy on updates. Workshop
+therefore never constructs `CanonicalAuthorizationPolicyInput`, and persistent
+receipts make successful retries stable across process restarts.
+
+`mutateEntity` accepts one to 200 ordered `{ command, authoredText }` entries
+and commits them as one revision. Taproot carries each authored text into the
+corresponding statement command where applicable and records the complete
+ordered list in audit metadata; attribution and request identity are derived
+from the live principal and idempotency key.
+
+`hydrateResource(resourceId, revision, context, signal?)` hydrates the exact
+authorized historical descriptor, verifies its declared length and SHA-256
+digest, and rejects payloads above the configured bounded byte limit. Blob
+references require a `payloadStore` when the port is assembled.
 
 `Statement.text` is required, non-whitespace authored text describing that
 exact structured revision. `addStatement` and `replaceStatement` receive it on
@@ -113,20 +146,16 @@ guard, or authorization context to request, user, agent, or MCP code.
 
 `bootstrapTaprootAuthorization` initializes a pristine database once.
 `createInstallationAuthorizationGuard` issues the normal-write guard.
-The guard can also execute an ordered cross-package database batch behind an
-exact-revision fence or an inseparable authorization advance. It never returns
-raw fence or advance statements to the caller.
-`createInstallationDomainMutationGuard` issues a separate fence-only opaque
-guard bound at host assembly to one exact non-Knowledge domain and capability.
-Its batches return only the domain-statement results plus the fenced counters;
-they do not advance either counter. Knowledge advances require both
-`knowledge:write` and `knowledge:policy`.
-`createInstallationSearchSourceGuardV1` issues an opaque non-Knowledge guard
-bound to one database, installation, domain, source kind, capability, and set
-of change classes. Its `batchWithSourceEvent` method atomically commits sibling
-domain SQL, one persisted search-generation advance, one immutable source
-event, and the current source registry. Exact replay is a no-op; divergent or
-stale-predecessor replay fails.
+The guard exposes only live-state inspection; it accepts no SQL or foreign
+statements. Canonical writes and policy advances use bounded Taproot operations.
+External search producers coordinate through namespace-bound registration
+capabilities and sealed one-shot owner mutation participants.
+`RegisteredExternalProducerV1.currentPredecessor(sourceId)` returns the exact
+frozen `{ eventId, sequence }` required to seal the next mutation, or `null`
+before the first event. It remains scoped to that registered installation and
+external kind. After a process restart, the exact deterministic durable owner
+registration can be rebound to a new live capability; same-connection
+duplicates and owner mismatches remain rejected.
 `inspectTaprootAuthorizationReadiness`,
 `planTaprootAuthorizationBackfill`, and
 `applyTaprootAuthorizationBackfill` are host-controlled, exact

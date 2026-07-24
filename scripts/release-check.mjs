@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error('release:check must be run through npm');
@@ -72,3 +74,48 @@ for (const required of [
 console.log(
   `release metadata and ${files.size}-file artifact validated for ${tag}`,
 );
+
+const evidenceRoot = mkdtempSync(join(tmpdir(), 'taproot-release-check-'));
+try {
+  const first = join(evidenceRoot, 'first');
+  const second = join(evidenceRoot, 'second');
+  for (const output of [first, second])
+    execFileSync(
+      process.execPath,
+      [
+        npmCli,
+        'run',
+        'release:candidate',
+        '--',
+        '--output',
+        output,
+        '--tag',
+        tag,
+      ],
+      { stdio: 'pipe' },
+    );
+  const firstFiles = readdirSync(first).sort();
+  const secondFiles = readdirSync(second).sort();
+  assert.deepEqual(
+    firstFiles,
+    secondFiles,
+    'release candidate inventories differ',
+  );
+  assert.deepEqual(firstFiles, [
+    'SHA256SUMS',
+    `gnolith-taproot-${packageJson.version}.cdx.json`,
+    `gnolith-taproot-${packageJson.version}.provenance.json`,
+    `gnolith-taproot-${packageJson.version}.tgz`,
+  ]);
+  for (const filename of firstFiles)
+    assert.deepEqual(
+      readFileSync(join(first, filename)),
+      readFileSync(join(second, filename)),
+      `release candidate ${filename} is not deterministic`,
+    );
+  console.log(
+    `deterministic package/SBOM/provenance evidence validated for ${tag}`,
+  );
+} finally {
+  rmSync(evidenceRoot, { recursive: true, force: true });
+}

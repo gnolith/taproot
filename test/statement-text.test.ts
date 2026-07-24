@@ -2,24 +2,27 @@ import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
 import { describe, expect, it } from 'vitest';
 import {
   InvalidStatementError,
-  PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
   SchemaMismatchError,
   TaprootMigrationStateError,
   applyTaprootMigrations,
   createStatement,
   initializeTaproot,
-  legacyTaprootV1Statements,
-  taprootAuthorizationSchemaStatements,
-  taprootSearchSourceEventSchemaStatements,
-  taprootSearchMaterializationSchemaStatements,
-  taprootExternalSearchProducerSchemaStatements,
-  taprootCompleteSearchSchemaStatements,
   type EntityCommand,
   type SqliteDatabaseLike,
   type SqlitePreparedStatementLike,
   type SqliteResultLike,
   type Statement,
 } from '../src/index.js';
+import {
+  PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
+  legacyTaprootV1Statements,
+  taprootAuthorizationSchemaStatements,
+  taprootArchitectureResetSchemaStatements,
+  taprootCompleteSearchSchemaStatements,
+  taprootExternalSearchProducerSchemaStatements,
+  taprootSearchMaterializationSchemaStatements,
+  taprootSearchSourceEventSchemaStatements,
+} from '../src/schema.js';
 import { TaprootRepository } from '../src/repository.js';
 
 const baseIri = 'https://statement-text.example';
@@ -425,6 +428,7 @@ async function downgradeStatementTextMigration(
            '0006-unified-search-materialization-lifecycle',
            '0007-external-search-producers'
            ,'0008-complete-search-content-semantic'
+           ,'0009-architecture-reset'
          )`,
     ),
     db.prepare(`DELETE FROM taproot_migrations WHERE version >= 3`),
@@ -442,6 +446,7 @@ async function dropAuthorizationSchema(db: SqliteDatabaseLike): Promise<void> {
     ...taprootSearchMaterializationSchemaStatements,
     ...taprootExternalSearchProducerSchemaStatements,
     ...taprootCompleteSearchSchemaStatements,
+    ...taprootArchitectureResetSchemaStatements,
   ]
     .map((sql) =>
       /^CREATE (?:UNIQUE )?(TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([a-z0-9_]+)/iu.exec(
@@ -580,8 +585,8 @@ class PageTrackingDatabase implements SqliteDatabaseLike {
   }
 
   batch<T = Record<string, unknown>>(
-    statements: SqlitePreparedStatementLike[],
-  ): Promise<Array<SqliteResultLike<T>>> {
+    statements: readonly SqlitePreparedStatementLike[],
+  ): Promise<readonly SqliteResultLike<T>[]> {
     return this.inner.batch<T>(
       statements.map((statement) => {
         if (!(statement instanceof PageTrackingStatement))

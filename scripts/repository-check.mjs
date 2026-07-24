@@ -40,13 +40,16 @@ const requiredFiles = [
   'migrations/0006_unified_search_materialization_lifecycle.sql',
   'migrations/0007_external_search_producers.sql',
   'migrations/0008_complete_search_content_semantic.sql',
+  'migrations/0009_architecture_reset.sql',
   'benchmarks/search-source-events-100k.json',
   'benchmarks/search-materialization-100k.json',
   'scripts/search-source-event-baseline.mjs',
   'scripts/search-materialization-baseline.mjs',
   'scripts/consumer-smoke.mjs',
   'scripts/typescript-consumer.mjs',
+  'scripts/materialize-diamond.mjs',
   'scripts/release-check.mjs',
+  'scripts/release-candidate.mjs',
 ];
 
 const repositoryFiles = execFileSync('git', [
@@ -79,8 +82,8 @@ assert.equal(packageJson.private, false);
 assert.equal(packageJson.publishConfig?.access, 'public');
 assert.equal(packageJson.publishConfig?.provenance, true);
 assert.match(packageJson.engines?.node ?? '', /^>=22/);
-assert.equal(packageJson.version, '0.4.2');
-assert.equal(packageJson.dependencies?.['@gnolith/diamond'], '0.4.1');
+assert.equal(packageJson.version, '0.5.0');
+assert.equal(packageJson.dependencies?.['@gnolith/diamond'], '0.5.0');
 assert.equal(
   packageJson.repository?.url,
   'https://github.com/gnolith/taproot.git',
@@ -95,13 +98,13 @@ assert.ok(
   'packed consumer must inspect the complete Diamond dependency graph',
 );
 assert.ok(
-  consumerSmoke.includes("diamondInstances[0] !== '0.4.1'"),
-  'packed consumer must require one Diamond 0.4.1 runtime',
+  consumerSmoke.includes("uniqueVersions[0] !== '0.5.0'"),
+  'packed consumer must require one Diamond 0.5.0 runtime',
 );
-assert.doesNotMatch(
+assert.match(
   consumerSmoke,
-  /DIAMOND_TARBALL|file:|link:/,
-  'packed consumer must use the public Diamond dependency',
+  /DIAMOND_TARBALL/u,
+  'candidate consumer must accept the exact Diamond tarball',
 );
 
 const qdrantConformance = readFileSync(
@@ -125,7 +128,7 @@ for (const workflow of repositoryFiles.filter((file) =>
   const text = readFileSync(workflow, 'utf8');
   assert.doesNotMatch(
     text,
-    /repository:\s*gnolith\/diamond|DIAMOND_TARBALL|\.diamond-handoff|qdrant\/qdrant:v1\.15\.4/,
+    /DIAMOND_TARBALL|\.diamond-handoff|qdrant\/qdrant:v1\.15\.4/,
     `${workflow} contains a stale runtime source or pin`,
   );
   for (const match of text.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)/gm)) {
@@ -133,6 +136,24 @@ for (const workflow of repositoryFiles.filter((file) =>
       match[1],
       /@[0-9a-f]{40}$/,
       `${workflow} action is not pinned to a full commit: ${match[1]}`,
+    );
+  }
+  const installs = [...text.matchAll(/^\s*- run: npm ci\s*$/gm)].length;
+  const materializations = [
+    ...text.matchAll(
+      /^\s*- run: npm run materialize:diamond -- --source \.diamond-source\s*$/gm,
+    ),
+  ].length;
+  assert.equal(
+    materializations,
+    installs,
+    `${workflow} must materialize exact Diamond before every npm ci`,
+  );
+  if (installs) {
+    assert.ok(
+      text.includes('repository: gnolith/diamond') &&
+        text.includes('ref: e82f58ba8028ff9c16a34f4b8a9a2bc356495b64'),
+      `${workflow} must checkout the pinned Diamond source`,
     );
   }
 }
@@ -159,14 +180,29 @@ for (const required of [
   'tag_type="$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")"',
   'test "$tag_type" = tag',
   'npm run release:check',
-  'npm sbom',
-  'sha256sum',
+  'npm run release:candidate',
+  'release-candidate/*',
   'actions/attest-build-provenance@',
-  'npm publish ./*.tgz --access public --provenance',
+  'npm publish release-candidate/*.tgz --access public --provenance',
 ]) {
   assert.ok(
     release.includes(required),
     `release workflow is missing: ${required}`,
+  );
+}
+
+const diamondMaterializer = readFileSync(
+  'scripts/materialize-diamond.mjs',
+  'utf8',
+);
+for (const required of [
+  'e82f58ba8028ff9c16a34f4b8a9a2bc356495b64',
+  "lock.packages?.['node_modules/@gnolith/diamond']",
+  'Diamond tarball integrity mismatch',
+]) {
+  assert.ok(
+    diamondMaterializer.includes(required),
+    `Diamond materializer is missing: ${required}`,
   );
 }
 assert.ok(
@@ -177,6 +213,33 @@ assert.ok(
   !release.includes('NODE_AUTH_TOKEN'),
   'release workflow contains NODE_AUTH_TOKEN',
 );
+
+const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+for (const required of [
+  'npm run release:check',
+  'npm run release:candidate',
+  'taproot-release-candidate-${{ github.sha }}',
+  'include-hidden-files: true',
+]) {
+  assert.ok(
+    ci.includes(required),
+    `CI workflow is missing candidate evidence: ${required}`,
+  );
+}
+
+const candidate = readFileSync('scripts/release-candidate.mjs', 'utf8');
+for (const required of [
+  "'--omit=dev'",
+  'gnolith:package:integrity',
+  'gnolith:source:commit',
+  'gnolith:source:tree',
+  'SHA256SUMS',
+]) {
+  assert.ok(
+    candidate.includes(required),
+    `release candidate generator is missing: ${required}`,
+  );
+}
 
 console.log(
   `package repository structure validated: ${requiredFiles.length} required files, ` +

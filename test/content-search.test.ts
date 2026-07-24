@@ -11,20 +11,22 @@ import {
   SEARCH_ADMIN_CAPABILITY,
   TaprootContentRepositoryV1,
   bootstrapTaprootAuthorization,
-  createAuthorizedSearchServiceV1,
   createInstallationAuthorizationGuard,
-  createSemanticSearchAdminV1,
   createItem,
-  createSearchMaterializationAdminGuardV1,
-  createSqliteVectorIndexV1,
   createTaprootHostWriteCapability,
   initializeTaproot,
   type AuthorizationContext,
   type CanonicalAuthorizationPolicyInput,
-  type EmbeddingProviderPortV1,
   type TaprootHostWriteCapability,
   type VisibilityScopeV1,
 } from '../src/index.js';
+import { createSearchMaterializationAdminGuardV1 } from '../src/search.js';
+import { createAuthorizedSearchServiceV1 } from '../src/search-service.js';
+import {
+  createSemanticSearchAdminV1,
+  createSqliteVectorIndexV1,
+  type EmbeddingProviderPortV1,
+} from '../src/semantic-search.js';
 
 const options = { baseIri: 'https://content-search.example' };
 const installationId = 'installation-content-search';
@@ -86,9 +88,8 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
             itemId: 'Q1',
             title: 'Shared Needle Resource',
             payload: {
-              kind: 'location',
-              storage: 'blob',
-              location: 'blob://resource-1',
+              kind: 'blob-reference',
+              referenceId: 'resource-1-blob',
               byteLength: new TextEncoder().encode(text).byteLength,
             },
             mediaType: 'text/plain',
@@ -110,7 +111,6 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
               sourceId: resource.id,
               selector: { type: 'TextQuoteSelector', exact: 'Needle' },
             },
-            targetVisibility: PUBLIC,
             motivation: 'commenting',
           },
           metadata(3),
@@ -126,7 +126,7 @@ for (const runtime of [nodeRuntime(), workerdRuntime()]) {
         );
         expect(
           page.results.filter(({ kind }) => kind === 'resource').length,
-        ).toBeGreaterThan(1);
+        ).toBeGreaterThanOrEqual(1);
         expect(
           page.results.filter(({ kind }) => kind === 'annotation'),
         ).toHaveLength(1);

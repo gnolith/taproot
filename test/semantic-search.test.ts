@@ -5,15 +5,17 @@ import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SEARCH_ADMIN_CAPABILITY,
+  initializeTaproot,
+  type AuthorizationContext,
+} from '../src/index.js';
+import {
   createOllamaCompatibleEmbeddingProviderV1,
   createOpenAICompatibleEmbeddingProviderV1,
   createSemanticSearchAdminV1,
   createSqliteVectorIndexV1,
-  initializeTaproot,
-  type AuthorizationContext,
   type EmbeddingProviderPortV1,
   type VectorRecordV1,
-} from '../src/index.js';
+} from '../src/semantic-search.js';
 
 const directories: string[] = [];
 afterEach(() => {
@@ -30,7 +32,7 @@ describe('embedding provider conformance', () => {
     async (_name, create, path) => {
       const requests: Array<{ url: string; authorization: string | null }> = [];
       const provider = create({
-        endpoint: 'http://127.0.0.1:11434',
+        endpoint: `http://127.0.0.1:11434/${path}`,
         model: 'model-a',
         dimensions: 3,
         allowPrivateEndpoint: true,
@@ -92,7 +94,7 @@ describe('embedding provider conformance', () => {
 
   it('redacts malformed, oversized, timeout, and provider failures', async () => {
     const provider = createOpenAICompatibleEmbeddingProviderV1({
-      endpoint: 'https://embeddings.example',
+      endpoint: 'https://embeddings.example/v1/embeddings',
       model: 'model-a',
       dimensions: 2,
       secret: () => 'never-leak-this-secret',
@@ -111,9 +113,191 @@ describe('embedding provider conformance', () => {
     expect(String(error)).not.toContain('never-leak-this-secret');
     expect(String(error)).toMatch(/bound|failed/u);
   });
+
+  it('uses a documented full OpenAI embeddings endpoint without appending the path twice', async () => {
+    const urls: string[] = [];
+    const provider = createOpenAICompatibleEmbeddingProviderV1({
+      endpoint: 'http://127.0.0.1:8080/v1/embeddings',
+      model: 'model-a',
+      dimensions: 2,
+      allowPrivateEndpoint: true,
+      fetch: (input) => {
+        urls.push(requestUrl(input));
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              data: [{ embedding: [1, 0] }],
+              usage: { total_tokens: 1 },
+            }),
+            { status: 200 },
+          ),
+        );
+      },
+    });
+    await expect(provider.embed(['one'])).resolves.toMatchObject({
+      vectors: [[1, 0]],
+    });
+    expect(urls).toEqual(['http://127.0.0.1:8080/v1/embeddings']);
+  });
 });
 
 describe('persisted SQLite vector and semantic administration', () => {
+  it('persists declarative selector identities with revision CAS, restart-safe idempotency, and safe generation changes', async () => {
+    const { db } = await database();
+    try {
+      const credentials: string[] = [];
+      const urls: string[] = [];
+      const fetcher: typeof fetch = (input, init) => {
+        urls.push(requestUrl(input));
+        expect(init?.redirect).toBe('error');
+        const authorization = new Headers(init?.headers).get('authorization');
+        if (authorization) credentials.push(authorization);
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              data: [{ embedding: [1, 0, 0] }],
+              usage: { total_tokens: 1 },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        );
+      };
+      const create = () =>
+        createSemanticSearchAdminV1(db, {
+          installationId: 'installation-a',
+          fetch: fetcher,
+          resolveCredential: (selector) =>
+            selector === 'openai-local' ? 'runtime-secret' : undefined,
+        });
+      const configuration = {
+        version: 1 as const,
+        id: 'declarative',
+        name: 'declarative',
+        provider: {
+          kind: 'openai-compatible' as const,
+          endpoint: 'http://127.0.0.1:8080/v1/embeddings',
+          model: 'nomic-embed-text',
+          dimensions: 3,
+          metric: 'cosine' as const,
+          credentialSelector: 'openai-local',
+          allowPrivateEndpoint: true,
+          redirectPolicy: 'error' as const,
+        },
+        vector: { kind: 'sqlite' as const },
+      };
+      await create().configure(
+        configuration,
+        { expectedRevision: 0, idempotencyKey: 'configure-v1' },
+        context('installation-a', true),
+      );
+      await create().configure(
+        configuration,
+        { expectedRevision: 0, idempotencyKey: 'configure-v1' },
+        context('installation-a', true),
+      );
+      expect(credentials).toEqual(['Bearer runtime-secret']);
+      await expect(
+        create().reconnect('declarative', context('installation-a', true)),
+      ).resolves.toBe(true);
+      expect(urls).toEqual([
+        'http://127.0.0.1:8080/v1/embeddings',
+        'http://127.0.0.1:8080/v1/embeddings',
+      ]);
+      const persisted = await db
+        .prepare(
+          `SELECT configuration_revision, active_generation,
+                  provider_credential_selector, provider_private_approved
+           FROM taproot_semantic_configurations
+           WHERE configuration_id='declarative'`,
+        )
+        .all<Record<string, unknown>>();
+      expect(persisted.results[0]).toMatchObject({
+        configuration_revision: 1,
+        active_generation: 1,
+        provider_credential_selector: 'openai-local',
+        provider_private_approved: 1,
+      });
+      expect(JSON.stringify(persisted.results[0])).not.toContain(
+        'runtime-secret',
+      );
+      await expect(
+        create().configure(
+          {
+            ...configuration,
+            provider: { ...configuration.provider, model: 'changed' },
+          },
+          { expectedRevision: 0, idempotencyKey: 'stale' },
+          context('installation-a', true),
+        ),
+      ).rejects.toThrow(/revision conflict/u);
+      const changed = {
+        ...configuration,
+        provider: {
+          ...configuration.provider,
+          model: 'changed',
+          dimensions: 3,
+        },
+      };
+      await create().configure(
+        changed,
+        { expectedRevision: 1, idempotencyKey: 'configure-v2' },
+        context('installation-a', true),
+      );
+      expect(
+        (
+          await db
+            .prepare(
+              `SELECT configuration_revision, active_generation, ready_generation
+               FROM taproot_semantic_configurations
+               WHERE configuration_id='declarative'`,
+            )
+            .all<Record<string, unknown>>()
+        ).results[0],
+      ).toMatchObject({
+        configuration_revision: 2,
+        active_generation: 2,
+        ready_generation: null,
+      });
+      await create().configure(
+        changed,
+        { expectedRevision: 1, idempotencyKey: 'configure-v2' },
+        context('installation-a', true),
+      );
+      await expect(
+        create().configure(
+          {
+            ...configuration,
+            id: 'blocked-private',
+            name: 'blocked-private',
+            provider: {
+              ...configuration.provider,
+              allowPrivateEndpoint: false,
+            },
+          },
+          { expectedRevision: 0, idempotencyKey: 'blocked-private' },
+          context('installation-a', true),
+        ),
+      ).rejects.toThrow(/private.*endpoint/u);
+      await expect(
+        create().configure(
+          {
+            ...configuration,
+            id: 'redirect',
+            name: 'redirect',
+            provider: {
+              ...configuration.provider,
+              redirectPolicy: 'same-origin' as never,
+            },
+          },
+          { expectedRevision: 0, idempotencyKey: 'redirect' },
+          context('installation-a', true),
+        ),
+      ).rejects.toThrow(/redirect policy/u);
+    } finally {
+      await db.close();
+    }
+  });
+
   it('persists exact vectors, isolates installations/configurations, filters authorization, and deletes safely', async () => {
     const { db, path } = await database();
     const vector = createSqliteVectorIndexV1(db);
@@ -194,7 +378,7 @@ describe('persisted SQLite vector and semantic administration', () => {
       const provider: EmbeddingProviderPortV1 = {
         identity: {
           kind: 'openai-compatible',
-          endpoint: 'https://provider.example',
+          endpoint: 'https://provider.example/v1/embeddings',
           model: 'model-a',
           dimensions: 2,
           metric: 'cosine',
@@ -242,13 +426,19 @@ describe('persisted SQLite vector and semantic administration', () => {
       await admin.approve(planId, context('installation-a', true));
       await admin.run(planId, context('installation-a', true));
       await admin.select('config-a', context('installation-a', true));
-      expect(await admin.status(context('installation-a', true))).toMatchObject(
-        {
-          selectedConfigurationId: 'config-a',
-          selectedReady: true,
-          circuitOpen: false,
-        },
-      );
+      const readyStatus = await admin.status(context('installation-a', true));
+      expect(readyStatus).toMatchObject({
+        configured: true,
+        configurationCount: 1,
+        state: 'ready',
+        revision: 1,
+        ready: true,
+        selectedConfigurationId: 'config-a',
+        selectedReady: true,
+        circuitOpen: false,
+        failureCode: null,
+      });
+      expect(readyStatus.fingerprint).toMatch(/^[0-9a-f]{64}$/u);
 
       const failingEmbed = vi.fn(() =>
         Promise.reject(new Error('secret=do-not-leak')),
@@ -276,6 +466,29 @@ describe('persisted SQLite vector and semantic administration', () => {
           context: context('installation-a', false),
         }),
       ).toEqual([]);
+      expect(failingEmbed).toHaveBeenCalledTimes(3);
+      await expect(
+        admin.status(context('installation-a', true)),
+      ).resolves.toMatchObject({
+        state: 'failed',
+        ready: false,
+        circuitOpen: true,
+        failureCode: 'validation-failure',
+      });
+      const restartedAdmin = createSemanticSearchAdminV1(db, {
+        installationId: 'installation-a',
+        fetch: () => {
+          throw new Error('failed configuration must not restart-loop');
+        },
+      });
+      await expect(
+        restartedAdmin.search({
+          text: 'query after restart',
+          kinds: ['item'],
+          limit: 10,
+          context: context('installation-a', false),
+        }),
+      ).resolves.toEqual([]);
       expect(failingEmbed).toHaveBeenCalledTimes(3);
       expect(warnings).toHaveLength(1);
       expect(warnings.join(' ')).not.toContain('do-not-leak');
@@ -325,4 +538,12 @@ async function database() {
   const db = new NodeSqliteDatabase(path);
   await initializeTaproot(db, { baseIri: 'https://semantic.example' });
   return { db, path };
+}
+
+function requestUrl(input: string | URL | Request): string {
+  return input instanceof Request
+    ? input.url
+    : input instanceof URL
+      ? input.href
+      : input;
 }

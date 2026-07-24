@@ -90,7 +90,7 @@ package, installs the tarball into a fresh temporary project with registry
 Diamond and Miniflare dependencies, initializes a new D1 database, writes an
 entity, and verifies the RDF through privileged package-test SPARQL using only
 public package exports. It additionally requires npm's complete installed tree
-to contain exactly one `@gnolith/diamond@0.4.1` runtime and proves the
+to contain exactly one `@gnolith/diamond@0.5.0` runtime and proves the
 Statement-only Item aggregate query through packed Workerd D1. A second
 disposable consumer compiles representative public types using TypeScript 5.9
 with strict mode and `skipLibCheck: false`. This proves RDF interoperability,

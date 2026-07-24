@@ -2,6 +2,9 @@ import type {
   SqliteDatabaseLike,
   SqlitePreparedStatementLike,
 } from './sqlite-types.js';
+import { encodeTerm, prepareQuadPatch } from '@gnolith/diamond';
+import type * as RDF from '@rdfjs/types';
+import { DataFactory } from 'rdf-data-factory';
 import {
   intersectVisibilityScopes,
   isVisibleTo,
@@ -22,16 +25,17 @@ import type {
   AuthorizationContext,
   VisibilityScopeV1,
 } from './types.js';
+import { coordinatedStatements } from './atomic-coordination.js';
+import { withoutTrailingSlashes } from './iri.js';
 
 export const RESOURCE_INLINE_TEXT_MAX_BYTES = 65_536;
 
 export type ResourcePayloadV1 =
   | { kind: 'inline-text'; text: string }
   | {
-      kind: 'location';
-      location: string;
-      storage: 'blob' | 'file' | 'url';
-      byteLength?: number;
+      kind: 'blob-reference';
+      referenceId: string;
+      byteLength: number;
     };
 
 export interface ResourceIntegrityV1 {
@@ -73,14 +77,11 @@ export type AnnotationBodyV1 =
   | { kind: 'resource'; resourceId: string };
 
 export interface AnnotationTargetV1 {
-  kind:
-    | 'statement'
-    | 'item'
-    | 'task'
-    | 'memory'
-    | 'prompt'
-    | 'resource'
-    | 'annotation';
+  kind: 'statement' | 'item' | 'resource' | 'annotation' | 'external';
+  externalKind?: {
+    namespace: string;
+    localName: string;
+  };
   sourceId: string;
   selector?: AnnotationSelectorV1;
 }
@@ -136,7 +137,7 @@ export interface WebAnnotationJsonV1 {
 export interface PortableResourcePayloadStoreV1 {
   readonly kind: 'taproot-resource-payload-store-v1';
   load(
-    reference: Extract<ResourcePayloadV1, { kind: 'location' }>,
+    reference: Extract<ResourcePayloadV1, { kind: 'blob-reference' }>,
     signal?: AbortSignal,
   ): Promise<Uint8Array>;
 }
@@ -164,7 +165,6 @@ export interface CreateAnnotationInputV1 {
   id: string;
   body: AnnotationBodyV1;
   target: AnnotationTargetV1;
-  targetVisibility: VisibilityScopeV1;
   motivation?: string;
   creator?: Attribution;
   generator?: Attribution;
@@ -235,7 +235,15 @@ export class TaprootContentRepositoryV1 {
       modifiedAt: now,
       deletedAt: null,
     };
-    await this.#commit('resource', record.id, null, record, 'create', context);
+    await this.#commit(
+      'resource',
+      record.id,
+      null,
+      record,
+      'create',
+      context,
+      coordinatedStatements(metadata),
+    );
     return clone(record);
   }
 
@@ -281,6 +289,7 @@ export class TaprootContentRepositoryV1 {
       record,
       'update',
       context,
+      coordinatedStatements(metadata),
     );
     return clone(record);
   }
@@ -312,6 +321,7 @@ export class TaprootContentRepositoryV1 {
       record,
       'delete',
       context,
+      coordinatedStatements(metadata),
     );
     return clone(record);
   }
@@ -349,6 +359,23 @@ export class TaprootContentRepositoryV1 {
     signal?: AbortSignal,
   ): Promise<Uint8Array> {
     const resource = await this.getResource(id, context);
+    return this.#hydrateResource(resource, signal);
+  }
+
+  async hydrateResourceRevisionPayload(
+    id: string,
+    revision: number,
+    context: AuthorizationContext,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    const resource = await this.getResourceRevision(id, revision, context);
+    return this.#hydrateResource(resource, signal);
+  }
+
+  async #hydrateResource(
+    resource: ResourceV1,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
     if (resource.payload.kind === 'inline-text')
       return encoder.encode(resource.payload.text);
     if (!this.#options.payloadStore)
@@ -377,7 +404,7 @@ export class TaprootContentRepositoryV1 {
       await this.#resource(normalized.body.resourceId, false);
     const now = this.#options.clock().toISOString();
     const inherited = intersectVisibilityScopes(
-      normalizeVisibilityScope(input.targetVisibility),
+      await this.#targetVisibility(normalized.target, context),
       normalizeVisibilityScope(metadata.visibility),
     );
     const record: AnnotationV1 = {
@@ -400,6 +427,7 @@ export class TaprootContentRepositoryV1 {
       record,
       'create',
       context,
+      coordinatedStatements(metadata),
     );
     return clone(record);
   }
@@ -428,7 +456,7 @@ export class TaprootContentRepositoryV1 {
           current.authorization.policyRevision + 1,
         ),
         visibility: intersectVisibilityScopes(
-          normalizeVisibilityScope(input.targetVisibility),
+          await this.#targetVisibility(normalized.target, context),
           normalizeVisibilityScope(metadata.visibility),
         ),
       },
@@ -441,6 +469,7 @@ export class TaprootContentRepositoryV1 {
       record,
       'update',
       context,
+      coordinatedStatements(metadata),
     );
     return clone(record);
   }
@@ -472,6 +501,7 @@ export class TaprootContentRepositoryV1 {
       record,
       'delete',
       context,
+      coordinatedStatements(metadata),
     );
     return clone(record);
   }
@@ -612,6 +642,7 @@ export class TaprootContentRepositoryV1 {
     record: ResourceV1 | AnnotationV1,
     eventType: string,
     context: AuthorizationContext,
+    coordinated: readonly SqlitePreparedStatementLike[] = [],
   ): Promise<void> {
     const hash = await canonicalSearchHashV1(record);
     const predecessor = await readPersistedSearchSourceRegistryV1(
@@ -660,6 +691,13 @@ export class TaprootContentRepositoryV1 {
       },
       ['create', 'update', 'delete', 'restore', 'import'],
     );
+    const baseIri = await this.#baseIri();
+    const oldQuads = previous ? contentQuads(previous, baseIri) : [];
+    const newQuads = contentQuads(record, baseIri);
+    const rdfPatch = prepareQuadPatch(this.#db, {
+      ...(oldQuads.length ? { require: oldQuads, delete: oldQuads } : {}),
+      insert: newQuads,
+    });
     await this.#db.batch([
       this.#upsertCurrent(kind, id, record),
       this.#insertRevision(kind, id, record),
@@ -712,8 +750,108 @@ export class TaprootContentRepositoryV1 {
           previous ? await canonicalSearchHashV1(previous) : null,
           now,
         ),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_content_authorization_revisions(
+             record_kind, record_id, revision, installation_id,
+             policy_revision, visibility_json, principal_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          kind,
+          id,
+          record.revision,
+          this.#options.installationId,
+          record.authorization.policyRevision,
+          JSON.stringify(record.authorization.visibility),
+          context.principalId,
+          now,
+        ),
+      this.#db
+        .prepare(
+          `DELETE FROM taproot_content_rdf_ownership
+           WHERE record_kind = ? AND record_id = ?`,
+        )
+        .bind(kind, id),
+      ...(newQuads.length
+        ? [
+            this.#db
+              .prepare(
+                `INSERT INTO taproot_content_rdf_ownership(
+                   record_kind, record_id, subject_key, predicate_key,
+                   object_key, graph_key
+                 )
+                 SELECT ?, ?, json_extract(value, '$.subject'),
+                   json_extract(value, '$.predicate'),
+                   json_extract(value, '$.object'),
+                   json_extract(value, '$.graph')
+                 FROM json_each(?)`,
+              )
+              .bind(kind, id, JSON.stringify(newQuads.map(rdfOwnershipRow))),
+          ]
+        : []),
+      ...rdfPatch.statements,
+      ...coordinated,
       ...event.statements,
     ]);
+  }
+
+  async #baseIri(): Promise<string> {
+    const result = await this.#db
+      .prepare(
+        `SELECT metadata_value FROM taproot_metadata
+         WHERE metadata_key = 'base_iri'`,
+      )
+      .all<{ metadata_value: string }>();
+    const value = result.results[0]?.metadata_value;
+    if (!value) throw new Error('Taproot base IRI is not initialized');
+    return withoutTrailingSlashes(value);
+  }
+
+  async #targetVisibility(
+    target: AnnotationTargetV1,
+    context: AuthorizationContext,
+  ): Promise<VisibilityScopeV1> {
+    if (target.kind === 'resource') {
+      const record = await this.#resource(target.sourceId, false);
+      this.#authorizeRead(
+        record.authorization.installationId,
+        record.authorization.visibility,
+        context,
+      );
+      return record.authorization.visibility;
+    }
+    if (target.kind === 'annotation') {
+      const record = await this.#annotation(target.sourceId, false);
+      this.#authorizeRead(
+        record.authorization.installationId,
+        record.authorization.visibility,
+        context,
+      );
+      return record.authorization.visibility;
+    }
+    if (target.kind === 'item' || target.kind === 'statement') {
+      const entityId =
+        target.kind === 'item'
+          ? target.sourceId
+          : target.sourceId.slice(0, target.sourceId.indexOf('$'));
+      const result = await this.#db
+        .prepare(
+          `SELECT effective_visibility_json
+           FROM taproot_entity_authorization
+           WHERE entity_id = ? AND deleted_at IS NULL`,
+        )
+        .bind(entityId)
+        .all<{ effective_visibility_json: string }>();
+      const encoded = result.results[0]?.effective_visibility_json;
+      if (!encoded) throw new Error('annotation target not found');
+      const visibility = normalizeVisibilityScope(
+        JSON.parse(encoded) as VisibilityScopeV1,
+      );
+      this.#authorizeRead(this.#options.installationId, visibility, context);
+      return visibility;
+    }
+    throw new Error('external annotation target owner is unavailable');
   }
 
   #upsertCurrent(
@@ -938,7 +1076,6 @@ export function exportWebAnnotationV1(
 
 export function importWebAnnotationV1(
   value: WebAnnotationJsonV1,
-  targetVisibility: VisibilityScopeV1,
 ): CreateAnnotationInputV1 {
   if (
     value['@context'] !== 'http://www.w3.org/ns/anno.jsonld' ||
@@ -968,7 +1105,6 @@ export function importWebAnnotationV1(
         ? {}
         : { selector: value.target.selector }),
     }),
-    targetVisibility: normalizeVisibilityScope(targetVisibility),
     ...(value.motivation === undefined ? {} : { motivation: value.motivation }),
     ...(value.creator === undefined ? {} : { creator: value.creator }),
     ...(value.generator === undefined ? {} : { generator: value.generator }),
@@ -1074,33 +1210,19 @@ function normalizePayload(payload: ResourcePayloadV1): ResourcePayloadV1 {
         RESOURCE_INLINE_TEXT_MAX_BYTES,
       ),
     };
-  if (
-    payload.kind !== 'location' ||
-    !['blob', 'file', 'url'].includes(payload.storage)
-  )
-    throw new Error('invalid resource location');
-  const location = boundedText(payload.location, 'payload.location', 8192);
-  if (payload.storage === 'url') {
-    const url = new URL(location);
-    if (
-      !['http:', 'https:'].includes(url.protocol) ||
-      url.username ||
-      url.password
-    )
-      throw new Error('invalid resource URL');
-  }
-  if (
-    payload.byteLength !== undefined &&
-    (!Number.isSafeInteger(payload.byteLength) || payload.byteLength < 0)
-  )
+  if (payload.kind !== 'blob-reference')
+    throw new Error('invalid resource blob reference');
+  const referenceId = boundedText(
+    payload.referenceId,
+    'payload.referenceId',
+    8192,
+  );
+  if (!Number.isSafeInteger(payload.byteLength) || payload.byteLength < 0)
     throw new Error('invalid payload byteLength');
   return {
-    kind: 'location',
-    location,
-    storage: payload.storage,
-    ...(payload.byteLength === undefined
-      ? {}
-      : { byteLength: payload.byteLength }),
+    kind: 'blob-reference',
+    referenceId,
+    byteLength: payload.byteLength,
   };
 }
 
@@ -1134,17 +1256,26 @@ function normalizeTarget(target: AnnotationTargetV1): AnnotationTargetV1 {
   if (
     !target ||
     typeof target !== 'object' ||
-    ![
-      'statement',
-      'item',
-      'task',
-      'memory',
-      'prompt',
-      'resource',
-      'annotation',
-    ].includes(target.kind)
+    !['statement', 'item', 'resource', 'annotation', 'external'].includes(
+      target.kind,
+    )
   )
     throw new Error('invalid annotation target');
+  const externalKind =
+    target.kind === 'external'
+      ? {
+          namespace: token(
+            target.externalKind?.namespace,
+            'target.externalKind.namespace',
+          ),
+          localName: token(
+            target.externalKind?.localName,
+            'target.externalKind.localName',
+          ),
+        }
+      : undefined;
+  if (target.kind !== 'external' && target.externalKind !== undefined)
+    throw new Error('built-in annotation target cannot declare externalKind');
   const selector =
     target.selector === undefined
       ? undefined
@@ -1156,6 +1287,7 @@ function normalizeTarget(target: AnnotationTargetV1): AnnotationTargetV1 {
     throw new Error('invalid annotation selector');
   return {
     kind: target.kind,
+    ...(externalKind === undefined ? {} : { externalKind }),
     sourceId: token(target.sourceId, 'target.sourceId'),
     ...(selector === undefined ? {} : { selector }),
   };
@@ -1199,10 +1331,7 @@ function normalizeImportedAnnotation(
     value.authorization.installationId !== installationId
   )
     throw new Error('invalid imported annotation');
-  normalizeAnnotationInput({
-    ...value,
-    targetVisibility: value.authorization.visibility,
-  });
+  normalizeAnnotationInput(value);
   normalizeVisibilityScope(value.authorization.visibility);
   return clone(value);
 }
@@ -1262,6 +1391,78 @@ async function verifyInlineIntegrity(
   if (payload.kind !== 'inline-text') return;
   if ((await digestBytes(encoder.encode(payload.text))) !== integrity.digest)
     throw new Error('inline payload integrity mismatch');
+}
+
+const contentFactory = new DataFactory();
+const rdfTypeIri = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const xsdIntegerIri = 'http://www.w3.org/2001/XMLSchema#integer';
+
+function contentQuads(
+  record: ResourceV1 | AnnotationV1,
+  baseIri: string,
+): RDF.Quad[] {
+  const kind = 'itemId' in record ? 'Resource' : 'Annotation';
+  const subject = contentFactory.namedNode(
+    `${baseIri}/entity/${encodeURIComponent(record.id)}`,
+  );
+  const predicate = (local: string) =>
+    contentFactory.namedNode(`${baseIri}/prop/direct/${local}`);
+  const values: RDF.Quad[] = [
+    contentFactory.quad(
+      subject,
+      contentFactory.namedNode(rdfTypeIri),
+      contentFactory.namedNode(`${baseIri}/vocab/${kind}`),
+    ),
+    contentFactory.quad(
+      subject,
+      predicate('revision'),
+      contentFactory.literal(
+        String(record.revision),
+        contentFactory.namedNode(xsdIntegerIri),
+      ),
+    ),
+  ];
+  if ('itemId' in record)
+    values.push(
+      contentFactory.quad(
+        subject,
+        predicate('item'),
+        contentFactory.namedNode(`${baseIri}/entity/${record.itemId}`),
+      ),
+    );
+  else
+    values.push(
+      contentFactory.quad(
+        subject,
+        predicate('target'),
+        contentFactory.literal(
+          JSON.stringify([
+            record.target.kind,
+            record.target.externalKind ?? null,
+            record.target.sourceId,
+            record.target.selector ?? null,
+          ]),
+        ),
+      ),
+    );
+  if (record.deletedAt)
+    values.push(
+      contentFactory.quad(
+        subject,
+        predicate('deletedAt'),
+        contentFactory.literal(record.deletedAt),
+      ),
+    );
+  return values;
+}
+
+function rdfOwnershipRow(quad: RDF.Quad) {
+  return {
+    subject: encodeTerm(quad.subject),
+    predicate: encodeTerm(quad.predicate),
+    object: encodeTerm(quad.object),
+    graph: encodeTerm(quad.graph),
+  };
 }
 
 function clone<T>(value: T): T {

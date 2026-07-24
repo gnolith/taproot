@@ -1,5 +1,98 @@
 # Changelog
 
+## 0.5.0
+
+- Generate a deterministic release-candidate bundle containing the exact npm
+  package, runtime-only CycloneDX SBOM, checksum-bound source/package
+  provenance, and `SHA256SUMS`. Required CI uploads commit-named evidence, and
+  release validation rejects byte drift across two independent generations.
+- Materialize the unpublished exact Diamond 0.5.0 dependency from its pinned
+  source commit before hosted installs and verify the generated tarball
+  against the package-lock SHA-512. This keeps CI and release workflows
+  cross-platform and checksum-bound without weakening the registry-only public
+  package manifest.
+- Replace ambiguous trailing-slash regular expressions with bounded linear
+  scanning for caller-controlled and persisted base IRIs, eliminating a
+  CodeQL high-severity polynomial-time denial-of-service path.
+- Treat semantic provider endpoints as exact full POST URLs and never append a
+  provider route. Persisted declarative SQLite and Qdrant bindings now
+  reconstruct automatically after restart, and semantic status exposes a
+  bounded non-secret `failureCode`.
+- Allow sealed authorization administration to set either narrower or wider
+  visibility on an exact existing Entity revision while retaining target CAS,
+  immutable Entity/audit history, and atomic authorization/search advancement.
+  Packed and integration coverage now proves owner-or-reader CNF policies on a
+  clean Q2 revision 1 and a statement-bearing Q1 revision 3, including replay,
+  restart filtering, and rejection of the unsatisfiable two-singleton
+  owner-AND-reader form. Public guidance explicitly distinguishes outer AND
+  clauses from inner OR atoms.
+- Identical Item and Property label updates are true semantic no-ops. Public
+  mutation receipts and Workshop-facing write results expose an explicit
+  `changed` disposition, while no-op writes retain authorization validation
+  and an atomic current-state assertion without advancing canonical history,
+  RDF, authorization, source-event, search, or materialization state.
+- Fix exact Taproot 0.4.2 owner adoption to validate against an immutable,
+  explicit migration ID/checksum manifest captured from the public 0.4.2
+  package with Diamond 0.4.1. Legacy evidence is no longer derived from the
+  current migration catalog.
+- Keep current schema metadata and migration seeds authoritative during legacy
+  conversion/import while preserving all legacy canonical entities, revision
+  history, content records, and payload descriptors. Cross-process adoption
+  compares only stable schema/migration identity while retaining the import
+  target's installation metadata and non-semantic migration application
+  timestamps. Fresh restore targets establish their registered canonical base
+  IRI before importing domain state. Add a package-owned migration-ledger
+  restore primitive that converges immutable sequential migration replay to
+  the same exact physical catalog as fresh initialization. Legacy import
+  rebuilds Taproot's RDF ownership and Diamond quad projection from canonical
+  entities, and persistence inspection reports bounded readiness errors
+  instead of swallowing semantic or seed failures.
+
+- Add the sealed `AuthorizationAdministrationV1` owner protocol for
+  revision-bound principal, workspace, grant, and canonical visibility
+  administration. Workshop-owned credential/OAuth mappings join the same
+  connection-local atomic batch; receipts are durable and idempotent, and
+  authorization/search fences advance on every accepted mutation.
+- Add declarative `SemanticConfigurationV1` identities for
+  Ollama-compatible and OpenAI-compatible embedding providers plus SQLite and
+  Qdrant vector stores. Configuration now persists selector identities (never
+  credentials), explicit private-endpoint approval and redirect policy,
+  revision/idempotency history, fingerprints, and safe vector generations.
+
+- Registered external producers can read their exact frozen source-event
+  predecessor through their capability-bound runtime after a commit or process
+  restart; durable kind registrations can be rebound only by the matching
+  deterministic owner registration.
+- External producer projection text now accepts normalized multiline canonical
+  content under the same nonblank UTF-8 byte bound as built-in projections.
+- External producer adoption now persists source events and predecessors for
+  enumerated legacy owner rows, including pages adopted after materialization
+  initialization and later process restarts.
+- Added the authority-bound `TaprootWorkshopPortV1` for live persisted
+  principal/grant resolution and bounded, authorization-fenced statement,
+  Resource, and Annotation revision history without exposing storage tables.
+  Its idempotent operator mutations derive or preserve canonical entity and
+  content policy inside Taproot, including all `EntityCommand` statement,
+  qualifier, reference, and rank changes.
+- Preserved ordered per-command authored text for atomic Workshop entity edits
+  and added bounded, exact-revision Resource payload hydration.
+- Made owner backup import independent of canonical JSON object-key order by
+  validating the exact table manifest and restoring canonical and derived rows
+  in declared foreign-key dependency order within one atomic batch.
+- Made active materialization health converge after mixed built-in/external
+  supersession by enrolling external-kind checkpoints and advancing only
+  truthfully completed superseded jobs through their source sequence.
+
+- Reset search to four built-in kinds (`item`, `statement`, `resource`, and
+  `annotation`) plus privately branded, namespace-bound external kinds.
+- Added canonical Resource/Annotation mutation boundaries, sealed
+  authorization bootstrap, scoped SPARQL policy preparation, owner-scoped
+  backup/blob ports, and read-only exact Taproot 0.4.2 adoption inspection.
+- Moved search, semantic, vector/provider adapters, SPARQL policy, and backup
+  into explicit package subpaths and removed raw SQL/foreign-domain bridges.
+- Added restartable migration 0009 with lossless namespaced adoption of
+  historical external search kinds.
+
 ## Unreleased
 
 ## 0.4.2

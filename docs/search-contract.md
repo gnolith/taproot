@@ -1,16 +1,15 @@
 # Unified search contract V1
 
 Taproot exposes a versioned, runtime-neutral contract, projection planning,
-and an executable authorized search service. V1 recognizes exactly these canonical
-kinds, in this order:
+and an executable authorized search service. V1 has exactly four built-in
+kinds:
 
-`statement`, `item`, `task`, `memory`, `prompt`, `resource`, `annotation`.
+`item`, `statement`, `resource`, `annotation`.
 
-Omitting `kinds` searches all seven. Taproot owns native Statement, Item,
-Resource, and Annotation production. Workshop supplies Task, Memory, and Prompt
-through the migration-0007 host-sealed data-only producer boundary. The legacy
-pure Task/Memory/Prompt projector placeholders still fail explicitly because
-cross-domain production requires an assembly-issued producer guard.
+Omitting `kinds` searches all ready built-ins and registered external kinds.
+Every external kind is a runtime-issued, privately branded namespace/local-name
+handle; callers cannot construct one from strings. Properties use Item-kind
+results with `entityType: "property"`.
 
 ## Request and response boundary
 
@@ -22,9 +21,9 @@ closed:
 - common: `languages`, exact opaque `sourceRevisions`;
 - Statement: `predicateIds`;
 - Item: `typeIds`;
-- Task: `statuses`;
 - Resource: `mediaTypes`;
-- Memory, Prompt, and Annotation: common filters only.
+- Annotation and external kinds: common filters unless their registered
+  producer validates additional owner-defined filters.
 
 V1 does not accept source IDs or Item IDs as filters.
 

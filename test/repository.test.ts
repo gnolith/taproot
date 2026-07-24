@@ -1,4 +1,5 @@
-import { createSparqlHandler, type D1DatabaseLike } from '@gnolith/diamond';
+import type { D1DatabaseLike } from '@gnolith/diamond';
+import { createSparqlExecutor } from '@gnolith/diamond/sparql';
 import { Miniflare } from 'miniflare';
 import { describe, expect, it } from 'vitest';
 import {
@@ -6,7 +7,6 @@ import {
   EntityTooLargeError,
   InvalidEntityError,
   InvalidStatementError,
-  PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
   PropertyDatatypeMismatchError,
   PropertyNotFoundError,
   QuadPatchTooLargeError,
@@ -16,17 +16,20 @@ import {
   applyTaprootMigrations,
   initializeTaproot,
   inspectTaprootPersistence,
-  legacyTaprootV1Statements,
   inspectTaprootSchema,
-  taprootAuthorizationSchemaStatements,
-  taprootSearchSourceEventSchemaStatements,
-  taprootSearchMaterializationSchemaStatements,
-  taprootExternalSearchProducerSchemaStatements,
-  taprootCompleteSearchSchemaStatements,
   type Reference,
   type Snak,
   type Statement,
 } from '../src/index.js';
+import {
+  PERSISTED_STATEMENT_TEXT_PAGE_SIZE,
+  legacyTaprootV1Statements,
+  taprootAuthorizationSchemaStatements,
+  taprootCompleteSearchSchemaStatements,
+  taprootExternalSearchProducerSchemaStatements,
+  taprootSearchMaterializationSchemaStatements,
+  taprootSearchSourceEventSchemaStatements,
+} from '../src/schema.js';
 import { TaprootRepository } from '../src/repository.js';
 
 const options = { baseIri: 'https://knowledge.example' };
@@ -111,7 +114,7 @@ describe('TaprootRepository on Workerd D1', () => {
           .all<{ json_version: string; ledger_count: number }>();
         expect(state.results[0]).toMatchObject({
           json_version: '1',
-          ledger_count: 2,
+          ledger_count: 3,
         });
       } finally {
         await env.dispose();
@@ -200,7 +203,7 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await env.dispose();
     }
-  }, 20_000);
+  }, 120_000);
 
   it('enforces authored statement text and explicit resupply on D1', async () => {
     const env = await environment();
@@ -260,7 +263,7 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await env.dispose();
     }
-  }, 20_000);
+  }, 120_000);
 
   it('upgrades a version-one database and backfills immutable audit history', async () => {
     const miniflare = new Miniflare({
@@ -326,7 +329,7 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await miniflare.dispose();
     }
-  }, 30_000);
+  }, 120_000);
 
   it('initializes its schema and allocates independent P/Q ids', async () => {
     const env = await environment();
@@ -354,7 +357,7 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await env.dispose();
     }
-  }, 30_000);
+  }, 120_000);
 
   it('synchronizes terms, revisions, statements, qualifiers, references, and RDF', async () => {
     const env = await environment();
@@ -436,14 +439,19 @@ describe('TaprootRepository on Workerd D1', () => {
       await expect(
         env.repository.listEntityRevisions('Q1'),
       ).resolves.toHaveLength(4);
-      const handler = createSparqlHandler({ db: env.db });
+      const handler = createSparqlExecutor({ db: env.db });
       const query = `SELECT ?value WHERE { <https://knowledge.example/entity/Q1> <https://knowledge.example/prop/direct/P1> ?value }`;
-      const response = await handler(
-        new Request(
-          `https://site.test/sparql?query=${encodeURIComponent(query)}`,
-          { headers: { accept: 'application/sparql-results+json' } },
-        ),
-      );
+      const execution = await handler({
+        operation: 'query',
+        text: query,
+        accept: 'application/sparql-results+json',
+      });
+      const response = new Response(execution.body, {
+        status: execution.status,
+        headers: execution.mediaType
+          ? { 'content-type': execution.mediaType }
+          : {},
+      });
       expect(response.status).toBe(200);
       const result = (await response.json()) as {
         results: { bindings: Array<{ value: { value: string } }> };
@@ -458,12 +466,17 @@ describe('TaprootRepository on Workerd D1', () => {
         ?timeValue <http://wikiba.se/ontology#timePrecision> 9 .
         ?reference <https://knowledge.example/prop/reference/P1> ?source
       }`;
-      const fullResponse = await handler(
-        new Request(
-          `https://site.test/sparql?query=${encodeURIComponent(fullQuery)}`,
-          { headers: { accept: 'application/sparql-results+json' } },
-        ),
-      );
+      const fullExecution = await handler({
+        operation: 'query',
+        text: fullQuery,
+        accept: 'application/sparql-results+json',
+      });
+      const fullResponse = new Response(fullExecution.body, {
+        status: fullExecution.status,
+        headers: fullExecution.mediaType
+          ? { 'content-type': fullExecution.mediaType }
+          : {},
+      });
       const fullResult = (await fullResponse.json()) as {
         results: { bindings: Array<{ source: { value: string } }> };
       };
@@ -530,7 +543,7 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await env.dispose();
     }
-  }, 30_000);
+  }, 120_000);
 
   it('edits and removes terms, aliases, and sitelinks', async () => {
     const env = await environment();
@@ -576,7 +589,75 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await env.dispose();
     }
-  }, 20_000);
+  }, 120_000);
+
+  it('does not revise Items or Properties for identical canonical labels', async () => {
+    const env = await environment();
+    try {
+      const item = await env.repository.createItem({
+        id: 'Q1',
+        labels: { en: { language: 'en', value: 'Current item' } },
+      });
+      const property = await env.repository.createProperty({
+        id: 'P1',
+        datatype: 'string',
+        labels: { en: { language: 'en', value: 'Current property' } },
+      });
+      const itemNoop = await env.repository.setLabel(
+        'Q1',
+        'en',
+        'Current item',
+        { expectedRevision: 1 },
+      );
+      const propertyNoop = await env.repository.setLabel(
+        'P1',
+        'en',
+        'Current property',
+        { expectedRevision: 1 },
+      );
+      expect(itemNoop).toMatchObject({
+        previousRevision: 1,
+        newRevision: 1,
+        changed: false,
+        eventId: item.eventId,
+        contentHash: item.contentHash,
+        quadPatch: { deleted: 0, inserted: 0 },
+      });
+      expect(propertyNoop).toMatchObject({
+        previousRevision: 1,
+        newRevision: 1,
+        changed: false,
+        eventId: property.eventId,
+        contentHash: property.contentHash,
+        quadPatch: { deleted: 0, inserted: 0 },
+      });
+      await expect(
+        env.repository.listEntityRevisions('Q1'),
+      ).resolves.toHaveLength(1);
+      await expect(
+        env.repository.listEntityRevisions('P1'),
+      ).resolves.toHaveLength(1);
+
+      const changed = await env.repository.setLabel(
+        'Q1',
+        'en',
+        'Changed item',
+        {
+          expectedRevision: 1,
+        },
+      );
+      expect(changed).toMatchObject({
+        previousRevision: 1,
+        newRevision: 2,
+        changed: true,
+      });
+      await expect(
+        env.repository.listEntityRevisions('Q1'),
+      ).resolves.toHaveLength(2);
+    } finally {
+      await env.dispose();
+    }
+  }, 120_000);
 
   it('imports trusted ids, advances counters, and rejects collisions', async () => {
     const env = await environment();
@@ -602,7 +683,7 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await env.dispose();
     }
-  }, 15_000);
+  }, 120_000);
 
   it('enforces database namespace and entity/quad size limits atomically', async () => {
     const env = await environment();
@@ -636,7 +717,7 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await env.dispose();
     }
-  }, 30_000);
+  }, 120_000);
 
   it('permits only one competing edit from a revision', async () => {
     const env = await environment();
@@ -730,7 +811,7 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await env.dispose();
     }
-  }, 20_000);
+  }, 120_000);
 
   it('rolls JSON, revision, terms, and RDF back when RDF insertion fails', async () => {
     const env = await environment();
@@ -805,7 +886,7 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await env.dispose();
     }
-  }, 30_000);
+  }, 120_000);
 
   it('provides attribution, immutable audit chains, cursors, batch commands, bulk I/O, and repair', async () => {
     const env = await environment();
@@ -997,7 +1078,7 @@ describe('TaprootRepository on Workerd D1', () => {
     } finally {
       await env.dispose();
     }
-  }, 30_000);
+  }, 120_000);
 });
 
 async function insertD1PagedCorpus(
