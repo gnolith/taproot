@@ -20,7 +20,13 @@ const diamond =
   process.env.DIAMOND_TARBALL ?? resolve('node_modules', '@gnolith', 'diamond');
 const exactLegacySnapshot =
   process.env.TAPROOT_EXACT_LEGACY_SNAPSHOT ??
-  resolve('..', 'seedbed', '.legacy-runtime', 'legacy-local-v1.snapshot');
+  resolve(
+    '..',
+    'seedbed',
+    'fixtures',
+    'legacy-local-v1',
+    'legacy-local-v1.snapshot',
+  );
 writeFileSync(
   join(root, 'package.json'),
   JSON.stringify({ private: true, type: 'module' }),
@@ -422,7 +428,7 @@ writeFileSync(
         const snapshotBytes = readFileSync(legacySnapshotPath);
         if (
           createHash('sha256').update(snapshotBytes).digest('hex') !==
-          '581de9721f35a103054910610edaff12091341c8d69593760376696950afd409'
+          '7e9722a1a1d993e13207d5bb2900e2f7e5457ee70c572566c6c9ddb2e637d736'
         ) throw new Error('exact legacy snapshot hash changed');
         const snapshot = JSON.parse(gunzipSync(snapshotBytes));
         if (
@@ -449,12 +455,12 @@ writeFileSync(
             },
           );
           const expectedCounts = {
-            items: 2,
-            properties: 2,
+            items: 1,
+            properties: 1,
             statements: 1,
             resources: 1,
             annotations: 1,
-            revisions: 10,
+            revisions: 8,
           };
           if (JSON.stringify(fragment.domainCounts) !== JSON.stringify(expectedCounts))
             throw new Error('packed exact legacy tuple counts changed');
@@ -558,10 +564,10 @@ writeFileSync(
               importedCanonical.tables.taproot_annotations[0].record_json,
             );
             if (
-              importedCanonical.tables.taproot_entities.length !== 4 ||
+              importedCanonical.tables.taproot_entities.length !== 2 ||
               importedCanonical.tables.taproot_entity_revisions.length +
                 importedCanonical.tables.taproot_content_revisions.length !==
-                10 ||
+                8 ||
               importedResource.title !== 'Fixture resource revision two' ||
               importedAnnotation.body?.text !==
                 'Fixture annotation body, revision two.'
@@ -590,6 +596,23 @@ execFileSync(process.execPath, [join(root, 'smoke.mjs')], {
       : {}),
   },
 });
+if (existsSync(exactLegacySnapshot)) {
+  const crossProcessSmoke = join(root, 'legacy-cross-process-smoke.mjs');
+  writeFileSync(
+    crossProcessSmoke,
+    readFileSync(resolve('scripts', 'legacy-cross-process-smoke.mjs'), 'utf8'),
+  );
+  execFileSync(
+    process.execPath,
+    [
+      crossProcessSmoke,
+      'run',
+      exactLegacySnapshot,
+      join(root, 'legacy-section.json'),
+    ],
+    { cwd: root, stdio: 'inherit' },
+  );
+}
 console.log(
   `consumer smoke passed for ${sourcePackage.name}@${sourcePackage.version}; sha256=${sha256}`,
 );

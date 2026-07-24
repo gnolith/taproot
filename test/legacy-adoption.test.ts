@@ -130,6 +130,7 @@ describe('Taproot 0.4.2 owner adoption', () => {
   it('converts only a live inspected fragment to a current owner section', async () => {
     const source = new NodeSqliteDatabase(':memory:');
     const target = new NodeSqliteDatabase(':memory:');
+    const importTarget = new NodeSqliteDatabase(':memory:');
     try {
       await createExact042(source);
       const fragment = await inspectLegacyTaproot042ForAdoptionV1(source, {
@@ -198,33 +199,74 @@ describe('Taproot 0.4.2 owner adoption', () => {
           }),
         ]),
       );
+      await initializeTaproot(importTarget, { baseIri });
+      await importTarget
+        .prepare(
+          `UPDATE taproot_migrations SET applied_at='separate-process-target'`,
+        )
+        .run();
+      const importAssembly = createMigrationAssemblyAuthorityV1(
+        importTarget,
+        'target-installation',
+      );
+      const importOwner = await registerMigrationLedgerOwnerV1({
+        db: importTarget,
+        installationId: 'target-installation',
+        namespace: taprootMigrationNamespace,
+        migrations: taprootMigrations,
+        assemblyAuthority: importAssembly,
+      });
+      const importBackup = createMigrationLedgerBackupV1(
+        importTarget,
+        importAssembly,
+      );
+      const importKey = await crypto.subtle.generateKey(
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const importHandle = registerTaprootMigrationLedgerOwnerHandleV1(
+        importTarget,
+        { baseIri },
+        createTaprootHostWriteCapability(importTarget, { baseIri }, importKey),
+        importOwner,
+        importBackup,
+      );
       await expect(
-        importTaprootBackupSectionV1(target, section, handle, {
+        importTaprootBackupSectionV1(importTarget, section, importHandle, {
           dryRun: true,
         }),
       ).resolves.toMatchObject({ dryRun: true });
-      await target
+      await importTarget
         .prepare(
           `UPDATE taproot_metadata SET metadata_value='8'
            WHERE metadata_key='schema_version'`,
         )
         .run();
       await expect(
-        importTaprootBackupSectionV1(target, section, handle),
+        importTaprootBackupSectionV1(importTarget, section, importHandle),
       ).rejects.toThrow(/schema seeds are not current/u);
-      await target
+      await importTarget
         .prepare(
           `UPDATE taproot_metadata SET metadata_value='9'
            WHERE metadata_key='schema_version'`,
         )
         .run();
       await expect(
-        importTaprootBackupSectionV1(target, section, handle),
+        importTaprootBackupSectionV1(importTarget, section, importHandle),
       ).resolves.toMatchObject({ dryRun: false });
-      await expect(inspectTaprootSchema(target)).resolves.toMatchObject({
+      await expect(inspectTaprootSchema(importTarget)).resolves.toMatchObject({
         valid: true,
         versions: { schema_version: '9' },
       });
+      await expect(
+        importTarget
+          .prepare(
+            `SELECT COUNT(*) AS count FROM taproot_migrations
+             WHERE applied_at='separate-process-target'`,
+          )
+          .all<{ count: number }>(),
+      ).resolves.toMatchObject({ results: [{ count: 9 }] });
       await expect(
         convertLegacyTaproot042ToBackupSectionV1(
           target,
@@ -235,6 +277,7 @@ describe('Taproot 0.4.2 owner adoption', () => {
     } finally {
       await source.close();
       await target.close();
+      await importTarget.close();
     }
   });
 });

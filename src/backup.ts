@@ -588,10 +588,14 @@ export async function importTaprootBackupSectionV1(
       ? parsePayload(section.derivedPayload)
       : null;
   await binding.backup.validateNamespace(ledgerHandle, section.ledger);
-  if (section.legacySourceLedger)
-    await assertCurrentSchemaSeeds(db, canonical.tables);
+  const importTables = section.legacySourceLedger
+    ? {
+        ...canonical.tables,
+        ...(await assertCurrentSchemaSeeds(db, canonical.tables)),
+      }
+    : canonical.tables;
   const canonicalRows = validateImportTables(
-    canonical.tables,
+    importTables,
     canonicalTables,
     installationId,
   );
@@ -608,7 +612,7 @@ export async function importTaprootBackupSectionV1(
   if (!options.dryRun) {
     const statements = prepareImportStatements(
       db,
-      canonical.tables,
+      importTables,
       canonicalTables,
     );
     if (derived)
@@ -631,18 +635,32 @@ export async function importTaprootBackupSectionV1(
 async function assertCurrentSchemaSeeds(
   db: D1DatabaseLike,
   tables: Record<string, Array<Record<string, unknown>>>,
-): Promise<void> {
+): Promise<{
+  taproot_metadata: Array<Record<string, unknown>>;
+  taproot_migrations: Array<Record<string, unknown>>;
+}> {
   const current = await exportTables(db, '', [
     'taproot_metadata',
     'taproot_migrations',
   ]);
-  for (const table of ['taproot_metadata', 'taproot_migrations'] as const) {
-    if (
-      canonicalJson(tables[table] ?? []) !==
-      canonicalJson(current.tables[table] ?? [])
-    )
-      denied('legacy Taproot conversion schema seeds are not current');
-  }
+  const metadata = [...(current.tables.taproot_metadata ?? [])];
+  const migrations = [...(current.tables.taproot_migrations ?? [])];
+  if (
+    canonicalJson(tables.taproot_metadata ?? []) !== canonicalJson(metadata) ||
+    canonicalJson(stableMigrationIdentity(tables.taproot_migrations ?? [])) !==
+      canonicalJson(stableMigrationIdentity(migrations))
+  )
+    denied('legacy Taproot conversion schema seeds are not current');
+  return {
+    taproot_metadata: metadata,
+    taproot_migrations: migrations,
+  };
+}
+
+function stableMigrationIdentity(
+  rows: readonly Record<string, unknown>[],
+): Array<{ version: unknown; name: unknown }> {
+  return rows.map((row) => ({ version: row.version, name: row.name }));
 }
 
 export async function enumerateResourceBlobDescriptorsV1(

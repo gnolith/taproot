@@ -8,7 +8,9 @@
   current migration catalog.
 - Keep current schema metadata and migration seeds authoritative during legacy
   conversion/import while preserving all legacy canonical entities, revision
-  history, content records, and payload descriptors.
+  history, content records, and payload descriptors. Cross-process adoption
+  compares stable migration identity while retaining the import target's
+  non-semantic migration application timestamps.
 
 - Add the sealed `AuthorizationAdministrationV1` owner protocol for
   revision-bound principal, workspace, grant, and canonical visibility
