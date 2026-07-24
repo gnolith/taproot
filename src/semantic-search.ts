@@ -238,8 +238,14 @@ export interface SemanticSearchAdminV1 extends SemanticSearchAugmenterV1 {
 }
 
 export interface SemanticAdminStatusV1 {
-  configured: number;
+  configured: boolean;
+  configurationCount: number;
+  state: string;
+  revision: number | null;
+  fingerprint: string | null;
+  ready: boolean;
   selectedConfigurationId: string | null;
+  /** @deprecated Use ready. */
   selectedReady: boolean;
   circuitOpen: boolean;
   plans: Array<{
@@ -1333,7 +1339,11 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
     this.#admin(context);
     const configs = await this.#db
       .prepare(
-        `SELECT configuration_id, selected, state, circuit_open, active_generation, ready_generation FROM taproot_semantic_configurations WHERE installation_id=? ORDER BY configuration_id`,
+        `SELECT configuration_id, selected, state, circuit_open,
+                active_generation, ready_generation, configuration_revision,
+                fingerprint
+         FROM taproot_semantic_configurations
+         WHERE installation_id=? ORDER BY configuration_id`,
       )
       .bind(this.#installationId)
       .all<{
@@ -1343,6 +1353,8 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
         circuit_open: number;
         active_generation: number;
         ready_generation: number | null;
+        configuration_revision: number;
+        fingerprint: string;
       }>();
     const plans = await this.#db
       .prepare(
@@ -1361,14 +1373,22 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
         actual_tokens: number;
       }>();
     const selected = configs.results.find((config) => Boolean(config.selected));
+    const ready = Boolean(
+      selected &&
+      selected.state === 'ready' &&
+      selected.ready_generation === selected.active_generation,
+    );
     return {
-      configured: configs.results.length,
+      configured: configs.results.length > 0,
+      configurationCount: configs.results.length,
+      state:
+        selected?.state ??
+        (configs.results.length ? 'unselected' : 'unconfigured'),
+      revision: selected ? Number(selected.configuration_revision) : null,
+      fingerprint: selected?.fingerprint ?? null,
+      ready,
       selectedConfigurationId: selected?.configuration_id ?? null,
-      selectedReady: Boolean(
-        selected &&
-        selected.state === 'ready' &&
-        selected.ready_generation === selected.active_generation,
-      ),
+      selectedReady: ready,
       circuitOpen: Boolean(
         selected?.circuit_open ||
         (selected &&

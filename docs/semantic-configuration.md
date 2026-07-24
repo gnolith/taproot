@@ -13,3 +13,8 @@ selector names, but never resolved credential values. Changing a provider
 model, dimensions, or vector identity advances the vector generation and
 clears readiness until the new generation is built. Lexical search remains
 available while semantic validation or rebuilding is incomplete.
+
+`status()` exposes the selected configuration's durable `state`, `revision`,
+`fingerprint`, and `ready` projection together with boolean `configured` and
+the total `configurationCount`. An offline provider may remain configured but
+not ready; lexical search still remains available.

@@ -391,13 +391,18 @@ describe('persisted SQLite vector and semantic administration', () => {
       await admin.approve(planId, context('installation-a', true));
       await admin.run(planId, context('installation-a', true));
       await admin.select('config-a', context('installation-a', true));
-      expect(await admin.status(context('installation-a', true))).toMatchObject(
-        {
-          selectedConfigurationId: 'config-a',
-          selectedReady: true,
-          circuitOpen: false,
-        },
-      );
+      const readyStatus = await admin.status(context('installation-a', true));
+      expect(readyStatus).toMatchObject({
+        configured: true,
+        configurationCount: 1,
+        state: 'ready',
+        revision: 1,
+        ready: true,
+        selectedConfigurationId: 'config-a',
+        selectedReady: true,
+        circuitOpen: false,
+      });
+      expect(readyStatus.fingerprint).toMatch(/^[0-9a-f]{64}$/u);
 
       const failingEmbed = vi.fn(() =>
         Promise.reject(new Error('secret=do-not-leak')),
