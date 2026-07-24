@@ -3,6 +3,11 @@ import type { TaprootHostWriteCapability } from './assembly-authority.js';
 import { assertTaprootHostWriteCapabilityInternal } from './assembly-authority.js';
 import { InvalidAuthorizationError } from './errors.js';
 import { taprootMigrationNamespace } from './migrations.js';
+import {
+  isExactTaprootSchema,
+  isExactTaprootSequentialMigrationSchema,
+  prepareArchitectureResetStorageStatements,
+} from './schema.js';
 import type {
   MigrationLedgerBackup,
   MigrationLedgerOwnerHandle,
@@ -336,6 +341,7 @@ export async function inspectLegacyTaproot042ForAdoptionV1(
 interface LedgerHandleBinding {
   db: D1DatabaseLike;
   backup: MigrationLedgerBackup;
+  baseIri: string;
 }
 
 const ledgerHandleBindings = new WeakMap<object, LedgerHandleBinding>();
@@ -479,8 +485,37 @@ export function registerTaprootMigrationLedgerOwnerHandleV1(
   ledgerHandleBindings.set(liveDiamondOwnerHandle, {
     db,
     backup: ledgerBackup,
+    baseIri: options.baseIri,
   });
   return liveDiamondOwnerHandle;
+}
+
+/**
+ * Restores Taproot's immutable ledger through Diamond, then converges the
+ * sequential 0001..0009 catalog to the exact current physical schema.
+ */
+export async function restoreTaprootMigrationLedgerV1(
+  db: D1DatabaseLike,
+  ledgerHandle: TaprootMigrationLedgerOwnerHandleV1,
+  ledger: MigrationLedgerSlice,
+): Promise<void> {
+  const binding = assertLedgerHandle(db, ledgerHandle);
+  await binding.backup.restoreNamespace(ledgerHandle, ledger, {
+    mode: 'empty',
+  });
+  const convergence = await prepareSequentialCatalogConvergence(db);
+  await db.batch([
+    ...convergence,
+    db
+      .prepare(
+        `INSERT INTO taproot_metadata(metadata_key, metadata_value)
+         VALUES ('base_iri', ?)
+         ON CONFLICT(metadata_key) DO NOTHING`,
+      )
+      .bind(binding.baseIri),
+  ]);
+  if (!(await isExactTaprootSchema(db)))
+    denied('Taproot migration-ledger restore did not produce current schema');
 }
 
 export async function exportTaprootBackupSectionV1(
@@ -588,10 +623,18 @@ export async function importTaprootBackupSectionV1(
       ? parsePayload(section.derivedPayload)
       : null;
   await binding.backup.validateNamespace(ledgerHandle, section.ledger);
+  const convergence =
+    section.legacySourceLedger && options.dryRun !== true
+      ? await prepareSequentialCatalogConvergence(db)
+      : [];
   const importTables = section.legacySourceLedger
     ? {
         ...canonical.tables,
-        ...(await assertCurrentSchemaSeeds(db, canonical.tables)),
+        ...(await assertCurrentSchemaSeeds(
+          db,
+          canonical.tables,
+          binding.baseIri,
+        )),
       }
     : canonical.tables;
   const canonicalRows = validateImportTables(
@@ -610,11 +653,10 @@ export async function importTaprootBackupSectionV1(
     denied('Taproot backup payload installations do not match');
   await assertEmptyImportTarget(db);
   if (!options.dryRun) {
-    const statements = prepareImportStatements(
-      db,
-      importTables,
-      canonicalTables,
-    );
+    const statements = [
+      ...convergence,
+      ...prepareImportStatements(db, importTables, canonicalTables),
+    ];
     if (derived)
       statements.push(
         ...prepareImportStatements(
@@ -624,6 +666,8 @@ export async function importTaprootBackupSectionV1(
         ),
       );
     if (statements.length) await db.batch(statements);
+    if (section.legacySourceLedger && !(await isExactTaprootSchema(db)))
+      denied('Taproot legacy import did not produce current schema');
   }
   return {
     canonicalRows,
@@ -632,9 +676,19 @@ export async function importTaprootBackupSectionV1(
   };
 }
 
+async function prepareSequentialCatalogConvergence(
+  db: D1DatabaseLike,
+): Promise<readonly ReturnType<D1DatabaseLike['prepare']>[]> {
+  if (await isExactTaprootSchema(db)) return [];
+  if (!(await isExactTaprootSequentialMigrationSchema(db)))
+    denied('Taproot restore target schema is not an exact migration catalog');
+  return prepareArchitectureResetStorageStatements(db);
+}
+
 async function assertCurrentSchemaSeeds(
   db: D1DatabaseLike,
   tables: Record<string, Array<Record<string, unknown>>>,
+  targetBaseIri: string,
 ): Promise<{
   taproot_metadata: Array<Record<string, unknown>>;
   taproot_migrations: Array<Record<string, unknown>>;
@@ -646,15 +700,39 @@ async function assertCurrentSchemaSeeds(
   const metadata = [...(current.tables.taproot_metadata ?? [])];
   const migrations = [...(current.tables.taproot_migrations ?? [])];
   if (
-    canonicalJson(tables.taproot_metadata ?? []) !== canonicalJson(metadata) ||
+    canonicalJson(stableMetadataIdentity(tables.taproot_metadata ?? [])) !==
+      canonicalJson(stableMetadataIdentity(metadata)) ||
     canonicalJson(stableMigrationIdentity(tables.taproot_migrations ?? [])) !==
       canonicalJson(stableMigrationIdentity(migrations))
   )
     denied('legacy Taproot conversion schema seeds are not current');
   return {
-    taproot_metadata: metadata,
+    taproot_metadata: metadata.some((row) => row.metadata_key === 'base_iri')
+      ? metadata
+      : [
+          ...metadata,
+          { metadata_key: 'base_iri', metadata_value: targetBaseIri },
+        ],
     taproot_migrations: migrations,
   };
+}
+
+const stableMetadataKeys = new Set([
+  'schema_version',
+  'canonical_json_version',
+  'rdf_mapping_version',
+  'migration_api_version',
+]);
+
+function stableMetadataIdentity(
+  rows: readonly Record<string, unknown>[],
+): Array<{ metadata_key: unknown; metadata_value: unknown }> {
+  return rows
+    .filter((row) => stableMetadataKeys.has(String(row.metadata_key)))
+    .map((row) => ({
+      metadata_key: row.metadata_key,
+      metadata_value: row.metadata_value,
+    }));
 }
 
 function stableMigrationIdentity(

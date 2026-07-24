@@ -9,8 +9,12 @@
 - Keep current schema metadata and migration seeds authoritative during legacy
   conversion/import while preserving all legacy canonical entities, revision
   history, content records, and payload descriptors. Cross-process adoption
-  compares stable migration identity while retaining the import target's
-  non-semantic migration application timestamps.
+  compares only stable schema/migration identity while retaining the import
+  target's installation metadata and non-semantic migration application
+  timestamps. Fresh restore targets establish their registered canonical base
+  IRI before importing domain state. Add a package-owned migration-ledger
+  restore primitive that converges immutable sequential migration replay to
+  the same exact physical catalog as fresh initialization.
 
 - Add the sealed `AuthorizationAdministrationV1` owner protocol for
   revision-bound principal, workspace, grant, and canonical visibility

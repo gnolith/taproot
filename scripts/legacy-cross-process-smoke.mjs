@@ -7,6 +7,7 @@ import { gunzipSync } from 'node:zlib';
 import {
   createMigrationAssemblyAuthorityV1,
   createMigrationLedgerBackupV1,
+  migrateDiamondStore,
   registerMigrationLedgerOwnerV1,
 } from '@gnolith/diamond';
 import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
@@ -25,7 +26,17 @@ if (phase === 'run') {
   );
   execFileSync(
     process.execPath,
-    [import.meta.filename, 'import', snapshotPath, exchangePath],
+    [import.meta.filename, 'import-fresh', snapshotPath, exchangePath],
+    { stdio: 'inherit' },
+  );
+  execFileSync(
+    process.execPath,
+    [import.meta.filename, 'import-raw', snapshotPath, exchangePath],
+    { stdio: 'inherit' },
+  );
+  execFileSync(
+    process.execPath,
+    [import.meta.filename, 'import-existing', snapshotPath, exchangePath],
     { stdio: 'inherit' },
   );
   console.log('packed exact legacy cross-process adoption passed');
@@ -83,7 +94,11 @@ if (phase === 'run') {
     await legacyDb.close();
     await converter.close();
   }
-} else if (phase === 'import') {
+} else if (
+  phase === 'import-fresh' ||
+  phase === 'import-raw' ||
+  phase === 'import-existing'
+) {
   const snapshotBytes = readFileSync(snapshotPath);
   assert(
     sha256(snapshotBytes) === expectedSnapshotSha256,
@@ -95,11 +110,37 @@ if (phase === 'run') {
   );
   const target = new NodeSqliteDatabase(':memory:');
   try {
-    const runtime = await initializeTarget(
-      target,
-      snapshot.manifest.installationId,
-      snapshot.manifest.baseIri,
-    );
+    const importBaseIri = 'https://independent-import-target.invalid/gnolith';
+    const runtime =
+      phase === 'import-fresh' || phase === 'import-raw'
+        ? await registerBlankTarget(
+            target,
+            snapshot.manifest.installationId,
+            importBaseIri,
+          )
+        : await initializeTarget(
+            target,
+            snapshot.manifest.installationId,
+            importBaseIri,
+          );
+    if (phase === 'import-fresh') {
+      await backup.restoreTaprootMigrationLedgerV1(
+        target,
+        runtime.handle,
+        section.ledger,
+      );
+      const restored = await taproot.inspectTaprootPersistence(target);
+      assert(
+        restored.current === true,
+        'blank ledger restore did not converge to current persistence',
+      );
+    }
+    if (phase === 'import-raw')
+      await runtime.ledgerBackup.restoreNamespace(
+        runtime.owner,
+        section.ledger,
+        { mode: 'empty' },
+      );
     await target
       .prepare(`UPDATE taproot_migrations SET applied_at='importer-process'`)
       .run();
@@ -152,6 +193,16 @@ if (phase === 'run') {
       Number(appliedAt.results[0]?.count) === 9,
       'cross-process import overwrote current migration provenance',
     );
+    const baseIri = await target
+      .prepare(
+        `SELECT metadata_value FROM taproot_metadata
+         WHERE metadata_key='base_iri'`,
+      )
+      .all();
+    assert(
+      baseIri.results[0]?.metadata_value === importBaseIri,
+      'cross-process import overwrote current installation metadata',
+    );
     const ledger = await runtime.ledgerBackup.exportNamespace(runtime.owner);
     assert(
       ledger.entries.length === 9 &&
@@ -184,6 +235,15 @@ if (phase === 'run') {
 
 async function initializeTarget(db, installationId, baseIri) {
   await taproot.initializeTaproot(db, { baseIri });
+  return registerTarget(db, installationId, baseIri);
+}
+
+async function registerBlankTarget(db, installationId, baseIri) {
+  await migrateDiamondStore(db);
+  return registerTarget(db, installationId, baseIri);
+}
+
+async function registerTarget(db, installationId, baseIri) {
   const assembly = createMigrationAssemblyAuthorityV1(db, installationId);
   const owner = await registerMigrationLedgerOwnerV1({
     db,

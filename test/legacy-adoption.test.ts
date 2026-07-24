@@ -199,7 +199,8 @@ describe('Taproot 0.4.2 owner adoption', () => {
           }),
         ]),
       );
-      await initializeTaproot(importTarget, { baseIri });
+      const importBaseIri = 'https://independent-import-target.example';
+      await initializeTaproot(importTarget, { baseIri: importBaseIri });
       await importTarget
         .prepare(
           `UPDATE taproot_migrations SET applied_at='separate-process-target'`,
@@ -227,8 +228,12 @@ describe('Taproot 0.4.2 owner adoption', () => {
       );
       const importHandle = registerTaprootMigrationLedgerOwnerHandleV1(
         importTarget,
-        { baseIri },
-        createTaprootHostWriteCapability(importTarget, { baseIri }, importKey),
+        { baseIri: importBaseIri },
+        createTaprootHostWriteCapability(
+          importTarget,
+          { baseIri: importBaseIri },
+          importKey,
+        ),
         importOwner,
         importBackup,
       );
@@ -267,6 +272,16 @@ describe('Taproot 0.4.2 owner adoption', () => {
           )
           .all<{ count: number }>(),
       ).resolves.toMatchObject({ results: [{ count: 9 }] });
+      await expect(
+        importTarget
+          .prepare(
+            `SELECT metadata_value FROM taproot_metadata
+             WHERE metadata_key='base_iri'`,
+          )
+          .all<{ metadata_value: string }>(),
+      ).resolves.toMatchObject({
+        results: [{ metadata_value: importBaseIri }],
+      });
       await expect(
         convertLegacyTaproot042ToBackupSectionV1(
           target,

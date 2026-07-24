@@ -1819,6 +1819,12 @@ const taprootCurrentCatalogStatements = [
   ...taprootArchitectureResetSchemaStatements,
 ].map(architectureResetCatalogSql);
 
+const taprootSequentialMigrationCatalogStatements = [
+  ...taprootPreCompleteSearchCatalogStatements,
+  ...taprootCompleteSearchSchemaStatements,
+  ...taprootArchitectureResetSchemaStatements,
+];
+
 export const taprootPreArchitectureResetCatalogStatements = [
   ...taprootPreCompleteSearchCatalogStatements,
   ...taprootCompleteSearchSchemaStatements,
@@ -2779,6 +2785,13 @@ export async function isExactTaprootSchema(
   db: SqliteDatabaseLike,
 ): Promise<boolean> {
   return matchesExactCatalog(db, taprootCurrentCatalogStatements);
+}
+
+/** Exact catalog produced by replaying immutable migrations 0001 through 0009. */
+export async function isExactTaprootSequentialMigrationSchema(
+  db: SqliteDatabaseLike,
+): Promise<boolean> {
+  return matchesExactCatalog(db, taprootSequentialMigrationCatalogStatements);
 }
 
 /** @internal Redacted structural diagnostics used by migration tests. */
