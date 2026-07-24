@@ -618,6 +618,7 @@ describe('TaprootRepository on Workerd D1', () => {
       expect(itemNoop).toMatchObject({
         previousRevision: 1,
         newRevision: 1,
+        changed: false,
         eventId: item.eventId,
         contentHash: item.contentHash,
         quadPatch: { deleted: 0, inserted: 0 },
@@ -625,6 +626,7 @@ describe('TaprootRepository on Workerd D1', () => {
       expect(propertyNoop).toMatchObject({
         previousRevision: 1,
         newRevision: 1,
+        changed: false,
         eventId: property.eventId,
         contentHash: property.contentHash,
         quadPatch: { deleted: 0, inserted: 0 },
@@ -647,6 +649,7 @@ describe('TaprootRepository on Workerd D1', () => {
       expect(changed).toMatchObject({
         previousRevision: 1,
         newRevision: 2,
+        changed: true,
       });
       await expect(
         env.repository.listEntityRevisions('Q1'),

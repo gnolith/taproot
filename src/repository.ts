@@ -1743,6 +1743,7 @@ export class TaprootRepository {
         entityId: entity.id,
         previousRevision: null,
         newRevision: entity.lastrevid,
+        changed: true,
         entity,
         quadPatch: {
           ...patch.readResult(results, patchOffset),
@@ -1967,6 +1968,7 @@ export class TaprootRepository {
         entityId: id,
         previousRevision: previous,
         newRevision: next.lastrevid,
+        changed: true,
         entity: next,
         quadPatch: {
           ...patch.readResult(results, patchOffset),
@@ -2073,6 +2075,7 @@ export class TaprootRepository {
         entityId: id,
         previousRevision: revision,
         newRevision: revision,
+        changed: false,
         entity,
         quadPatch: { deleted: 0, inserted: 0 },
         eventId: row.event_id,

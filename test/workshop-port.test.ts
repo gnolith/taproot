@@ -146,6 +146,7 @@ describe('TaprootWorkshopPortV1', () => {
           entityId: 'Q1',
           previousRevision: 2,
           newRevision: 2,
+          changed: false,
         });
         await expect(canonicalWriteState(env.db, 'Q1')).resolves.toEqual(
           beforeIdenticalLabel,

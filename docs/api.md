@@ -79,6 +79,12 @@ a `TaprootHostWriteCapability` after authorization bootstrap and is bound to
 the exact database object and normalized base IRI. Neither token can be
 serialized or reused across bindings or installations. Redirects must target a live entity of the same type and cannot
 create a cycle. `resolveEntity` follows a bounded chain and reports every hop.
+`MutationReceipt.changed` is `true` only when the operation committed a new
+canonical entity revision. An identical Item or Property label update returns
+`changed: false`, preserves `previousRevision === newRevision`, and does not
+advance RDF, authorization, source-event, search, or materialization state.
+The Workshop port exposes the same required field on its `WriteResult`; callers
+must consume it instead of inferring disposition from mutable counters.
 
 `createStatement` and `createReference` build correctly shaped values. Import
 accepts trusted explicit Q/P IDs and advances counters. `importEntities`

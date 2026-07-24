@@ -40,6 +40,7 @@ writeFileSync(
     createTaprootWorkshopPortV1,
     type AuthorizationContext,
     type D1DatabaseLike,
+    type MutationReceipt,
     type TaprootHostWriteCapability,
     type TaprootWorkshopPortV1,
   } from '@gnolith/taproot';
@@ -97,7 +98,7 @@ writeFileSync(
     { idempotencyKey: 'create-item-1' },
     live,
   );
-  await workshop.mutateEntity(
+  const labelResult = await workshop.mutateEntity(
     'Q1',
     [{
       command: { type: 'set-label', language: 'en', value: 'Example' },
@@ -106,6 +107,9 @@ writeFileSync(
     { expectedRevision: 1, idempotencyKey: 'set-label-1' },
     live,
   );
+  const changed: boolean = labelResult.changed;
+  declare const receipt: MutationReceipt;
+  const publicChanged: boolean = receipt.changed;
   declare const resourceInput: Parameters<TaprootWorkshopPortV1['createResource']>[0];
   declare const annotationInput: Parameters<TaprootWorkshopPortV1['createAnnotation']>[0];
   await workshop.createResource(resourceInput, { idempotencyKey: 'create-resource-1' }, live);
@@ -114,7 +118,7 @@ writeFileSync(
   await workshop.createAnnotation(annotationInput, { idempotencyKey: 'create-annotation-1' }, live);
   await workshop.updateAnnotation('annotation-1', 1, annotationInput, { idempotencyKey: 'update-annotation-1' }, live);
   await workshop.deleteAnnotation('annotation-1', 2, { idempotencyKey: 'delete-annotation-1' }, live);
-  void [db, context, producer, kind, health, fragment, blob, port];
+  void [db, context, producer, kind, health, fragment, blob, port, changed, publicChanged];
   `,
 );
 const diamond =

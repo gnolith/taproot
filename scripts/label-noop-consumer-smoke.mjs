@@ -87,7 +87,11 @@ try {
       authorization: policy(context.authorizationRevision),
     },
   );
-  if (changed.previousRevision !== 1 || changed.newRevision !== 2)
+  if (
+    changed.previousRevision !== 1 ||
+    changed.newRevision !== 2 ||
+    changed.changed !== true
+  )
     throw new Error('packed changed label did not revise exactly once');
 
   context = await resolve(port);
@@ -121,9 +125,23 @@ try {
   if (
     JSON.stringify(first) !== JSON.stringify(concurrent) ||
     first.previousRevision !== 2 ||
-    first.newRevision !== 2
+    first.newRevision !== 2 ||
+    first.changed !== false
   )
     throw new Error('packed public identical Item label receipt was unstable');
+  const expectedPublicReceiptBytes = JSON.stringify({
+    entityId: 'Q1',
+    previousRevision: 2,
+    newRevision: 2,
+    changed: false,
+    status: 'committed',
+    authorizationRevision: context.authorizationRevision,
+    searchGeneration: context.authorizationRevision,
+  });
+  if (JSON.stringify(first) !== expectedPublicReceiptBytes)
+    throw new Error(
+      `packed public no-op receipt bytes changed: ${JSON.stringify(first)}`,
+    );
   const property = await taproot.setLabel(
     db,
     options,
@@ -137,7 +155,11 @@ try {
       authorization: policy(context.authorizationRevision),
     },
   );
-  if (property.previousRevision !== 1 || property.newRevision !== 1)
+  if (
+    property.previousRevision !== 1 ||
+    property.newRevision !== 1 ||
+    property.changed !== false
+  )
     throw new Error('packed public identical Property label revised');
   const identicalRequest = [
     {
@@ -163,7 +185,10 @@ try {
       context,
     ),
   ]);
-  if (JSON.stringify(adapterReceipt) !== JSON.stringify(adapterConcurrent))
+  if (
+    JSON.stringify(adapterReceipt) !== JSON.stringify(adapterConcurrent) ||
+    adapterReceipt.changed !== false
+  )
     throw new Error('packed Workshop concurrent retry receipt was unstable');
   assertState(before, await canonicalState(db), 'before restart');
 

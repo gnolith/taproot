@@ -313,6 +313,8 @@ export interface MutationReceipt {
   entityId: EntityId;
   previousRevision: number | null;
   newRevision: number;
+  /** True only when this operation committed a new canonical entity revision. */
+  changed: boolean;
   status: 'committed';
   authorizationRevision: number;
   searchGeneration: number;
@@ -338,6 +340,7 @@ function mutationReceipt(result: WriteResult): MutationReceipt {
     entityId: result.entityId,
     previousRevision: result.previousRevision,
     newRevision: result.newRevision,
+    changed: result.changed,
     status: 'committed',
     authorizationRevision: result.authorizationRevision!,
     searchGeneration: result.searchGeneration!,

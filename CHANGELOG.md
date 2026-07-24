@@ -2,6 +2,11 @@
 
 ## 0.5.0
 
+- Identical Item and Property label updates are true semantic no-ops. Public
+  mutation receipts and Workshop-facing write results expose an explicit
+  `changed` disposition, while no-op writes retain authorization validation
+  and an atomic current-state assertion without advancing canonical history,
+  RDF, authorization, source-event, search, or materialization state.
 - Fix exact Taproot 0.4.2 owner adoption to validate against an immutable,
   explicit migration ID/checksum manifest captured from the public 0.4.2
   package with Diamond 0.4.1. Legacy evidence is no longer derived from the
