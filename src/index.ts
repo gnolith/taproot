@@ -131,6 +131,7 @@ export * from './canonical.js';
 export * from './content-domain.js';
 export * from './authorization.js';
 export * from './authorization-bootstrap.js';
+export * from './authorization-administration.js';
 export * from './errors.js';
 export * from './migrations.js';
 export * from './rdf.js';

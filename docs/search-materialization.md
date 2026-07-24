@@ -84,6 +84,12 @@ pending at attempt zero and appear dynamically in `blockedProducerKinds`.
 Resource payloads are loaded only through the injected portable payload-store
 capability, with byte and SHA-256 integrity fences before projection.
 
+Every adopted external kind has a checkpoint in each enrolled corpus.
+Successful projection and a verified supersession both advance that kind only
+through the exact processed source sequence. Consequently, a run reporting no
+remaining jobs cannot stay `building` merely because its completed external or
+Item-coalesced events were absent from watermark accounting.
+
 ## Qualification
 
 The same black-box lifecycle suite runs on persisted Node SQLite and real

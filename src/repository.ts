@@ -8,6 +8,7 @@ import type {
   SqliteDatabaseLike,
   SqlitePreparedStatementLike,
 } from './sqlite-types.js';
+import { coordinatedStatements } from './atomic-coordination.js';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
 import {
@@ -1720,6 +1721,7 @@ export class TaprootRepository {
     const ownership = this.#ownershipPatch(entity.id, [], newQuads);
     const ownershipOffset = statements.length;
     statements.push(...ownership.statements);
+    statements.push(...coordinatedStatements(metadata));
     try {
       const results = await this.#db.batch(statements);
       const result = {
@@ -1912,6 +1914,7 @@ export class TaprootRepository {
     const ownership = this.#ownershipPatch(id, oldQuads, newQuads);
     const ownershipOffset = statements.length;
     statements.push(...ownership.statements);
+    statements.push(...coordinatedStatements(edit));
     try {
       const results = await this.#db.batch(statements);
       const result = {

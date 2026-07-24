@@ -699,6 +699,17 @@ async function persistDescriptor(runtime: RuntimeBinding): Promise<void> {
       row.owning_domain !== runtime.ownerDomain
     )
       denied('external producer descriptor conflicts with durable state');
+    await runtime.db
+      .prepare(
+        `INSERT INTO taproot_search_kind_checkpoints(
+           corpus_id, source_kind, enqueued_sequence, applied_sequence
+         )
+         SELECT corpus_id, ?, 0, 0
+         FROM taproot_search_corpora WHERE installation_id = ?
+         ON CONFLICT(corpus_id, source_kind) DO NOTHING`,
+      )
+      .bind(runtime.storageKey, runtime.installationId)
+      .run();
     return;
   }
   await runtime.db.batch([
@@ -760,6 +771,16 @@ async function persistDescriptor(runtime: RuntimeBinding): Promise<void> {
         now,
         runtime.installationId,
       ),
+    runtime.db
+      .prepare(
+        `INSERT INTO taproot_search_kind_checkpoints(
+           corpus_id, source_kind, enqueued_sequence, applied_sequence
+         )
+         SELECT corpus_id, ?, 0, 0
+         FROM taproot_search_corpora WHERE installation_id = ?
+         ON CONFLICT(corpus_id, source_kind) DO NOTHING`,
+      )
+      .bind(runtime.storageKey, runtime.installationId),
     runtime.db
       .prepare(
         `INSERT INTO taproot_unified_search_producer_admin_audit(

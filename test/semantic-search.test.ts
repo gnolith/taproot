@@ -116,6 +116,153 @@ describe('embedding provider conformance', () => {
 });
 
 describe('persisted SQLite vector and semantic administration', () => {
+  it('persists declarative selector identities with revision CAS, restart-safe idempotency, and safe generation changes', async () => {
+    const { db } = await database();
+    try {
+      const credentials: string[] = [];
+      const fetcher: typeof fetch = (_input, init) => {
+        expect(init?.redirect).toBe('error');
+        const authorization = new Headers(init?.headers).get('authorization');
+        if (authorization) credentials.push(authorization);
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              embeddings: [[1, 0]],
+              usage: { total_tokens: 1 },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        );
+      };
+      const create = () =>
+        createSemanticSearchAdminV1(db, {
+          installationId: 'installation-a',
+          fetch: fetcher,
+          resolveCredential: (selector) =>
+            selector === 'ollama-local' ? 'runtime-secret' : undefined,
+        });
+      const configuration = {
+        version: 1 as const,
+        id: 'declarative',
+        name: 'declarative',
+        provider: {
+          kind: 'ollama-compatible' as const,
+          endpoint: 'http://127.0.0.1:11434',
+          model: 'nomic-embed-text',
+          dimensions: 2,
+          metric: 'cosine' as const,
+          credentialSelector: 'ollama-local',
+          allowPrivateEndpoint: true,
+          redirectPolicy: 'error' as const,
+        },
+        vector: { kind: 'sqlite' as const },
+      };
+      await create().configure(
+        configuration,
+        { expectedRevision: 0, idempotencyKey: 'configure-v1' },
+        context('installation-a', true),
+      );
+      await create().configure(
+        configuration,
+        { expectedRevision: 0, idempotencyKey: 'configure-v1' },
+        context('installation-a', true),
+      );
+      expect(credentials).toEqual(['Bearer runtime-secret']);
+      const persisted = await db
+        .prepare(
+          `SELECT configuration_revision, active_generation,
+                  provider_credential_selector, provider_private_approved
+           FROM taproot_semantic_configurations
+           WHERE configuration_id='declarative'`,
+        )
+        .all<Record<string, unknown>>();
+      expect(persisted.results[0]).toMatchObject({
+        configuration_revision: 1,
+        active_generation: 1,
+        provider_credential_selector: 'ollama-local',
+        provider_private_approved: 1,
+      });
+      expect(JSON.stringify(persisted.results[0])).not.toContain(
+        'runtime-secret',
+      );
+      await expect(
+        create().configure(
+          {
+            ...configuration,
+            provider: { ...configuration.provider, model: 'changed' },
+          },
+          { expectedRevision: 0, idempotencyKey: 'stale' },
+          context('installation-a', true),
+        ),
+      ).rejects.toThrow(/revision conflict/u);
+      const changed = {
+        ...configuration,
+        provider: {
+          ...configuration.provider,
+          model: 'changed',
+          dimensions: 3,
+        },
+      };
+      await create().configure(
+        changed,
+        { expectedRevision: 1, idempotencyKey: 'configure-v2' },
+        context('installation-a', true),
+      );
+      expect(
+        (
+          await db
+            .prepare(
+              `SELECT configuration_revision, active_generation, ready_generation
+               FROM taproot_semantic_configurations
+               WHERE configuration_id='declarative'`,
+            )
+            .all<Record<string, unknown>>()
+        ).results[0],
+      ).toMatchObject({
+        configuration_revision: 2,
+        active_generation: 2,
+        ready_generation: null,
+      });
+      await create().configure(
+        changed,
+        { expectedRevision: 1, idempotencyKey: 'configure-v2' },
+        context('installation-a', true),
+      );
+      await expect(
+        create().configure(
+          {
+            ...configuration,
+            id: 'blocked-private',
+            name: 'blocked-private',
+            provider: {
+              ...configuration.provider,
+              allowPrivateEndpoint: false,
+            },
+          },
+          { expectedRevision: 0, idempotencyKey: 'blocked-private' },
+          context('installation-a', true),
+        ),
+      ).rejects.toThrow(/private.*endpoint/u);
+      await expect(
+        create().configure(
+          {
+            ...configuration,
+            id: 'redirect',
+            name: 'redirect',
+            provider: {
+              ...configuration.provider,
+              redirectPolicy: 'same-origin' as never,
+            },
+          },
+          { expectedRevision: 0, idempotencyKey: 'redirect' },
+          context('installation-a', true),
+        ),
+      ).rejects.toThrow(/redirect policy/u);
+    } finally {
+      await db.close();
+    }
+  });
+
   it('persists exact vectors, isolates installations/configurations, filters authorization, and deletes safely', async () => {
     const { db, path } = await database();
     const vector = createSqliteVectorIndexV1(db);

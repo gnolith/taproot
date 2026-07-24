@@ -6,14 +6,21 @@ import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
 import { Miniflare } from 'miniflare';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  KNOWLEDGE_POLICY_CAPABILITY,
+  KNOWLEDGE_WRITE_CAPABILITY,
+  TaprootContentRepositoryV1,
   bootstrapTaprootAuthorization,
+  createInstallationAuthorizationGuard,
+  createItem,
   createTaprootHostWriteCapability,
   initializeTaproot,
   type AuthorizationContext,
+  type VisibilityScopeV1,
 } from '../src/index.js';
 import {
   registerExternalProducerKindV1,
   registerExternalProducerV1,
+  createAuthorizedSearchServiceV1,
   createSearchMaterializationAdminGuardV1,
   type ExternalProducer,
 } from '../src/search.js';
@@ -315,6 +322,31 @@ describe('generic external producer boundary', () => {
           superseded: 1,
           deferred: 0,
         });
+        await expect(
+          materialization.health(adminContext()),
+        ).resolves.toMatchObject({
+          status: 'healthy',
+          pendingJobs: 0,
+          sourceHighWatermark: 2,
+          activeAppliedWatermark: 2,
+        });
+        const search = createAuthorizedSearchServiceV1(env.db, {
+          installationId,
+        });
+        await expect(
+          search.search(
+            { text: 'Restart-safe source', kinds: [registered.kind] },
+            readerContext(),
+          ),
+        ).resolves.toMatchObject({
+          results: [{ sourceId: source.sourceId, sourceRevision: '2' }],
+        });
+        await expect(
+          search.search(
+            { text: 'definitely absent text', kinds: [registered.kind] },
+            readerContext(),
+          ),
+        ).resolves.toEqual({ results: [] });
         const secondPredecessor = await registered.currentPredecessor(
           source.sourceId,
         );
@@ -389,12 +421,211 @@ describe('generic external producer boundary', () => {
             maxRebuildRoots: 10,
           }),
         ).resolves.toMatchObject({ completed: 1, deferred: 0 });
+        await expect(
+          reopenedMaterialization.health(adminContext()),
+        ).resolves.toMatchObject({
+          status: 'healthy',
+          pendingJobs: 0,
+          sourceHighWatermark: 3,
+          activeAppliedWatermark: 3,
+        });
       } finally {
         await env.close();
       }
     });
   }
 });
+
+for (const runtime of [nativeRestartRuntime(), workerdRestartRuntime()]) {
+  it(`converges 15 mixed built-in and external events across ${runtime.name} restart`, async () => {
+    let env = await runtime.open();
+    const sources = ['task', 'memory', 'prompt'].map((kind) => ({
+      kind,
+      sourceId: `${kind}-1`,
+      sourceRevision: '1',
+      sourcePolicyRevision: 1,
+      canonical: { title: `${kind} canonical record` },
+    }));
+    try {
+      await initializeTaproot(env.db, options);
+      const key = await crypto.subtle.generateKey(
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const authority = createTaprootHostWriteCapability(env.db, options, key);
+      await bootstrapTaprootAuthorization(
+        env.db,
+        options,
+        authority,
+        installationId,
+      );
+      const materialization = await createSearchMaterializationAdminGuardV1(
+        env.db,
+        options,
+        authority,
+      );
+      await materialization.initialize(mixedAdmin(1));
+      const guard = await createInstallationAuthorizationGuard(
+        env.db,
+        options,
+        authority,
+      );
+      await createItem(env.db, options, guard, mixedWriter(1), {
+        id: 'Q1',
+        labels: {
+          en: { language: 'en', value: 'Built-in convergence item' },
+        },
+        authorization: mixedPolicy(1),
+      });
+      const content = new TaprootContentRepositoryV1(env.db, {
+        installationId,
+      });
+      const resourceText = 'Built-in convergence resource';
+      const resource = await content.createResource(
+        {
+          id: 'resource-1',
+          itemId: 'Q1',
+          payload: { kind: 'inline-text', text: resourceText },
+          mediaType: 'text/plain',
+          integrity: {
+            algorithm: 'sha256',
+            digest: await sha256Text(resourceText),
+            byteLength: new TextEncoder().encode(resourceText).byteLength,
+          },
+        },
+        mixedContentMetadata(2),
+      );
+      await content.createAnnotation(
+        {
+          id: 'annotation-1',
+          body: { kind: 'text', text: 'Built-in convergence annotation' },
+          target: { kind: 'resource', sourceId: resource.id },
+        },
+        mixedContentMetadata(3),
+      );
+      await env.db
+        .prepare(
+          `CREATE TABLE fixture_restart_owner_records(
+             source_id TEXT PRIMARY KEY, revision TEXT NOT NULL
+           ) STRICT`,
+        )
+        .run();
+      const registered: Array<
+        Awaited<ReturnType<typeof registerNamedProducer>>
+      > = [];
+      for (const source of sources) {
+        const producer = await registerNamedProducer(env.db, source);
+        registered.push(producer);
+        let predecessor = await producer.currentPredecessor(source.sourceId);
+        for (let revision = 1; revision <= 4; revision += 1) {
+          source.sourceRevision = String(revision);
+          await commitRestartMutation(producer, source, predecessor);
+          predecessor = await producer.currentPredecessor(source.sourceId);
+        }
+      }
+      const high = await env.db
+        .prepare(
+          `SELECT MAX(sequence) AS high
+           FROM taproot_unified_search_source_events
+           WHERE installation_id = ?`,
+        )
+        .bind(installationId)
+        .all<{ high: number }>();
+      expect(Number(high.results[0]?.high)).toBe(15);
+      await expect(
+        materialization.run(mixedAdmin(4), {
+          maxJobs: 100,
+          maxRebuildRoots: 100,
+          maxChunkBytes: 64,
+          leaseMilliseconds: 30_000,
+        }),
+      ).resolves.toMatchObject({
+        claimed: 15,
+        completed: 6,
+        superseded: 9,
+        deferred: 0,
+        dead: 0,
+      });
+      await expect(
+        materialization.health(mixedAdmin(4)),
+      ).resolves.toMatchObject({
+        status: 'healthy',
+        pendingJobs: 0,
+        leasedJobs: 0,
+        sourceHighWatermark: 15,
+        activeAppliedWatermark: 15,
+      });
+      const search = createAuthorizedSearchServiceV1(env.db, {
+        installationId,
+        content,
+      });
+      for (const [index, source] of sources.entries()) {
+        await expect(
+          search.search(
+            {
+              text: `${source.kind} lexical convergence`,
+              kinds: [registered[index]!.kind],
+            },
+            mixedReader(4),
+          ),
+        ).resolves.toMatchObject({
+          results: [
+            {
+              sourceId: source.sourceId,
+              sourceRevision: '4',
+            },
+          ],
+        });
+      }
+      await expect(
+        search.search(
+          {
+            text: 'absent external lexical value',
+            kinds: registered.map(({ kind }) => kind),
+          },
+          mixedReader(4),
+        ),
+      ).resolves.toEqual({ results: [] });
+
+      await env.close();
+      env = await runtime.open();
+      const rebound: Array<Awaited<ReturnType<typeof registerNamedProducer>>> =
+        [];
+      for (const source of sources)
+        rebound.push(await registerNamedProducer(env.db, source));
+      const reopenedKey = await crypto.subtle.generateKey(
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const reopened = await createSearchMaterializationAdminGuardV1(
+        env.db,
+        options,
+        createTaprootHostWriteCapability(env.db, options, reopenedKey),
+      );
+      await expect(reopened.health(mixedAdmin(4))).resolves.toMatchObject({
+        status: 'healthy',
+        pendingJobs: 0,
+        sourceHighWatermark: 15,
+        activeAppliedWatermark: 15,
+      });
+      const reopenedSearch = createAuthorizedSearchServiceV1(env.db, {
+        installationId,
+      });
+      await expect(
+        reopenedSearch.search(
+          { text: 'prompt lexical convergence', kinds: [rebound[2]!.kind] },
+          mixedReader(4),
+        ),
+      ).resolves.toMatchObject({
+        results: [{ sourceId: 'prompt-1', sourceRevision: '4' }],
+      });
+    } finally {
+      await env.close();
+    }
+  }, 120_000);
+}
 
 type RestartSource = {
   sourceId: string;
@@ -466,6 +697,56 @@ async function registerRestartProducer(
   return registerExternalProducerV1(db, options, authority, producer);
 }
 
+async function registerNamedProducer(
+  db: D1DatabaseLike,
+  source: RestartSource & { kind: string },
+) {
+  const key = await crypto.subtle.generateKey(
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const authority = createTaprootHostWriteCapability(db, options, key);
+  const kind = await registerExternalProducerKindV1(db, options, authority, {
+    installationId,
+    namespace: 'workshop.example',
+    localName: source.kind,
+    ownerDomain: `${source.kind}-owner`,
+    adapter: {
+      kind: 'taproot-external-owner-transaction-adapter-v1',
+      prepare(token) {
+        const input = token as { sourceId: string; revision: string };
+        return Promise.resolve([
+          db
+            .prepare(
+              `INSERT INTO fixture_restart_owner_records(source_id, revision)
+               VALUES (?, ?)
+               ON CONFLICT(source_id) DO UPDATE SET revision=excluded.revision`,
+            )
+            .bind(input.sourceId, input.revision),
+        ]);
+      },
+    },
+  });
+  return registerExternalProducerV1(db, options, authority, {
+    descriptor: {
+      registration: kind.registration,
+      implementationVersion: '1.0.0',
+      fingerprint: 'e'.repeat(64),
+      projectionVersion: `${source.kind}-projection-v1`,
+      changeClasses: ['canonical'],
+    },
+    enumerate: () => Promise.resolve({ ids: [source.sourceId], cursor: null }),
+    loadExact: () => Promise.resolve(source),
+    project: () =>
+      Promise.resolve({
+        text: `${source.kind} lexical convergence revision ${source.sourceRevision}`,
+      }),
+    authorize: () => Promise.resolve(true),
+    hydrate: () => Promise.resolve(source.canonical),
+  });
+}
+
 function commitRestartMutation(
   registered: Awaited<ReturnType<typeof registerRestartProducer>>,
   source: RestartSource,
@@ -518,6 +799,66 @@ function adminContext(): AuthorizationContext {
     capabilities: ['search:admin'],
     authorizationRevision: 1,
   };
+}
+
+function readerContext(): AuthorizationContext {
+  return {
+    ...adminContext(),
+    capabilities: [],
+  };
+}
+
+const PUBLIC: VisibilityScopeV1 = { version: 1, clauses: [] };
+
+function mixedWriter(revision: number): AuthorizationContext {
+  return {
+    installationId,
+    principalId: 'principal-1',
+    activeWorkspaceId: 'workspace-1',
+    workspaceIds: ['workspace-1'],
+    capabilities: [KNOWLEDGE_WRITE_CAPABILITY, KNOWLEDGE_POLICY_CAPABILITY],
+    authorizationRevision: revision,
+  };
+}
+
+function mixedAdmin(revision: number): AuthorizationContext {
+  return {
+    ...mixedWriter(revision),
+    capabilities: ['search:admin'],
+  };
+}
+
+function mixedReader(revision: number): AuthorizationContext {
+  return { ...mixedWriter(revision), capabilities: [] };
+}
+
+function mixedPolicy(revision: number) {
+  return {
+    installationId,
+    workspaceId: 'workspace-1',
+    ownerPrincipalId: 'principal-1',
+    visibility: PUBLIC,
+    statementRestrictions: {},
+    expectedAuthorizationRevision: revision,
+  };
+}
+
+function mixedContentMetadata(revision: number) {
+  return {
+    context: mixedWriter(revision),
+    attribution: { id: 'principal-1', kind: 'human' as const },
+    workspaceId: 'workspace-1',
+    ownerPrincipalId: 'principal-1',
+    visibility: PUBLIC,
+    expectedAuthorizationRevision: revision,
+  };
+}
+
+async function sha256Text(value: string): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)),
+  );
+  return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function workerdRestartRuntime() {

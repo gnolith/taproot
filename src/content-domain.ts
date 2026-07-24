@@ -25,6 +25,7 @@ import type {
   AuthorizationContext,
   VisibilityScopeV1,
 } from './types.js';
+import { coordinatedStatements } from './atomic-coordination.js';
 
 export const RESOURCE_INLINE_TEXT_MAX_BYTES = 65_536;
 
@@ -233,7 +234,15 @@ export class TaprootContentRepositoryV1 {
       modifiedAt: now,
       deletedAt: null,
     };
-    await this.#commit('resource', record.id, null, record, 'create', context);
+    await this.#commit(
+      'resource',
+      record.id,
+      null,
+      record,
+      'create',
+      context,
+      coordinatedStatements(metadata),
+    );
     return clone(record);
   }
 
@@ -279,6 +288,7 @@ export class TaprootContentRepositoryV1 {
       record,
       'update',
       context,
+      coordinatedStatements(metadata),
     );
     return clone(record);
   }
@@ -310,6 +320,7 @@ export class TaprootContentRepositoryV1 {
       record,
       'delete',
       context,
+      coordinatedStatements(metadata),
     );
     return clone(record);
   }
@@ -415,6 +426,7 @@ export class TaprootContentRepositoryV1 {
       record,
       'create',
       context,
+      coordinatedStatements(metadata),
     );
     return clone(record);
   }
@@ -456,6 +468,7 @@ export class TaprootContentRepositoryV1 {
       record,
       'update',
       context,
+      coordinatedStatements(metadata),
     );
     return clone(record);
   }
@@ -487,6 +500,7 @@ export class TaprootContentRepositoryV1 {
       record,
       'delete',
       context,
+      coordinatedStatements(metadata),
     );
     return clone(record);
   }
@@ -627,6 +641,7 @@ export class TaprootContentRepositoryV1 {
     record: ResourceV1 | AnnotationV1,
     eventType: string,
     context: AuthorizationContext,
+    coordinated: readonly SqlitePreparedStatementLike[] = [],
   ): Promise<void> {
     const hash = await canonicalSearchHashV1(record);
     const predecessor = await readPersistedSearchSourceRegistryV1(
@@ -775,6 +790,7 @@ export class TaprootContentRepositoryV1 {
           ]
         : []),
       ...rdfPatch.statements,
+      ...coordinated,
       ...event.statements,
     ]);
   }

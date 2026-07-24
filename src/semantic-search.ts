@@ -154,7 +154,46 @@ export interface SemanticConfigurationInputV1 {
   vectorEndpoint?: string;
 }
 
+export type SemanticRedirectPolicyV1 = 'error';
+
+export interface SemanticConfigurationV1 {
+  version: 1;
+  id: string;
+  name: string;
+  provider: {
+    kind: 'openai-compatible' | 'ollama-compatible';
+    endpoint: string;
+    model: string;
+    dimensions: number;
+    metric: VectorMetricV1;
+    credentialSelector: string | null;
+    allowPrivateEndpoint: boolean;
+    redirectPolicy: SemanticRedirectPolicyV1;
+  };
+  vector:
+    | { kind: 'sqlite' }
+    | {
+        kind: 'qdrant';
+        endpoint: string;
+        collection: string;
+        credentialSelector: string | null;
+        allowPrivateEndpoint: boolean;
+        redirectPolicy: SemanticRedirectPolicyV1;
+      };
+}
+
+export interface SemanticConfigurationMutationOptionsV1 {
+  expectedRevision: number;
+  idempotencyKey: string;
+}
+
 export interface SemanticSearchAdminV1 extends SemanticSearchAugmenterV1 {
+  configure(
+    input: SemanticConfigurationV1,
+    options: SemanticConfigurationMutationOptionsV1,
+    context: AuthorizationContext,
+  ): Promise<void>;
+  /** @deprecated Live adapter configuration is retained for 0.4 source compatibility. */
   configure(
     input: SemanticConfigurationInputV1,
     context: AuthorizationContext,
@@ -223,6 +262,10 @@ export interface SemanticSearchAdminOptionsV1 {
   warn?: (message: string) => void;
   maxAttempts?: number;
   batchSize?: number;
+  fetch?: typeof fetch;
+  resolveCredential?: (
+    selector: string,
+  ) => string | Promise<string | undefined> | undefined;
 }
 
 interface SemanticRow {
@@ -240,6 +283,7 @@ interface SemanticRow {
   warning_emitted: number;
   active_generation: number;
   ready_generation: number | null;
+  configuration_revision: number;
 }
 
 interface CorpusRecord {
@@ -731,6 +775,10 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
   readonly #warn: (message: string) => void;
   readonly #maxAttempts: number;
   readonly #batchSize: number;
+  readonly #fetch: typeof fetch;
+  readonly #resolveCredential:
+    | ((selector: string) => string | Promise<string | undefined> | undefined)
+    | undefined;
   readonly #bindings = new Map<string, RuntimeBinding>();
 
   constructor(db: SqliteDatabaseLike, options: SemanticSearchAdminOptionsV1) {
@@ -741,56 +789,200 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
     this.#warn = options.warn ?? (() => undefined);
     this.#maxAttempts = positive(options.maxAttempts ?? 3, 'maxAttempts', 3);
     this.#batchSize = positive(options.batchSize ?? 32, 'batchSize', 128);
+    this.#fetch = options.fetch ?? fetch;
+    this.#resolveCredential = options.resolveCredential;
   }
 
   async configure(
-    input: SemanticConfigurationInputV1,
-    context: AuthorizationContext,
+    input: SemanticConfigurationV1 | SemanticConfigurationInputV1,
+    optionsOrContext:
+      SemanticConfigurationMutationOptionsV1 | AuthorizationContext,
+    maybeContext?: AuthorizationContext,
   ): Promise<void> {
+    const declarative = 'version' in input && input.version === 1;
+    const context = declarative
+      ? maybeContext
+      : (optionsOrContext as AuthorizationContext);
+    if (!context) throw new TypeError('authorization context is required');
     const actor = this.#admin(context);
     const id = token(input.id, 'configurationId', 128);
     const name = token(input.name, 'configurationName', 128);
-    if (input.provider.identity.dimensions < 1)
-      throw new Error('invalid provider dimensions');
-    if (
-      input.vectorIndex.kind !== 'sqlite' &&
-      input.vectorIndex.kind !== 'qdrant'
-    )
+    const mutation = declarative
+      ? normalizeConfigurationMutation(
+          optionsOrContext as SemanticConfigurationMutationOptionsV1,
+        )
+      : null;
+    const binding = declarative
+      ? this.#binding(input)
+      : {
+          provider: (input as SemanticConfigurationInputV1).provider,
+          vector: (input as SemanticConfigurationInputV1).vectorIndex,
+        };
+    const identity = binding.provider.identity;
+    if (identity.dimensions < 1) throw new Error('invalid provider dimensions');
+    if (binding.vector.kind !== 'sqlite' && binding.vector.kind !== 'qdrant')
       throw new Error('invalid vector adapter');
+    const configuration = declarative
+      ? normalizeSemanticConfiguration(input)
+      : null;
     const fingerprint = await canonicalSearchHashV1({
       version: 1,
-      provider: input.provider.identity,
-      vectorKind: input.vectorIndex.kind,
-      vectorEndpoint: input.vectorEndpoint ?? null,
+      provider: configuration?.provider ?? identity,
+      vector: configuration?.vector ?? {
+        kind: binding.vector.kind,
+        endpoint:
+          (input as SemanticConfigurationInputV1).vectorEndpoint ?? null,
+      },
     });
+    if (mutation) {
+      const replay = await this.#db
+        .prepare(
+          `SELECT h.request_sha256, h.configuration_revision,
+                  c.fingerprint, c.configuration_revision AS current_revision
+           FROM taproot_semantic_configuration_changes h
+           JOIN taproot_semantic_configurations c
+             ON c.installation_id=h.installation_id
+            AND c.configuration_id=h.configuration_id
+           WHERE h.installation_id=? AND h.idempotency_key=?`,
+        )
+        .bind(this.#installationId, mutation.idempotencyKey)
+        .all<{
+          request_sha256: string;
+          configuration_revision: number;
+          fingerprint: string;
+          current_revision: number;
+        }>();
+      if (replay.results[0]) {
+        if (
+          replay.results[0].request_sha256 !== fingerprint ||
+          replay.results[0].fingerprint !== fingerprint ||
+          Number(replay.results[0].configuration_revision) !==
+            Number(replay.results[0].current_revision)
+        )
+          throw new Error('semantic configuration idempotency conflict');
+        this.#bindings.set(id, binding);
+        return;
+      }
+      const current = await this.#db
+        .prepare(
+          `SELECT configuration_revision FROM taproot_semantic_configurations
+           WHERE installation_id=? AND configuration_id=?`,
+        )
+        .bind(this.#installationId, id)
+        .all<{ configuration_revision: number }>();
+      const revision = Number(current.results[0]?.configuration_revision ?? 0);
+      if (revision !== mutation.expectedRevision)
+        throw new Error('semantic configuration revision conflict');
+    }
     const now = this.#now();
+    const nextRevision = mutation ? mutation.expectedRevision + 1 : 1;
     await this.#db.batch([
       this.#db
         .prepare(
-          `INSERT INTO taproot_semantic_configurations(configuration_id, installation_id, name, provider_kind, provider_url, model, dimensions, metric, vector_kind, vector_url, fingerprint, selected, state, active_generation, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unvalidated', 1, ?, ?) ON CONFLICT(configuration_id) DO UPDATE SET name=excluded.name, provider_kind=excluded.provider_kind, provider_url=excluded.provider_url, model=excluded.model, dimensions=excluded.dimensions, metric=excluded.metric, vector_kind=excluded.vector_kind, vector_url=excluded.vector_url, fingerprint=excluded.fingerprint, state=CASE WHEN taproot_semantic_configurations.fingerprint=excluded.fingerprint THEN taproot_semantic_configurations.state ELSE 'unvalidated' END, active_generation=CASE WHEN taproot_semantic_configurations.fingerprint=excluded.fingerprint THEN taproot_semantic_configurations.active_generation ELSE taproot_semantic_configurations.active_generation+1 END, ready_generation=CASE WHEN taproot_semantic_configurations.fingerprint=excluded.fingerprint THEN taproot_semantic_configurations.ready_generation ELSE NULL END, circuit_open=0, warning_emitted=0, updated_at=excluded.updated_at WHERE taproot_semantic_configurations.installation_id=excluded.installation_id`,
+          `INSERT INTO taproot_semantic_configurations(configuration_id, installation_id, name, provider_kind, provider_url, model, dimensions, metric, provider_credential_selector, provider_private_approved, provider_redirect_policy, vector_kind, vector_url, vector_collection, vector_credential_selector, vector_private_approved, vector_redirect_policy, fingerprint, configuration_revision, selected, state, active_generation, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unvalidated', 1, ?, ?) ON CONFLICT(configuration_id) DO UPDATE SET name=excluded.name, provider_kind=excluded.provider_kind, provider_url=excluded.provider_url, model=excluded.model, dimensions=excluded.dimensions, metric=excluded.metric, provider_credential_selector=excluded.provider_credential_selector, provider_private_approved=excluded.provider_private_approved, provider_redirect_policy=excluded.provider_redirect_policy, vector_kind=excluded.vector_kind, vector_url=excluded.vector_url, vector_collection=excluded.vector_collection, vector_credential_selector=excluded.vector_credential_selector, vector_private_approved=excluded.vector_private_approved, vector_redirect_policy=excluded.vector_redirect_policy, fingerprint=excluded.fingerprint, configuration_revision=excluded.configuration_revision, state=CASE WHEN taproot_semantic_configurations.fingerprint=excluded.fingerprint THEN taproot_semantic_configurations.state ELSE 'unvalidated' END, active_generation=CASE WHEN taproot_semantic_configurations.fingerprint=excluded.fingerprint THEN taproot_semantic_configurations.active_generation ELSE taproot_semantic_configurations.active_generation+1 END, ready_generation=CASE WHEN taproot_semantic_configurations.fingerprint=excluded.fingerprint THEN taproot_semantic_configurations.ready_generation ELSE NULL END, circuit_open=0, warning_emitted=0, updated_at=excluded.updated_at WHERE taproot_semantic_configurations.installation_id=excluded.installation_id AND taproot_semantic_configurations.configuration_revision=?`,
         )
         .bind(
           id,
           this.#installationId,
           name,
-          input.provider.identity.kind,
-          input.provider.identity.endpoint,
-          input.provider.identity.model,
-          input.provider.identity.dimensions,
-          input.provider.identity.metric,
-          input.vectorIndex.kind,
-          input.vectorEndpoint ?? null,
+          identity.kind,
+          identity.endpoint,
+          identity.model,
+          identity.dimensions,
+          identity.metric,
+          configuration?.provider.credentialSelector ?? null,
+          configuration?.provider.allowPrivateEndpoint ? 1 : 0,
+          configuration?.provider.redirectPolicy ?? 'error',
+          binding.vector.kind,
+          configuration?.vector.kind === 'qdrant'
+            ? configuration.vector.endpoint
+            : ((input as SemanticConfigurationInputV1).vectorEndpoint ?? null),
+          configuration?.vector.kind === 'qdrant'
+            ? configuration.vector.collection
+            : null,
+          configuration?.vector.kind === 'qdrant'
+            ? configuration.vector.credentialSelector
+            : null,
+          configuration?.vector.kind === 'qdrant' &&
+            configuration.vector.allowPrivateEndpoint
+            ? 1
+            : 0,
+          configuration?.vector.kind === 'qdrant'
+            ? configuration.vector.redirectPolicy
+            : 'error',
           fingerprint,
+          nextRevision,
           now,
           now,
+          mutation?.expectedRevision ?? 1,
         ),
+      ...(mutation
+        ? [
+            this.#db
+              .prepare(
+                `INSERT INTO taproot_semantic_configuration_changes(
+                   installation_id, configuration_id, idempotency_key,
+                   request_sha256, expected_revision, configuration_revision,
+                   principal_id, created_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+              )
+              .bind(
+                this.#installationId,
+                id,
+                mutation.idempotencyKey,
+                fingerprint,
+                mutation.expectedRevision,
+                nextRevision,
+                actor.principalId,
+                now,
+              ),
+          ]
+        : []),
       this.#audit('configure', actor.principalId, id, null, { fingerprint }),
     ]);
-    this.#bindings.set(id, {
-      provider: input.provider,
-      vector: input.vectorIndex,
-    });
+    this.#bindings.set(id, binding);
     await this.#validate(id, actor);
+  }
+
+  #binding(configuration: SemanticConfigurationV1): RuntimeBinding {
+    const normalized = normalizeSemanticConfiguration(configuration);
+    const secret = (selector: string | null) =>
+      selector && this.#resolveCredential
+        ? async () => {
+            const value = await this.#resolveCredential!(selector);
+            if (typeof value !== 'string' || !value)
+              throw new Error('semantic credential selector was not resolved');
+            return value;
+          }
+        : undefined;
+    const providerSecret = secret(normalized.provider.credentialSelector);
+    const providerOptions: CompatibleEmbeddingAdapterOptionsV1 = {
+      endpoint: normalized.provider.endpoint,
+      model: normalized.provider.model,
+      dimensions: normalized.provider.dimensions,
+      metric: normalized.provider.metric,
+      fetch: this.#fetch,
+      allowPrivateEndpoint: normalized.provider.allowPrivateEndpoint,
+      ...(providerSecret ? { secret: providerSecret } : {}),
+    };
+    const provider =
+      normalized.provider.kind === 'ollama-compatible'
+        ? createOllamaCompatibleEmbeddingProviderV1(providerOptions)
+        : createOpenAICompatibleEmbeddingProviderV1(providerOptions);
+    const vector =
+      normalized.vector.kind === 'sqlite'
+        ? createSqliteVectorIndexV1(this.#db)
+        : createQdrantVectorIndexV1({
+            endpoint: normalized.vector.endpoint,
+            collection: normalized.vector.collection,
+            fetch: this.#fetch,
+            allowPrivateEndpoint: normalized.vector.allowPrivateEndpoint,
+            ...(() => {
+              const vectorSecret = secret(normalized.vector.credentialSelector);
+              return vectorSecret ? { secret: vectorSecret } : {};
+            })(),
+          });
+    return { provider, vector };
   }
 
   async select(
@@ -1838,6 +2030,78 @@ function safeEndpoint(value: string, allowPrivate: boolean): URL {
   if (url.protocol !== 'https:' && !allowPrivate)
     throw new Error('remote adapter endpoint must use HTTPS');
   return url;
+}
+
+function normalizeSemanticConfiguration(
+  input: SemanticConfigurationV1,
+): SemanticConfigurationV1 {
+  if (!input || input.version !== 1)
+    throw new TypeError('semantic configuration version is invalid');
+  const provider = {
+    kind: input.provider.kind,
+    endpoint: safeEndpoint(
+      input.provider.endpoint,
+      input.provider.allowPrivateEndpoint === true,
+    ).href.replace(/\/$/u, ''),
+    model: token(input.provider.model, 'model', 256),
+    dimensions: positive(input.provider.dimensions, 'dimensions', 65_536),
+    metric: normalizeMetric(input.provider.metric),
+    credentialSelector:
+      input.provider.credentialSelector === null
+        ? null
+        : token(input.provider.credentialSelector, 'credentialSelector', 256),
+    allowPrivateEndpoint: input.provider.allowPrivateEndpoint === true,
+    redirectPolicy: normalizeRedirectPolicy(input.provider.redirectPolicy),
+  } as const;
+  const vector =
+    input.vector.kind === 'sqlite'
+      ? ({ kind: 'sqlite' } as const)
+      : ({
+          kind: 'qdrant',
+          endpoint: safeEndpoint(
+            input.vector.endpoint,
+            input.vector.allowPrivateEndpoint === true,
+          ).href.replace(/\/$/u, ''),
+          collection: token(input.vector.collection, 'collection', 128),
+          credentialSelector:
+            input.vector.credentialSelector === null
+              ? null
+              : token(
+                  input.vector.credentialSelector,
+                  'credentialSelector',
+                  256,
+                ),
+          allowPrivateEndpoint: input.vector.allowPrivateEndpoint === true,
+          redirectPolicy: normalizeRedirectPolicy(input.vector.redirectPolicy),
+        } as const);
+  return Object.freeze({
+    version: 1,
+    id: token(input.id, 'configurationId', 128),
+    name: token(input.name, 'configurationName', 128),
+    provider: Object.freeze(provider),
+    vector: Object.freeze(vector),
+  });
+}
+
+function normalizeConfigurationMutation(
+  input: SemanticConfigurationMutationOptionsV1,
+): SemanticConfigurationMutationOptionsV1 {
+  if (
+    !input ||
+    !Number.isInteger(input.expectedRevision) ||
+    input.expectedRevision < 0
+  )
+    throw new TypeError('semantic configuration expectedRevision is invalid');
+  return {
+    expectedRevision: input.expectedRevision,
+    idempotencyKey: token(input.idempotencyKey, 'idempotencyKey', 256),
+  };
+}
+
+function normalizeRedirectPolicy(value: unknown): SemanticRedirectPolicyV1 {
+  if (value !== 'error')
+    throw new TypeError('semantic redirect policy must be error');
+  return value;
 }
 
 function normalizeVectors(

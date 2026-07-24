@@ -2,6 +2,17 @@
 
 ## 0.5.0
 
+- Add the sealed `AuthorizationAdministrationV1` owner protocol for
+  revision-bound principal, workspace, grant, and canonical visibility
+  administration. Workshop-owned credential/OAuth mappings join the same
+  connection-local atomic batch; receipts are durable and idempotent, and
+  authorization/search fences advance on every accepted mutation.
+- Add declarative `SemanticConfigurationV1` identities for
+  Ollama-compatible and OpenAI-compatible embedding providers plus SQLite and
+  Qdrant vector stores. Configuration now persists selector identities (never
+  credentials), explicit private-endpoint approval and redirect policy,
+  revision/idempotency history, fingerprints, and safe vector generations.
+
 - Registered external producers can read their exact frozen source-event
   predecessor through their capability-bound runtime after a commit or process
   restart; durable kind registrations can be rebound only by the matching
@@ -22,6 +33,9 @@
 - Made owner backup import independent of canonical JSON object-key order by
   validating the exact table manifest and restoring canonical and derived rows
   in declared foreign-key dependency order within one atomic batch.
+- Made active materialization health converge after mixed built-in/external
+  supersession by enrolling external-kind checkpoints and advancing only
+  truthfully completed superseded jobs through their source sequence.
 
 - Reset search to four built-in kinds (`item`, `statement`, `resource`, and
   `annotation`) plus privately branded, namespace-bound external kinds.

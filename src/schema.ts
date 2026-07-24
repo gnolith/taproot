@@ -1198,9 +1198,17 @@ export const taprootCompleteSearchSchemaStatements = [
     model TEXT NOT NULL,
     dimensions INTEGER NOT NULL CHECK (dimensions > 0),
     metric TEXT NOT NULL CHECK (metric IN ('cosine', 'dot', 'euclid')),
+    provider_credential_selector TEXT,
+    provider_private_approved INTEGER NOT NULL DEFAULT 0 CHECK (provider_private_approved IN (0, 1)),
+    provider_redirect_policy TEXT NOT NULL DEFAULT 'error' CHECK (provider_redirect_policy = 'error'),
     vector_kind TEXT NOT NULL CHECK (vector_kind IN ('sqlite', 'qdrant')),
     vector_url TEXT,
+    vector_collection TEXT,
+    vector_credential_selector TEXT,
+    vector_private_approved INTEGER NOT NULL DEFAULT 0 CHECK (vector_private_approved IN (0, 1)),
+    vector_redirect_policy TEXT NOT NULL DEFAULT 'error' CHECK (vector_redirect_policy = 'error'),
     fingerprint TEXT NOT NULL,
+    configuration_revision INTEGER NOT NULL DEFAULT 1 CHECK (configuration_revision >= 1),
     selected INTEGER NOT NULL DEFAULT 0 CHECK (selected IN (0, 1)),
     state TEXT NOT NULL CHECK (state IN ('unvalidated', 'validating', 'ready', 'building', 'failed', 'retired', 'deleting')),
     circuit_open INTEGER NOT NULL DEFAULT 0 CHECK (circuit_open IN (0, 1)),
@@ -1215,6 +1223,18 @@ export const taprootCompleteSearchSchemaStatements = [
   ) STRICT`,
   `CREATE UNIQUE INDEX IF NOT EXISTS taproot_semantic_selected_idx
     ON taproot_semantic_configurations(installation_id) WHERE selected = 1`,
+  `CREATE TABLE IF NOT EXISTS taproot_semantic_configuration_changes (
+    installation_id TEXT NOT NULL,
+    configuration_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    expected_revision INTEGER NOT NULL CHECK (expected_revision >= 0),
+    configuration_revision INTEGER NOT NULL CHECK (configuration_revision = expected_revision + 1),
+    principal_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (installation_id, idempotency_key),
+    FOREIGN KEY (configuration_id) REFERENCES taproot_semantic_configurations(configuration_id)
+  ) STRICT`,
   `CREATE TABLE IF NOT EXISTS taproot_embedding_generations (
     configuration_id TEXT NOT NULL,
     generation INTEGER NOT NULL CHECK (generation >= 1),
@@ -1323,6 +1343,12 @@ export const taprootCompleteSearchSchemaStatements = [
   `CREATE TRIGGER IF NOT EXISTS taproot_semantic_admin_audit_no_delete
     BEFORE DELETE ON taproot_semantic_admin_audit
     BEGIN SELECT RAISE(ABORT, 'taproot semantic audit is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_semantic_configuration_changes_no_update
+    BEFORE UPDATE ON taproot_semantic_configuration_changes
+    BEGIN SELECT RAISE(ABORT, 'taproot semantic configuration changes are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_semantic_configuration_changes_no_delete
+    BEFORE DELETE ON taproot_semantic_configuration_changes
+    BEGIN SELECT RAISE(ABORT, 'taproot semantic configuration changes are immutable'); END`,
   `INSERT INTO taproot_metadata(metadata_key, metadata_value)
     VALUES ('schema_version', '${PRE_ARCHITECTURE_RESET_SCHEMA_VERSION}')
     ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,
@@ -1392,6 +1418,26 @@ export const taprootArchitectureResetSchemaStatements = [
     created_at TEXT NOT NULL,
     UNIQUE (installation_id, idempotency_key)
   ) STRICT`,
+  `CREATE TABLE IF NOT EXISTS taproot_authorization_administrations (
+    administration_id TEXT PRIMARY KEY,
+    installation_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    command_type TEXT NOT NULL CHECK (command_type IN (
+      'put-principal', 'put-workspace', 'put-grant',
+      'set-entity-visibility', 'set-resource-visibility',
+      'set-annotation-visibility'
+    )),
+    expected_authorization_revision INTEGER NOT NULL CHECK (expected_authorization_revision >= 1),
+    authorization_revision INTEGER NOT NULL CHECK (authorization_revision = expected_authorization_revision + 1),
+    search_generation INTEGER NOT NULL CHECK (search_generation >= 1),
+    principal_id TEXT NOT NULL,
+    owner_registration_id TEXT NOT NULL,
+    owner_receipt_sha256 TEXT NOT NULL,
+    receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    created_at TEXT NOT NULL,
+    UNIQUE (installation_id, idempotency_key)
+  ) STRICT`,
   `CREATE TABLE IF NOT EXISTS taproot_content_authorization_revisions (
     record_kind TEXT NOT NULL CHECK (record_kind IN ('resource', 'annotation')),
     record_id TEXT NOT NULL,
@@ -1420,6 +1466,12 @@ export const taprootArchitectureResetSchemaStatements = [
   `CREATE TRIGGER IF NOT EXISTS taproot_content_authorization_no_delete
     BEFORE DELETE ON taproot_content_authorization_revisions
     BEGIN SELECT RAISE(ABORT, 'taproot content authorization is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_authorization_administrations_no_update
+    BEFORE UPDATE ON taproot_authorization_administrations
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization administrations are immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS taproot_authorization_administrations_no_delete
+    BEFORE DELETE ON taproot_authorization_administrations
+    BEGIN SELECT RAISE(ABORT, 'taproot authorization administrations are immutable'); END`,
   `INSERT INTO taproot_metadata(metadata_key, metadata_value)
     VALUES ('schema_version', '${TAPROOT_SCHEMA_VERSION}')
     ON CONFLICT(metadata_key) DO UPDATE SET metadata_value = excluded.metadata_value`,

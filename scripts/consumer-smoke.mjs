@@ -64,6 +64,7 @@ writeFileSync(
     import * as sparql from '@gnolith/taproot/sparql-policy';
     const db = new NodeSqliteDatabase(':memory:');
     const target = new NodeSqliteDatabase(':memory:');
+    const searchDb = new NodeSqliteDatabase(':memory:');
     try {
       await taproot.initializeTaproot(db, { baseIri: 'https://consumer.example' });
       const inspection = await taproot.inspectTaprootSchema(db);
@@ -170,9 +171,248 @@ writeFileSync(
       ).all();
       if (Number(restored.results[0]?.count ?? 0) !== 1)
         throw new Error('packed owner restore lost authorization grants');
+
+      await taproot.initializeTaproot(searchDb, {
+        baseIri: 'https://packed-search.example',
+      });
+      const searchKey = await crypto.subtle.generateKey(
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const searchAuthority = taproot.createTaprootHostWriteCapability(
+        searchDb,
+        { baseIri: 'https://packed-search.example' },
+        searchKey,
+      );
+      await taproot.bootstrapTaprootAuthorization(
+        searchDb,
+        { baseIri: 'https://packed-search.example' },
+        searchAuthority,
+        'packed-search-installation',
+      );
+      await searchDb.batch([
+        searchDb.prepare(
+          \`INSERT INTO taproot_authorization_principals(
+             installation_id, principal_id, created_at
+           ) VALUES ('packed-search-installation', 'admin', ?)\`,
+        ).bind(now),
+        searchDb.prepare(
+          \`INSERT INTO taproot_authorization_workspaces(
+             installation_id, workspace_id, created_at
+           ) VALUES ('packed-search-installation', 'packed-admin', ?)\`,
+        ).bind(now),
+        searchDb.prepare(
+          \`INSERT INTO taproot_authorization_grants(
+             installation_id, principal_id, workspace_id, capability,
+             authorization_revision, created_at
+           ) VALUES (
+             'packed-search-installation', 'admin', 'packed-admin',
+             'search:admin', 1, ?
+           )\`,
+        ).bind(now),
+      ]);
+      const adminContext = {
+        installationId: 'packed-search-installation',
+        principalId: 'admin',
+        activeWorkspaceId: null,
+        workspaceIds: [],
+        capabilities: ['search:admin'],
+        authorizationRevision: 1,
+      };
+      const materialization = await search.createSearchMaterializationAdminGuardV1(
+        searchDb,
+        { baseIri: 'https://packed-search.example' },
+        searchAuthority,
+      );
+      await materialization.initialize(adminContext);
+      await searchDb.prepare(
+        'CREATE TABLE packed_owner_records(source_id TEXT PRIMARY KEY, revision TEXT NOT NULL) STRICT',
+      ).run();
+      const externalKind = await search.registerExternalProducerKindV1(
+        searchDb,
+        { baseIri: 'https://packed-search.example' },
+        searchAuthority,
+        {
+          installationId: 'packed-search-installation',
+          namespace: 'packed.example',
+          localName: 'task',
+          ownerDomain: 'packed-owner',
+          adapter: {
+            kind: 'taproot-external-owner-transaction-adapter-v1',
+            prepare(token) {
+              return Promise.resolve([
+                searchDb.prepare(
+                  \`INSERT INTO packed_owner_records(source_id, revision)
+                   VALUES (?, ?) ON CONFLICT(source_id)
+                   DO UPDATE SET revision=excluded.revision\`,
+                ).bind(token.sourceId, token.revision),
+              ]);
+            },
+          },
+        },
+      );
+      const packedSource = {
+        sourceId: 'packed-task-1',
+        sourceRevision: '1',
+        sourcePolicyRevision: 1,
+        canonical: { title: 'Packed task' },
+      };
+      const packedProducer = await search.registerExternalProducerV1(
+        searchDb,
+        { baseIri: 'https://packed-search.example' },
+        searchAuthority,
+        {
+          descriptor: {
+            registration: externalKind.registration,
+            implementationVersion: '1.0.0',
+            fingerprint: 'f'.repeat(64),
+            projectionVersion: 'packed-task-v1',
+            changeClasses: ['canonical'],
+          },
+          enumerate: () => Promise.resolve({ ids: [packedSource.sourceId], cursor: null }),
+          loadExact: () => Promise.resolve(packedSource),
+          project: () => Promise.resolve({ text: 'packed task lexical result' }),
+          authorize: () => Promise.resolve(true),
+          hydrate: () => Promise.resolve(packedSource.canonical),
+        },
+      );
+      let predecessor = null;
+      for (const revision of ['1', '2']) {
+        packedSource.sourceRevision = revision;
+        const participant = await packedProducer.issuer.seal({
+          sourceId: packedSource.sourceId,
+          sourceRevision: revision,
+          predecessor,
+          ownerMutationToken: {
+            sourceId: packedSource.sourceId,
+            revision,
+          },
+        });
+        await packedProducer.commit(participant);
+        predecessor = await packedProducer.currentPredecessor(
+          packedSource.sourceId,
+        );
+      }
+      const packedRun = await materialization.run(adminContext, {
+        maxJobs: 10,
+        maxRebuildRoots: 10,
+      });
+      if (packedRun.completed !== 1 || packedRun.superseded !== 1)
+        throw new Error('packed materialization did not process supersession');
+      const packedHealth = await materialization.health(adminContext);
+      if (
+        packedHealth.status !== 'healthy' ||
+        packedHealth.pendingJobs !== 0 ||
+        packedHealth.sourceHighWatermark !== 2 ||
+        packedHealth.activeAppliedWatermark !== 2
+      ) throw new Error('packed materialization health did not converge');
+      const packedSearch = search.createAuthorizedSearchServiceV1(searchDb, {
+        installationId: 'packed-search-installation',
+      });
+      const packedPage = await packedSearch.search(
+        { text: 'packed task lexical', kinds: [packedProducer.kind] },
+        { ...adminContext, capabilities: [] },
+      );
+      if (
+        packedPage.results.length !== 1 ||
+        packedPage.results[0].sourceId !== packedSource.sourceId
+      ) throw new Error('packed external lexical search lost its result');
+      const packedEmpty = await packedSearch.search(
+        { text: 'absent lexical value', kinds: [packedProducer.kind] },
+        { ...adminContext, capabilities: [] },
+      );
+      if (packedEmpty.results.length !== 0)
+        throw new Error('packed external lexical empty query was not safe');
+
+      const semantic = search.createSemanticSearchAdminV1(searchDb, {
+        installationId: 'packed-search-installation',
+        fetch: async (_input, init) => {
+          if (init?.redirect !== 'error')
+            throw new Error('packed semantic redirect policy was not enforced');
+          return new Response(JSON.stringify({
+            embeddings: [[1, 0]],
+            usage: { total_tokens: 1 },
+          }), { status: 200 });
+        },
+        resolveCredential: selector =>
+          selector === 'packed-ollama' ? 'packed-runtime-secret' : undefined,
+      });
+      await semantic.configure({
+        version: 1,
+        id: 'packed-semantic',
+        name: 'packed-semantic',
+        provider: {
+          kind: 'ollama-compatible',
+          endpoint: 'http://127.0.0.1:11434',
+          model: 'packed-model',
+          dimensions: 2,
+          metric: 'cosine',
+          credentialSelector: 'packed-ollama',
+          allowPrivateEndpoint: true,
+          redirectPolicy: 'error',
+        },
+        vector: { kind: 'sqlite' },
+      }, {
+        expectedRevision: 0,
+        idempotencyKey: 'packed-semantic-v1',
+      }, adminContext);
+      const packedSemantic = await searchDb.prepare(
+        \`SELECT configuration_revision, provider_credential_selector
+         FROM taproot_semantic_configurations
+         WHERE configuration_id='packed-semantic'\`,
+      ).all();
+      if (
+        Number(packedSemantic.results[0]?.configuration_revision) !== 1 ||
+        packedSemantic.results[0]?.provider_credential_selector !== 'packed-ollama'
+      ) throw new Error('packed semantic configuration was not durable');
+
+      const administrationOwner =
+        await taproot.registerAuthorizationAdministrationOwnerV1(
+          searchDb,
+          { baseIri: 'https://packed-search.example' },
+          searchAuthority,
+          {
+            installationId: 'packed-search-installation',
+            ownerRegistrationId: 'packed-workshop-owner',
+            adapter: {
+              kind: 'taproot-authorization-administration-owner-adapter-v1',
+              prepare: () => Promise.resolve({
+                statements: [],
+                receipt: { selector: 'packed-owner-selector' },
+              }),
+            },
+          },
+        );
+      const administration =
+        await taproot.prepareAuthorizationAdministrationV1(
+          searchDb,
+          { baseIri: 'https://packed-search.example' },
+          searchAuthority,
+          {
+            installationId: 'packed-search-installation',
+            expectedAuthorizationRevision: 1,
+            idempotencyKey: 'packed-workspace-2',
+            command: {
+              type: 'put-workspace',
+              workspaceId: 'packed-workspace-2',
+            },
+          },
+          adminContext,
+        );
+      const administrationReceipt =
+        await taproot.commitAuthorizationAdministrationV1(
+          administration,
+          await administrationOwner.seal(administration, {}),
+        );
+      if (
+        administrationReceipt.authorizationRevision !== 2 ||
+        administrationReceipt.searchGeneration <= 1
+      ) throw new Error('packed authorization administration did not advance');
     } finally {
       await db.close();
       await target.close();
+      await searchDb.close();
     }
   `,
 );

@@ -258,15 +258,16 @@ class SearchMaterializationRuntime {
            ) VALUES (?, ?, 1, 1, 'blocked-producers', 3, ?, ?)`,
         )
         .bind(this.#installationId, corpusId, now, now),
-      ...UNIFIED_SEARCH_KINDS.map((kind) =>
-        this.#db
-          .prepare(
-            `INSERT INTO taproot_search_kind_checkpoints(
-               corpus_id, source_kind, enqueued_sequence, applied_sequence
-             ) VALUES (?, ?, 0, 0)`,
-          )
-          .bind(corpusId, kind),
-      ),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_search_kind_checkpoints(
+             corpus_id, source_kind, enqueued_sequence, applied_sequence
+           )
+           SELECT ?, source_kind, 0, 0
+           FROM taproot_unified_search_producer_adoptions
+           WHERE installation_id = ?`,
+        )
+        .bind(corpusId, this.#installationId),
       this.#db
         .prepare(
           `INSERT INTO taproot_unified_search_generation_producers(
@@ -569,15 +570,16 @@ class SearchMaterializationRuntime {
           watermark,
           now,
         ),
-      ...UNIFIED_SEARCH_KINDS.map((kind) =>
-        this.#db
-          .prepare(
-            `INSERT INTO taproot_search_kind_checkpoints(
-               corpus_id, source_kind, enqueued_sequence, applied_sequence
-             ) VALUES (?, ?, 0, 0)`,
-          )
-          .bind(corpusId, kind),
-      ),
+      this.#db
+        .prepare(
+          `INSERT INTO taproot_search_kind_checkpoints(
+             corpus_id, source_kind, enqueued_sequence, applied_sequence
+           )
+           SELECT ?, source_kind, 0, 0
+           FROM taproot_unified_search_producer_adoptions
+           WHERE installation_id = ?`,
+        )
+        .bind(corpusId, this.#installationId),
       this.#db
         .prepare(
           `INSERT INTO taproot_unified_search_generation_producers(
@@ -1691,6 +1693,17 @@ class SearchMaterializationRuntime {
            )`,
         )
         .bind(claim.job.job_id, claim.generation, transitionId),
+      this.#db
+        .prepare(
+          `UPDATE taproot_search_kind_checkpoints
+           SET applied_sequence = MAX(applied_sequence, ?)
+           WHERE corpus_id = ? AND source_kind = ?`,
+        )
+        .bind(
+          claim.job.source_event_sequence,
+          claim.job.corpus_id,
+          claim.job.source_kind,
+        ),
     ]);
   }
 
