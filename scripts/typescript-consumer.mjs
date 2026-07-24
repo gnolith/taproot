@@ -36,7 +36,13 @@ writeFileSync(
 );
 writeFileSync(
   join(root, 'consumer.ts'),
-  `import type { AuthorizationContext, D1DatabaseLike } from '@gnolith/taproot';
+  `import {
+    createTaprootWorkshopPortV1,
+    type AuthorizationContext,
+    type D1DatabaseLike,
+    type TaprootHostWriteCapability,
+    type TaprootWorkshopPortV1,
+  } from '@gnolith/taproot';
   import type {
     ExternalProducer,
     ExternalSearchKind,
@@ -49,7 +55,9 @@ writeFileSync(
   } from '@gnolith/taproot/backup';
 
   declare const db: D1DatabaseLike;
+  declare const authority: TaprootHostWriteCapability;
   declare const context: AuthorizationContext;
+  declare const workshop: TaprootWorkshopPortV1;
   declare const producer: ExternalProducer;
   declare const registeredProducer: RegisteredExternalProducerV1;
   declare const kind: ExternalSearchKind;
@@ -62,7 +70,51 @@ writeFileSync(
     const sequence: number = predecessor.sequence;
     void [eventId, sequence];
   }
-  void [db, context, producer, kind, health, fragment, blob];
+  const port = await createTaprootWorkshopPortV1(
+    db,
+    { baseIri: 'https://consumer.example' },
+    authority,
+    { installationId: context.installationId },
+  );
+  const live = await port.resolveAuthorization({
+    principalId: context.principalId,
+    activeWorkspaceId: context.activeWorkspaceId,
+  });
+  await workshop.statementHistory('Q1$statement', { limit: 50 }, live);
+  await workshop.statementRevision('Q1$statement', 1, live);
+  await workshop.resourceHistory('resource-1', { limit: 50 }, live);
+  await workshop.resourceRevision('resource-1', 1, live);
+  await workshop.hydrateResource('resource-1', 1, live);
+  await workshop.annotationHistory('annotation-1', { limit: 50 }, live);
+  await workshop.annotationRevision('annotation-1', 1, live);
+  await workshop.createProperty(
+    { id: 'P1', datatype: 'string' },
+    { idempotencyKey: 'create-property-1' },
+    live,
+  );
+  await workshop.createItem(
+    { id: 'Q1' },
+    { idempotencyKey: 'create-item-1' },
+    live,
+  );
+  await workshop.mutateEntity(
+    'Q1',
+    [{
+      command: { type: 'set-label', language: 'en', value: 'Example' },
+      authoredText: 'Set the English label to Example',
+    }],
+    { expectedRevision: 1, idempotencyKey: 'set-label-1' },
+    live,
+  );
+  declare const resourceInput: Parameters<TaprootWorkshopPortV1['createResource']>[0];
+  declare const annotationInput: Parameters<TaprootWorkshopPortV1['createAnnotation']>[0];
+  await workshop.createResource(resourceInput, { idempotencyKey: 'create-resource-1' }, live);
+  await workshop.updateResource('resource-1', 1, resourceInput, { idempotencyKey: 'update-resource-1' }, live);
+  await workshop.deleteResource('resource-1', 2, { idempotencyKey: 'delete-resource-1' }, live);
+  await workshop.createAnnotation(annotationInput, { idempotencyKey: 'create-annotation-1' }, live);
+  await workshop.updateAnnotation('annotation-1', 1, annotationInput, { idempotencyKey: 'update-annotation-1' }, live);
+  await workshop.deleteAnnotation('annotation-1', 2, { idempotencyKey: 'delete-annotation-1' }, live);
+  void [db, context, producer, kind, health, fragment, blob, port];
   `,
 );
 const diamond =

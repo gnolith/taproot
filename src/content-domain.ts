@@ -347,6 +347,23 @@ export class TaprootContentRepositoryV1 {
     signal?: AbortSignal,
   ): Promise<Uint8Array> {
     const resource = await this.getResource(id, context);
+    return this.#hydrateResource(resource, signal);
+  }
+
+  async hydrateResourceRevisionPayload(
+    id: string,
+    revision: number,
+    context: AuthorizationContext,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    const resource = await this.getResourceRevision(id, revision, context);
+    return this.#hydrateResource(resource, signal);
+  }
+
+  async #hydrateResource(
+    resource: ResourceV1,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
     if (resource.payload.kind === 'inline-text')
       return encoder.encode(resource.payload.text);
     if (!this.#options.payloadStore)

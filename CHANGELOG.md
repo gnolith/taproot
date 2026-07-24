@@ -11,6 +11,14 @@
 - External producer adoption now persists source events and predecessors for
   enumerated legacy owner rows, including pages adopted after materialization
   initialization and later process restarts.
+- Added the authority-bound `TaprootWorkshopPortV1` for live persisted
+  principal/grant resolution and bounded, authorization-fenced statement,
+  Resource, and Annotation revision history without exposing storage tables.
+  Its idempotent operator mutations derive or preserve canonical entity and
+  content policy inside Taproot, including all `EntityCommand` statement,
+  qualifier, reference, and rank changes.
+- Preserved ordered per-command authored text for atomic Workshop entity edits
+  and added bounded, exact-revision Resource payload hydration.
 
 - Reset search to four built-in kinds (`item`, `statement`, `resource`, and
   `annotation`) plus privately branded, namespace-bound external kinds.

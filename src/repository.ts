@@ -1264,8 +1264,8 @@ export class TaprootRepository {
   ): Promise<WriteResult> {
     if (!commands.length)
       throw new InvalidEntityError('At least one command is required');
-    if (commands.length > 100)
-      throw new BulkLimitError('An edit may contain at most 100 commands');
+    if (commands.length > 200)
+      throw new BulkLimitError('An edit may contain at most 200 commands');
     return this.#mutate(id, edit, (entity) => {
       for (const command of commands) applyEntityCommand(entity, command);
       return entity;

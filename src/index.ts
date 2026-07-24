@@ -134,6 +134,7 @@ export * from './authorization-bootstrap.js';
 export * from './errors.js';
 export * from './migrations.js';
 export * from './rdf.js';
+export * from './workshop-port.js';
 export {
   TAPROOT_JSON_VERSION,
   TAPROOT_RDF_VERSION,

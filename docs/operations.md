@@ -95,7 +95,7 @@ operational decisions and checks.
 
 Writes are atomic per entity. Bulk import is deliberately not a cross-entity
 transaction; retry failed entries using their result indexes. Default limits:
-1.8 MB canonical JSON, 100 bulk entities, 100 commands per revision, and 500
+1.8 MB canonical JSON, 100 bulk entities, 200 commands per revision, and 500
 rows per page. Diamond separately enforces its atomic RDF payload bound.
 
 Revision and audit rows have database triggers rejecting UPDATE and DELETE.

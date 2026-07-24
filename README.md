@@ -227,7 +227,7 @@ Bulk imports default to create-only, can opt into `upsert`, are capped at 100
 entities by default, and commit one entity atomically at a time. Authorized
 bulk policies use sequential expected authorization revisions; Taproot carries
 each successful advance into the next entity's context. Multi-command edits
-apply up to 100 commands in one revision. All list limits are capped at 500.
+apply up to 200 commands in one revision. All list limits are capped at 500.
 
 See the [local D1 and Diamond interoperability example](examples/d1-diamond-interop/README.md),
 [`COMPATIBILITY.md`](COMPATIBILITY.md), and the architecture, API, operations,

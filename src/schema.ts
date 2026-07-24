@@ -1333,6 +1333,15 @@ export const taprootCompleteSearchSchemaStatements = [
 
 /** Sealed bootstrap, generic kind registration, and content RDF ownership. */
 export const taprootArchitectureResetSchemaStatements = [
+  `CREATE TABLE IF NOT EXISTS taproot_workshop_idempotency (
+    installation_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (installation_id, idempotency_key)
+  ) STRICT`,
   `CREATE TABLE IF NOT EXISTS taproot_external_search_kind_registrations (
     installation_id TEXT NOT NULL,
     registration_id TEXT NOT NULL UNIQUE,

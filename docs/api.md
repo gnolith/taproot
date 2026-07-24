@@ -88,6 +88,32 @@ sequential expected installation authorization revisions; after each success,
 Taproot advances the context revision used for the next entity while preserving
 the same authenticated principal, grants, and capabilities.
 
+`createTaprootWorkshopPortV1` is the packed owner-integration boundary for
+Workshop. Assembly binds it to an installation, exact database connection, and
+opaque `TaprootHostWriteCapability`. It resolves an already-authenticated
+principal identity into a live persisted `AuthorizationContext` and provides
+bounded opaque-cursor statement, Resource, and Annotation revision history.
+Every read checks the current authorization fence before lookup and again after
+hydration; the port exposes neither credentials nor storage/query primitives.
+
+The same port provides item, property, entity-command, Resource, and Annotation
+mutations. Callers supply a required idempotency key and, for updates, the
+expected revision; Taproot derives new authorization policy from the live
+principal/workspace context and preserves existing policy on updates. Workshop
+therefore never constructs `CanonicalAuthorizationPolicyInput`, and persistent
+receipts make successful retries stable across process restarts.
+
+`mutateEntity` accepts one to 200 ordered `{ command, authoredText }` entries
+and commits them as one revision. Taproot carries each authored text into the
+corresponding statement command where applicable and records the complete
+ordered list in audit metadata; attribution and request identity are derived
+from the live principal and idempotency key.
+
+`hydrateResource(resourceId, revision, context, signal?)` hydrates the exact
+authorized historical descriptor, verifies its declared length and SHA-256
+digest, and rejects payloads above the configured bounded byte limit. Blob
+references require a `payloadStore` when the port is assembled.
+
 `Statement.text` is required, non-whitespace authored text describing that
 exact structured revision. `addStatement` and `replaceStatement` receive it on
 the statement. Rank, qualifier, and reference mutations receive a separate

@@ -67,6 +67,8 @@ writeFileSync(
         'createTaprootInstallationSnapshotV1',
         'restoreTaprootInstallationSnapshotV1',
       ]) if (name in taproot) throw new Error('removed bridge exported: ' + name);
+      if (typeof taproot.createTaprootWorkshopPortV1 !== 'function')
+        throw new Error('missing export: createTaprootWorkshopPortV1');
       for (const [module, names] of [
         [search, ['createAuthorizedSearchServiceV1', 'registerExternalProducerKindV1', 'registerExternalProducerV1']],
         [backup, ['inspectLegacyTaproot042ForAdoptionV1', 'exportTaprootBackupSectionV1']],
