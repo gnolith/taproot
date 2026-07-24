@@ -11,6 +11,9 @@
   against the package-lock SHA-512. This keeps CI and release workflows
   cross-platform and checksum-bound without weakening the registry-only public
   package manifest.
+- Replace ambiguous trailing-slash regular expressions with bounded linear
+  scanning for caller-controlled and persisted base IRIs, eliminating a
+  CodeQL high-severity polynomial-time denial-of-service path.
 - Treat semantic provider endpoints as exact full POST URLs and never append a
   provider route. Persisted declarative SQLite and Qdrant bindings now
   reconstruct automatically after restart, and semantic status exposes a

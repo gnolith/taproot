@@ -219,6 +219,7 @@ for (const required of [
   'npm run release:check',
   'npm run release:candidate',
   'taproot-release-candidate-${{ github.sha }}',
+  'include-hidden-files: true',
 ]) {
   assert.ok(
     ci.includes(required),

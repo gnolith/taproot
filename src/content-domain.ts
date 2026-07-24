@@ -26,6 +26,7 @@ import type {
   VisibilityScopeV1,
 } from './types.js';
 import { coordinatedStatements } from './atomic-coordination.js';
+import { withoutTrailingSlashes } from './iri.js';
 
 export const RESOURCE_INLINE_TEXT_MAX_BYTES = 65_536;
 
@@ -804,7 +805,7 @@ export class TaprootContentRepositoryV1 {
       .all<{ metadata_value: string }>();
     const value = result.results[0]?.metadata_value;
     if (!value) throw new Error('Taproot base IRI is not initialized');
-    return value.replace(/\/+$/u, '');
+    return withoutTrailingSlashes(value);
   }
 
   async #targetVisibility(

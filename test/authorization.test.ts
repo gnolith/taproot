@@ -15,6 +15,7 @@ import {
   type AuthorizationContext,
   type VisibilityScopeV1,
 } from '../src/index.js';
+import { withoutTrailingSlashes } from '../src/iri.js';
 
 const context = (
   overrides: Partial<AuthorizationContext> = {},
@@ -29,6 +30,14 @@ const context = (
 });
 
 describe('authorization contract values', () => {
+  it('removes trailing slashes linearly without changing interior slashes', () => {
+    expect(withoutTrailingSlashes('https://example.test/path///')).toBe(
+      'https://example.test/path',
+    );
+    const long = `https://example.test/${'/'.repeat(100_000)}x`;
+    expect(withoutTrailingSlashes(long)).toBe(long);
+  });
+
   it('normalizes deterministically, fingerprints canonically, and intersects by CNF clause concatenation', async () => {
     const left: VisibilityScopeV1 = {
       version: 1,

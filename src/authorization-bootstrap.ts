@@ -5,6 +5,7 @@ import type {
 import type { TaprootHostWriteCapability } from './assembly-authority.js';
 import { assertTaprootHostWriteCapabilityInternal } from './assembly-authority.js';
 import { InvalidAuthorizationError } from './errors.js';
+import { withoutTrailingSlashes } from './iri.js';
 import { canonicalSearchHashV1 } from './search-contract.js';
 
 export interface AuthorizationBootstrapInputV1 {
@@ -135,7 +136,7 @@ export async function prepareAuthorizationBootstrapV1(
 ): Promise<AuthorizationBootstrapParticipantV1> {
   assertTaprootHostWriteCapabilityInternal(db, options, authority);
   const input = normalizeInput(raw);
-  if (input.baseIri !== options.baseIri.replace(/\/+$/u, ''))
+  if (input.baseIri !== withoutTrailingSlashes(options.baseIri))
     denied('authorization bootstrap base IRI does not match the connection');
   const persistedBase = await db
     .prepare(
@@ -363,7 +364,7 @@ function normalizeInput(
       parsed.hash
     )
       denied('baseIri is invalid');
-    baseIri = parsed.href.replace(/\/+$/u, '');
+    baseIri = withoutTrailingSlashes(parsed.href);
   } catch {
     denied('baseIri is invalid');
   }
