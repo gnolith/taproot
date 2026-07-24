@@ -44,13 +44,25 @@ for (const dependency of Object.keys(packageJson.dependencies ?? {}))
     componentNames.has(dependency),
     `runtime SBOM is missing direct dependency ${dependency}`,
   );
-for (const developmentDependency of Object.keys(
-  packageJson.devDependencies ?? {},
-))
-  assert.ok(
-    !componentNames.has(developmentDependency),
-    `runtime SBOM contains development dependency ${developmentDependency}`,
-  );
+const rootReference = rawSbom.metadata.component['bom-ref'];
+const rootDependency = rawSbom.dependencies.find(
+  ({ ref }) => ref === rootReference,
+);
+assert.ok(
+  rootDependency,
+  'runtime SBOM is missing the package dependency root',
+);
+const componentsByReference = new Map(
+  rawSbom.components.map((component) => [component['bom-ref'], component]),
+);
+const directRuntimeNames = rootDependency.dependsOn
+  .map((reference) => componentsByReference.get(reference)?.name)
+  .sort();
+assert.deepEqual(
+  directRuntimeNames,
+  Object.keys(packageJson.dependencies ?? {}).sort(),
+  'runtime SBOM root does not match package dependencies',
+);
 
 delete rawSbom.serialNumber;
 delete rawSbom.metadata.timestamp;
