@@ -110,6 +110,46 @@ describe('TaprootWorkshopPortV1', () => {
           principalId: 'principal-1',
           activeWorkspaceId: 'workspace-1',
         });
+        const beforeIdenticalLabel = await canonicalWriteState(env.db, 'Q1');
+        const identicalRequest = [
+          {
+            command: {
+              type: 'set-label' as const,
+              language: 'en',
+              value: 'Atomic edit',
+            },
+            authoredText: 'Retry the already-current English label.',
+          },
+        ];
+        const [identicalLabel, concurrentRetry] = await Promise.all([
+          port.mutateEntity(
+            'Q1',
+            identicalRequest,
+            {
+              expectedRevision: 2,
+              idempotencyKey: 'identical-label-1',
+            },
+            context,
+          ),
+          port.mutateEntity(
+            'Q1',
+            identicalRequest,
+            {
+              expectedRevision: 2,
+              idempotencyKey: 'identical-label-1',
+            },
+            context,
+          ),
+        ]);
+        expect(identicalLabel).toEqual(concurrentRetry);
+        expect(identicalLabel).toMatchObject({
+          entityId: 'Q1',
+          previousRevision: 2,
+          newRevision: 2,
+        });
+        await expect(canonicalWriteState(env.db, 'Q1')).resolves.toEqual(
+          beforeIdenticalLabel,
+        );
         const resourceInput = {
           id: 'resource-1',
           itemId: 'Q1' as const,
@@ -231,6 +271,7 @@ describe('TaprootWorkshopPortV1', () => {
           port.statementRevision('Q1$missing', 2, context),
         ).rejects.toThrow('Authorization denied');
 
+        const beforeRestartRetry = await canonicalWriteState(env.db, 'Q1');
         await env.close();
         env = await runtime.reopen();
         authority = await hostAuthority(env.db);
@@ -241,6 +282,20 @@ describe('TaprootWorkshopPortV1', () => {
           principalId: 'principal-1',
           activeWorkspaceId: 'workspace-1',
         });
+        await expect(
+          port.mutateEntity(
+            'Q1',
+            identicalRequest,
+            {
+              expectedRevision: 2,
+              idempotencyKey: 'identical-label-1',
+            },
+            restarted,
+          ),
+        ).resolves.toEqual(identicalLabel);
+        await expect(canonicalWriteState(env.db, 'Q1')).resolves.toEqual(
+          beforeRestartRetry,
+        );
         await expect(
           port.createProperty(
             { id: 'P1', datatype: 'string' },
@@ -287,6 +342,32 @@ describe('TaprootWorkshopPortV1', () => {
     }, 120_000);
   }
 });
+
+async function canonicalWriteState(db: D1DatabaseLike, entityId: string) {
+  const result = await db
+    .prepare(
+      `SELECT
+         (SELECT revision FROM taproot_entities WHERE entity_id = ?) AS revision,
+         (SELECT COUNT(*) FROM taproot_entity_revisions WHERE entity_id = ?) AS revisions,
+         (SELECT COUNT(*) FROM taproot_audit_events WHERE entity_id = ?) AS audits,
+         (SELECT COUNT(*) FROM taproot_rdf_ownership WHERE entity_id = ?) AS ownership,
+         (SELECT COUNT(*) FROM rdf_quads) AS quads,
+         (SELECT COUNT(*) FROM taproot_unified_search_source_events) AS source_events,
+         (SELECT authorization_revision FROM taproot_installation_authorization
+          WHERE singleton = 1) AS authorization_revision,
+         (SELECT search_generation FROM taproot_installation_authorization
+          WHERE singleton = 1) AS search_generation,
+         (SELECT COALESCE(MAX(source_watermark_sequence), 0)
+          FROM taproot_search_corpora) AS source_watermark,
+         (SELECT COALESCE(MAX(enqueued_sequence), 0)
+          FROM taproot_search_kind_checkpoints) AS enqueued_watermark,
+         (SELECT COALESCE(MAX(applied_sequence), 0)
+          FROM taproot_search_kind_checkpoints) AS applied_watermark`,
+    )
+    .bind(entityId, entityId, entityId, entityId)
+    .all<Record<string, unknown>>();
+  return result.results[0];
+}
 
 async function bootstrap(
   db: D1DatabaseLike,

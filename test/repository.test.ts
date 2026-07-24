@@ -591,6 +591,71 @@ describe('TaprootRepository on Workerd D1', () => {
     }
   }, 120_000);
 
+  it('does not revise Items or Properties for identical canonical labels', async () => {
+    const env = await environment();
+    try {
+      const item = await env.repository.createItem({
+        id: 'Q1',
+        labels: { en: { language: 'en', value: 'Current item' } },
+      });
+      const property = await env.repository.createProperty({
+        id: 'P1',
+        datatype: 'string',
+        labels: { en: { language: 'en', value: 'Current property' } },
+      });
+      const itemNoop = await env.repository.setLabel(
+        'Q1',
+        'en',
+        'Current item',
+        { expectedRevision: 1 },
+      );
+      const propertyNoop = await env.repository.setLabel(
+        'P1',
+        'en',
+        'Current property',
+        { expectedRevision: 1 },
+      );
+      expect(itemNoop).toMatchObject({
+        previousRevision: 1,
+        newRevision: 1,
+        eventId: item.eventId,
+        contentHash: item.contentHash,
+        quadPatch: { deleted: 0, inserted: 0 },
+      });
+      expect(propertyNoop).toMatchObject({
+        previousRevision: 1,
+        newRevision: 1,
+        eventId: property.eventId,
+        contentHash: property.contentHash,
+        quadPatch: { deleted: 0, inserted: 0 },
+      });
+      await expect(
+        env.repository.listEntityRevisions('Q1'),
+      ).resolves.toHaveLength(1);
+      await expect(
+        env.repository.listEntityRevisions('P1'),
+      ).resolves.toHaveLength(1);
+
+      const changed = await env.repository.setLabel(
+        'Q1',
+        'en',
+        'Changed item',
+        {
+          expectedRevision: 1,
+        },
+      );
+      expect(changed).toMatchObject({
+        previousRevision: 1,
+        newRevision: 2,
+      });
+      await expect(
+        env.repository.listEntityRevisions('Q1'),
+      ).resolves.toHaveLength(2);
+    } finally {
+      await env.dispose();
+    }
+  }, 120_000);
+
   it('imports trusted ids, advances counters, and rejects collisions', async () => {
     const env = await environment();
     try {

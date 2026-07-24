@@ -596,6 +596,15 @@ execFileSync(process.execPath, [join(root, 'smoke.mjs')], {
       : {}),
   },
 });
+const labelNoopSmoke = join(root, 'label-noop-consumer-smoke.mjs');
+writeFileSync(
+  labelNoopSmoke,
+  readFileSync(resolve('scripts', 'label-noop-consumer-smoke.mjs'), 'utf8'),
+);
+execFileSync(process.execPath, [labelNoopSmoke], {
+  cwd: root,
+  stdio: 'inherit',
+});
 if (existsSync(exactLegacySnapshot)) {
   const crossProcessSmoke = join(root, 'legacy-cross-process-smoke.mjs');
   writeFileSync(
