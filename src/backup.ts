@@ -2,13 +2,12 @@ import type { D1DatabaseLike } from './sqlite-types.js';
 import type { TaprootHostWriteCapability } from './assembly-authority.js';
 import { assertTaprootHostWriteCapabilityInternal } from './assembly-authority.js';
 import { InvalidAuthorizationError } from './errors.js';
-import { taprootMigrationNamespace, taprootMigrations } from './migrations.js';
+import { taprootMigrationNamespace } from './migrations.js';
 import type {
   MigrationLedgerBackup,
   MigrationLedgerOwnerHandle,
   MigrationLedgerSlice,
 } from '@gnolith/diamond';
-import { checksumMigration } from '@gnolith/diamond';
 
 export type { MigrationLedgerSlice } from '@gnolith/diamond';
 
@@ -76,6 +75,54 @@ export interface LegacyTaproot042AttestationV1 {
   packageName: '@gnolith/taproot';
   packageVersion: '0.4.2';
 }
+
+/**
+ * Immutable migration evidence captured from the exact public
+ * @gnolith/taproot@0.4.2 package with @gnolith/diamond@0.4.1. Never derive
+ * legacy evidence from the current migration catalog.
+ */
+export const legacyTaproot042MigrationManifestV1 = Object.freeze([
+  Object.freeze({
+    id: '0001-v0.1-schema',
+    checksum:
+      '305614f561329178bfeed04a9dcee03e7844c1f84a40462c5731985f0fb08aad',
+  }),
+  Object.freeze({
+    id: '0002-durable-database-identity',
+    checksum:
+      '32275fa8bd840fdfaa5a69515dd16a61554e4f4d248b8c60b3a45fdbeb1c5bbe',
+  }),
+  Object.freeze({
+    id: '0003-canonical-statement-text',
+    checksum:
+      '74181c61c8a5e0468a24c1666d618f2d828f36507df91511f37c3b6c747f237d',
+  }),
+  Object.freeze({
+    id: '0004-canonical-authorization-policy',
+    checksum:
+      '6da0d0374bd3dd9f80aa9a01d4434a33d148045d94b5715548c05a8c7f804d76',
+  }),
+  Object.freeze({
+    id: '0005-unified-search-source-events',
+    checksum:
+      '1a51d9cbd14202c30bf028a853986c2004de39168f600b2dac2543b07d3abc0e',
+  }),
+  Object.freeze({
+    id: '0006-unified-search-materialization-lifecycle',
+    checksum:
+      '1311c190da88e96e6d58a680b207ecaae151c95a610b9c309a149fd5f32ab6a6',
+  }),
+  Object.freeze({
+    id: '0007-external-search-producers',
+    checksum:
+      'e9fc6b4a0ea0bdbf552842aea04355a0eced28e580901d5f532b59b041e4ff5e',
+  }),
+  Object.freeze({
+    id: '0008-complete-search-content-semantic',
+    checksum:
+      'c29f2a1d4ed675ea9254cb6dfc4bb3c029fa37ad54c6d50a14f4f74346422e0e',
+  }),
+] as const);
 
 export interface LegacyTaproot042AdoptionFragmentV1 {
   format: 'taproot-legacy-local-v1-owner-fragment-v1';
@@ -174,12 +221,7 @@ export async function inspectLegacyTaproot042ForAdoptionV1(
     'installationId',
     128,
   );
-  const expected = await Promise.all(
-    taprootMigrations.slice(0, 8).map(async (migration) => ({
-      id: migration.id,
-      checksum: await checksumMigration(migration),
-    })),
-  );
+  const expected = legacyTaproot042MigrationManifestV1;
   const applied = await source
     .prepare(
       `SELECT migration_id, checksum, applied_at

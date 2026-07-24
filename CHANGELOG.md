@@ -2,6 +2,11 @@
 
 ## 0.5.0
 
+- Fix exact Taproot 0.4.2 owner adoption to validate against an immutable,
+  explicit migration ID/checksum manifest captured from the public 0.4.2
+  package with Diamond 0.4.1. Legacy evidence is no longer derived from the
+  current migration catalog.
+
 - Add the sealed `AuthorizationAdministrationV1` owner protocol for
   revision-bound principal, workspace, grant, and canonical visibility
   administration. Workshop-owned credential/OAuth mappings join the same

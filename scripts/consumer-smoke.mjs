@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -18,6 +18,9 @@ const archive = join(root, filename);
 const sha256 = createHash('sha256').update(readFileSync(archive)).digest('hex');
 const diamond =
   process.env.DIAMOND_TARBALL ?? resolve('node_modules', '@gnolith', 'diamond');
+const exactLegacySnapshot =
+  process.env.TAPROOT_EXACT_LEGACY_SNAPSHOT ??
+  resolve('..', 'seedbed', '.legacy-runtime', 'legacy-local-v1.snapshot');
 writeFileSync(
   join(root, 'package.json'),
   JSON.stringify({ private: true, type: 'module' }),
@@ -58,6 +61,10 @@ writeFileSync(
       registerMigrationLedgerOwnerV1,
     } from '@gnolith/diamond';
     import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
+    import { createHash } from 'node:crypto';
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    import { gunzipSync } from 'node:zlib';
     import * as taproot from '@gnolith/taproot';
     import * as search from '@gnolith/taproot/search';
     import * as backup from '@gnolith/taproot/backup';
@@ -409,6 +416,78 @@ writeFileSync(
         administrationReceipt.authorizationRevision !== 2 ||
         administrationReceipt.searchGeneration <= 1
       ) throw new Error('packed authorization administration did not advance');
+
+      const legacySnapshotPath = process.env.TAPROOT_EXACT_LEGACY_SNAPSHOT;
+      if (legacySnapshotPath) {
+        const snapshotBytes = readFileSync(legacySnapshotPath);
+        if (
+          createHash('sha256').update(snapshotBytes).digest('hex') !==
+          '581de9721f35a103054910610edaff12091341c8d69593760376696950afd409'
+        ) throw new Error('exact legacy snapshot hash changed');
+        const snapshot = JSON.parse(gunzipSync(snapshotBytes));
+        if (
+          snapshot.manifest?.format !== 'gnolith-seedbed-snapshot-v1' ||
+          snapshot.manifest?.packages?.diamond !== '0.4.1' ||
+          snapshot.manifest?.packages?.taproot !== '0.4.2' ||
+          snapshot.manifest?.packages?.workshop !== '0.4.2' ||
+          snapshot.manifest?.packages?.seedbed !== '0.3.2'
+        ) throw new Error('exact legacy tuple manifest changed');
+        const legacyDatabaseBytes = Buffer.from(snapshot.database, 'base64');
+        if (
+          createHash('sha256').update(legacyDatabaseBytes).digest('hex') !==
+          snapshot.manifest.database.sha256
+        ) throw new Error('exact legacy database hash changed');
+        const legacyDatabasePath = join(process.cwd(), 'exact-legacy.sqlite');
+        writeFileSync(legacyDatabasePath, legacyDatabaseBytes);
+        const legacyDb = new NodeSqliteDatabase(legacyDatabasePath);
+        try {
+          const fragment = await backup.inspectLegacyTaproot042ForAdoptionV1(
+            legacyDb,
+            {
+              packageName: '@gnolith/taproot',
+              packageVersion: '0.4.2',
+            },
+          );
+          const expectedCounts = {
+            items: 2,
+            properties: 2,
+            statements: 1,
+            resources: 1,
+            annotations: 1,
+            revisions: 10,
+          };
+          if (JSON.stringify(fragment.domainCounts) !== JSON.stringify(expectedCounts))
+            throw new Error('packed exact legacy tuple counts changed');
+          const descriptor = fragment.blobDescriptors[0];
+          if (
+            fragment.blobDescriptors.length !== 1 ||
+            descriptor.referenceId !== 'fixture/payload.txt' ||
+            descriptor.resourceId !== 'fixture-resource' ||
+            descriptor.revision !== 2 ||
+            descriptor.byteLength !== 35 ||
+            descriptor.sha256 !==
+              '9fc576a110e5c41d15e4e51630c974a7dfc3edcea06ff92cfa720ded5a4210ce'
+          ) throw new Error('packed exact legacy payload evidence changed');
+          const canonical = JSON.parse(
+            new TextDecoder().decode(fragment.canonicalPayload),
+          );
+          const resource = JSON.parse(
+            canonical.tables.taproot_resources[0].record_json,
+          );
+          const annotation = JSON.parse(
+            canonical.tables.taproot_annotations[0].record_json,
+          );
+          if (
+            resource.revision !== 2 ||
+            resource.title !== 'Fixture resource revision two' ||
+            annotation.revision !== 2 ||
+            annotation.body?.text !==
+              'Fixture annotation body, revision two.'
+          ) throw new Error('packed exact legacy revision evidence changed');
+        } finally {
+          await legacyDb.close();
+        }
+      }
     } finally {
       await db.close();
       await target.close();
@@ -419,6 +498,12 @@ writeFileSync(
 execFileSync(process.execPath, [join(root, 'smoke.mjs')], {
   cwd: root,
   stdio: 'inherit',
+  env: {
+    ...process.env,
+    ...(existsSync(exactLegacySnapshot)
+      ? { TAPROOT_EXACT_LEGACY_SNAPSHOT: exactLegacySnapshot }
+      : {}),
+  },
 });
 console.log(
   `consumer smoke passed for ${sourcePackage.name}@${sourcePackage.version}; sha256=${sha256}`,

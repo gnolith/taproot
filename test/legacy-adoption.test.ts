@@ -11,6 +11,7 @@ import {
   convertLegacyTaproot042ToBackupSectionV1,
   importTaprootBackupSectionV1,
   inspectLegacyTaproot042ForAdoptionV1,
+  legacyTaproot042MigrationManifestV1,
   registerTaprootMigrationLedgerOwnerHandleV1,
 } from '../src/backup.js';
 import { createTaprootHostWriteCapability } from '../src/index.js';
@@ -91,6 +92,40 @@ describe('Taproot 0.4.2 owner adoption', () => {
     }
   });
 
+  it('rejects checksum drift and keeps immutable 0.4.2 evidence independent of current migrations', async () => {
+    expect(legacyTaproot042MigrationManifestV1).toHaveLength(8);
+    const current = await Promise.all(
+      taprootMigrations.slice(0, 8).map(async (migration) => ({
+        id: migration.id,
+        checksum: await checksumMigration(migration),
+      })),
+    );
+    expect(current).not.toEqual(legacyTaproot042MigrationManifestV1);
+    const db = new NodeSqliteDatabase(':memory:');
+    try {
+      await createExact042(db);
+      await db
+        .prepare(
+          `UPDATE _gnolith_migrations SET checksum=?
+           WHERE namespace=? AND migration_id=?`,
+        )
+        .bind(
+          '0'.repeat(64),
+          taprootMigrationNamespace,
+          legacyTaproot042MigrationManifestV1[7].id,
+        )
+        .run();
+      await expect(
+        inspectLegacyTaproot042ForAdoptionV1(db, {
+          packageName: '@gnolith/taproot',
+          packageVersion: '0.4.2',
+        }),
+      ).rejects.toThrow(/ledger is not exact/u);
+    } finally {
+      await db.close();
+    }
+  });
+
   it('converts only a live inspected fragment to a current owner section', async () => {
     const source = new NodeSqliteDatabase(':memory:');
     const target = new NodeSqliteDatabase(':memory:');
@@ -160,12 +195,6 @@ describe('Taproot 0.4.2 owner adoption', () => {
 async function createExact042(db: NodeSqliteDatabase): Promise<void> {
   await migrateDiamondStore(db);
   const appliedAt = '2026-07-23T00:00:00.000Z';
-  const predecessors = await Promise.all(
-    taprootMigrations.slice(0, 8).map(async (migration) => ({
-      migration,
-      checksum: await checksumMigration(migration),
-    })),
-  );
   await db.batch([
     ...taprootPreArchitectureResetSchemaStatements.map((sql) =>
       db.prepare(sql),
@@ -185,14 +214,14 @@ async function createExact042(db: NodeSqliteDatabase): Promise<void> {
          '2026-07-23T00:00:00.000Z', '2026-07-23T00:00:00.000Z'
        )`,
     ),
-    ...predecessors.map(({ migration, checksum }) =>
+    ...legacyTaproot042MigrationManifestV1.map(({ id, checksum }) =>
       db
         .prepare(
           `INSERT INTO _gnolith_migrations(
              namespace, migration_id, checksum, adopted, applied_at
            ) VALUES (?, ?, ?, 0, ?)`,
         )
-        .bind(taprootMigrationNamespace, migration.id, checksum, appliedAt),
+        .bind(taprootMigrationNamespace, id, checksum, appliedAt),
     ),
   ]);
 }
