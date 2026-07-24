@@ -51,12 +51,19 @@ if (uniqueVersions.length !== 1 || uniqueVersions[0] !== '0.5.0')
 writeFileSync(
   join(root, 'smoke.mjs'),
   `
+    import {
+      createMigrationAssemblyAuthorityV1,
+      createMigrationLedgerBackupV1,
+      migrateDiamondStore,
+      registerMigrationLedgerOwnerV1,
+    } from '@gnolith/diamond';
     import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
     import * as taproot from '@gnolith/taproot';
     import * as search from '@gnolith/taproot/search';
     import * as backup from '@gnolith/taproot/backup';
     import * as sparql from '@gnolith/taproot/sparql-policy';
     const db = new NodeSqliteDatabase(':memory:');
+    const target = new NodeSqliteDatabase(':memory:');
     try {
       await taproot.initializeTaproot(db, { baseIri: 'https://consumer.example' });
       const inspection = await taproot.inspectTaprootSchema(db);
@@ -76,8 +83,96 @@ writeFileSync(
       ]) for (const name of names) {
         if (typeof module[name] !== 'function') throw new Error('missing export: ' + name);
       }
+      const installationId = 'packed-restore-installation';
+      const now = '2026-07-23T00:00:00.000Z';
+      await db.batch([
+        db.prepare(\`INSERT INTO taproot_installation_authorization(
+          singleton, installation_id, authorization_revision,
+          search_generation, last_advance_id, created_at, updated_at
+        ) VALUES (1, ?, 1, 1, 'bootstrap', ?, ?)\`).bind(installationId, now, now),
+        db.prepare(\`INSERT INTO taproot_authorization_principals(
+          installation_id, principal_id, created_at
+        ) VALUES (?, 'principal-1', ?)\`).bind(installationId, now),
+        db.prepare(\`INSERT INTO taproot_authorization_workspaces(
+          installation_id, workspace_id, created_at
+        ) VALUES (?, 'workspace-1', ?)\`).bind(installationId, now),
+        db.prepare(\`INSERT INTO taproot_authorization_grants(
+          installation_id, principal_id, workspace_id, capability,
+          authorization_revision, created_at
+        ) VALUES (?, 'principal-1', 'workspace-1', 'knowledge:write', 1, ?)\`).bind(installationId, now),
+      ]);
+      const sourceAssembly = createMigrationAssemblyAuthorityV1(db, installationId);
+      const sourceOwner = await registerMigrationLedgerOwnerV1({
+        db,
+        installationId,
+        namespace: taproot.taprootMigrationNamespace,
+        migrations: taproot.taprootMigrations,
+        assemblyAuthority: sourceAssembly,
+      });
+      const sourceLedgerBackup = createMigrationLedgerBackupV1(db, sourceAssembly);
+      const sourceKey = await crypto.subtle.generateKey(
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const sourceHandle = backup.registerTaprootMigrationLedgerOwnerHandleV1(
+        db,
+        { baseIri: 'https://consumer.example' },
+        taproot.createTaprootHostWriteCapability(
+          db,
+          { baseIri: 'https://consumer.example' },
+          sourceKey,
+        ),
+        sourceOwner,
+        sourceLedgerBackup,
+      );
+      const section = await backup.exportTaprootBackupSectionV1(
+        db,
+        installationId,
+        sourceHandle,
+      );
+      await migrateDiamondStore(target);
+      const targetAssembly = createMigrationAssemblyAuthorityV1(target, installationId);
+      const targetOwner = await registerMigrationLedgerOwnerV1({
+        db: target,
+        installationId,
+        namespace: taproot.taprootMigrationNamespace,
+        migrations: taproot.taprootMigrations,
+        assemblyAuthority: targetAssembly,
+      });
+      const targetLedgerBackup = createMigrationLedgerBackupV1(target, targetAssembly);
+      await targetLedgerBackup.restoreNamespace(targetOwner, section.ledger, { mode: 'empty' });
+      const targetKey = await crypto.subtle.generateKey(
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const targetHandle = backup.registerTaprootMigrationLedgerOwnerHandleV1(
+        target,
+        { baseIri: 'https://consumer.example' },
+        taproot.createTaprootHostWriteCapability(
+          target,
+          { baseIri: 'https://consumer.example' },
+          targetKey,
+        ),
+        targetOwner,
+        targetLedgerBackup,
+      );
+      await backup.importTaprootBackupSectionV1(
+        target,
+        section,
+        targetHandle,
+        { dryRun: true },
+      );
+      await backup.importTaprootBackupSectionV1(target, section, targetHandle);
+      const restored = await target.prepare(
+        'SELECT COUNT(*) AS count FROM taproot_authorization_grants',
+      ).all();
+      if (Number(restored.results[0]?.count ?? 0) !== 1)
+        throw new Error('packed owner restore lost authorization grants');
     } finally {
       await db.close();
+      await target.close();
     }
   `,
 );

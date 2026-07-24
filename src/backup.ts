@@ -360,6 +360,7 @@ const canonicalTables = [
   'taproot_annotations',
   'taproot_content_revisions',
   'taproot_content_audit',
+  'taproot_workshop_idempotency',
   'taproot_unified_search_source_events',
   'taproot_unified_search_source_registry',
   'taproot_external_search_kind_registrations',
@@ -392,6 +393,12 @@ const rebuildableDerivedTables = [
   'taproot_embedding_vectors',
   'taproot_embedding_work',
 ] as const;
+
+const schemaSeedTables = new Set([
+  'taproot_metadata',
+  'taproot_migrations',
+  'taproot_id_counters',
+]);
 
 export function registerTaprootMigrationLedgerOwnerHandleV1(
   db: D1DatabaseLike,
@@ -524,20 +531,34 @@ export async function importTaprootBackupSectionV1(
   await binding.backup.validateNamespace(ledgerHandle, section.ledger);
   const canonicalRows = validateImportTables(
     canonical.tables,
-    new Set(canonicalTables),
+    canonicalTables,
     installationId,
   );
   const derivedRows = derived
     ? validateImportTables(
         derived.tables,
-        new Set(rebuildableDerivedTables),
+        rebuildableDerivedTables,
         installationId,
       )
     : 0;
+  if (derived && derived.installationId !== installationId)
+    denied('Taproot backup payload installations do not match');
   await assertEmptyImportTarget(db);
   if (!options.dryRun) {
-    await importTables(db, canonical.tables);
-    if (derived) await importTables(db, derived.tables);
+    const statements = prepareImportStatements(
+      db,
+      canonical.tables,
+      canonicalTables,
+    );
+    if (derived)
+      statements.push(
+        ...prepareImportStatements(
+          db,
+          derived.tables,
+          rebuildableDerivedTables,
+        ),
+      );
+    if (statements.length) await db.batch(statements);
   }
   return {
     canonicalRows,
@@ -733,7 +754,10 @@ async function exportTables(
 ) {
   const output: Record<string, readonly Record<string, unknown>[]> = {};
   for (const table of tables) {
-    if (!(await tableExists(db, table))) continue;
+    if (!(await tableExists(db, table))) {
+      output[table] = [];
+      continue;
+    }
     const rows = await db
       .prepare(`SELECT * FROM "${table}"`)
       .all<Record<string, unknown>>();
@@ -788,9 +812,18 @@ function parsePayload(payload: Uint8Array): {
 
 function validateImportTables(
   tables: Record<string, Array<Record<string, unknown>>>,
-  allowed: Set<string>,
+  declaredOrder: readonly string[],
   installationId: string,
 ): number {
+  const keys = Object.keys(tables);
+  const allowed = new Set(declaredOrder);
+  if (
+    keys.length !== declaredOrder.length ||
+    declaredOrder.some(
+      (table) => !Object.prototype.hasOwnProperty.call(tables, table),
+    )
+  )
+    denied('Taproot backup table set is incomplete');
   let rows = 0;
   for (const [table, values] of Object.entries(tables)) {
     if (!allowed.has(table) || !Array.isArray(values))
@@ -808,19 +841,21 @@ function validateImportTables(
   return rows;
 }
 
-async function importTables(
+function prepareImportStatements(
   db: D1DatabaseLike,
   tables: Record<string, Array<Record<string, unknown>>>,
-): Promise<void> {
-  const statements = [];
-  for (const [table, rows] of Object.entries(tables)) {
+  declaredOrder: readonly string[],
+) {
+  const statements: ReturnType<D1DatabaseLike['prepare']>[] = [];
+  for (const table of declaredOrder) {
+    const rows = tables[table]!;
     for (const row of rows) {
       const columns = Object.keys(row);
       if (!columns.length) continue;
       statements.push(
         db
           .prepare(
-            `INSERT INTO "${table}"(${columns
+            `${schemaSeedTables.has(table) ? 'INSERT OR REPLACE' : 'INSERT'} INTO "${table}"(${columns
               .map((column) => `"${safeColumn(column)}"`)
               .join(',')}) VALUES (${columns.map(() => '?').join(',')})`,
           )
@@ -828,7 +863,7 @@ async function importTables(
       );
     }
   }
-  if (statements.length) await db.batch(statements);
+  return statements;
 }
 
 async function assertEmptyImportTarget(db: D1DatabaseLike): Promise<void> {

@@ -19,6 +19,9 @@
   qualifier, reference, and rank changes.
 - Preserved ordered per-command authored text for atomic Workshop entity edits
   and added bounded, exact-revision Resource payload hydration.
+- Made owner backup import independent of canonical JSON object-key order by
+  validating the exact table manifest and restoring canonical and derived rows
+  in declared foreign-key dependency order within one atomic batch.
 
 - Reset search to four built-in kinds (`item`, `statement`, `resource`, and
   `annotation`) plus privately branded, namespace-bound external kinds.

@@ -86,6 +86,11 @@ redirects, or audit history.
 After database restore, run schema inspection and paginated integrity checks.
 After JSON-only import, projections are generated during each import.
 
+Owner-section restore validates the exact canonical table manifest before
+writing. It ignores serialized object-key order, imports in Taproot's declared
+foreign-key dependency order, and commits canonical plus requested derived rows
+as one batch. A constraint failure leaves no partial owner rows.
+
 Taproot documents persistence semantics but does not select or provision a D1
 database, run remote migrations, configure backups, deploy an application, or
 accept a complete Gnolith Site. The Codex agent creating a Site owns those
