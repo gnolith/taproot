@@ -11,6 +11,16 @@ inspects the packed artifact, publishes to npm through OIDC trusted publishing,
 and attaches the tarball, SBOM, checksums, and build attestation to a GitHub
 Release.
 
+Every CI quality run also executes the deterministic
+`release:candidate` generator and uploads a commit-named candidate artifact.
+The bundle contains the exact npm tarball, a runtime-only CycloneDX JSON SBOM,
+checksum-bound provenance, and `SHA256SUMS`. The SBOM and provenance both bind
+the package SHA-256 to the source commit and tree. `release:check` produces the
+bundle twice and requires byte-identical inventories before accepting it.
+Maintainer handoffs regenerate this bundle from the merged `main` commit into
+the stable candidate evidence directory; pre-merge or working-tree hashes are
+never represented as final release coordinates.
+
 A Taproot release qualifies the published package and its supported local
 runtime contracts. It does not assemble, provision, deploy, or accept a complete
 Gnolith Site; the Codex agent creating a Site owns those responsibilities.

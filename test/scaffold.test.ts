@@ -44,6 +44,27 @@ describe('package release guard', () => {
     expect(qdrant).toContain("const PLATFORM = 'linux/amd64'");
   });
 
+  it('binds deterministic runtime SBOM evidence to package and source hashes', () => {
+    const root = new URL('..', import.meta.url);
+    const candidate = readFileSync(
+      new URL('scripts/release-candidate.mjs', root),
+      'utf8',
+    );
+    const releaseCheck = readFileSync(
+      new URL('scripts/release-check.mjs', root),
+      'utf8',
+    );
+    const ci = readFileSync(new URL('.github/workflows/ci.yml', root), 'utf8');
+    expect(candidate).toContain("'--omit=dev'");
+    expect(candidate).toContain('gnolith:package:integrity');
+    expect(candidate).toContain('gnolith:source:commit');
+    expect(candidate).toContain('gnolith:source:tree');
+    expect(candidate).toContain('SHA256SUMS');
+    expect(releaseCheck).toContain('release candidate inventories differ');
+    expect(releaseCheck).toContain('is not deterministic');
+    expect(ci).toContain('taproot-release-candidate-${{ github.sha }}');
+  });
+
   it('rejects malformed input and empty command batches before touching D1', async () => {
     expect(() => parseEntityJson('{not-json')).toThrow(InvalidEntityError);
     expect(() => parseEntityJson('{"id":"Q1"}')).toThrow(InvalidEntityError);

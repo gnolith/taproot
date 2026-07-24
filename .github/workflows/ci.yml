@@ -33,6 +33,15 @@ jobs:
       - run: npm run licenses:check
       - run: npm run repository:check
       - run: npm run pack:check
+      - name: Verify deterministic release evidence
+        run: npm run release:check -- "v$(node -p 'require("./package.json").version')"
+      - name: Generate checksum-bound release candidate
+        run: npm run release:candidate -- --output .release-candidate
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: taproot-release-candidate-${{ github.sha }}
+          path: .release-candidate/
+          if-no-files-found: error
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: taproot-coverage

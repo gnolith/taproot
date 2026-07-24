@@ -90,6 +90,7 @@
     "baseline:search-source-events": "npm run build && node scripts/search-source-event-baseline.mjs",
     "baseline:search-materialization": "npm run build && node scripts/search-materialization-baseline.mjs",
     "release:check": "node scripts/release-check.mjs",
+    "release:candidate": "node scripts/release-candidate.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run test/repository.test.ts test/interop.test.ts",

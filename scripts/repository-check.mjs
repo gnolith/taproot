@@ -48,6 +48,7 @@ const requiredFiles = [
   'scripts/consumer-smoke.mjs',
   'scripts/typescript-consumer.mjs',
   'scripts/release-check.mjs',
+  'scripts/release-candidate.mjs',
 ];
 
 const repositoryFiles = execFileSync('git', [
@@ -160,10 +161,10 @@ for (const required of [
   'tag_type="$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")"',
   'test "$tag_type" = tag',
   'npm run release:check',
-  'npm sbom',
-  'sha256sum',
+  'npm run release:candidate',
+  'release-candidate/*',
   'actions/attest-build-provenance@',
-  'npm publish ./*.tgz --access public --provenance',
+  'npm publish release-candidate/*.tgz --access public --provenance',
 ]) {
   assert.ok(
     release.includes(required),
@@ -178,6 +179,32 @@ assert.ok(
   !release.includes('NODE_AUTH_TOKEN'),
   'release workflow contains NODE_AUTH_TOKEN',
 );
+
+const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+for (const required of [
+  'npm run release:check',
+  'npm run release:candidate',
+  'taproot-release-candidate-${{ github.sha }}',
+]) {
+  assert.ok(
+    ci.includes(required),
+    `CI workflow is missing candidate evidence: ${required}`,
+  );
+}
+
+const candidate = readFileSync('scripts/release-candidate.mjs', 'utf8');
+for (const required of [
+  "'--omit=dev'",
+  'gnolith:package:integrity',
+  'gnolith:source:commit',
+  'gnolith:source:tree',
+  'SHA256SUMS',
+]) {
+  assert.ok(
+    candidate.includes(required),
+    `release candidate generator is missing: ${required}`,
+  );
+}
 
 console.log(
   `package repository structure validated: ${requiredFiles.length} required files, ` +

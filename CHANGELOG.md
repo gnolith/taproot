@@ -2,6 +2,10 @@
 
 ## 0.5.0
 
+- Generate a deterministic release-candidate bundle containing the exact npm
+  package, runtime-only CycloneDX SBOM, checksum-bound source/package
+  provenance, and `SHA256SUMS`. Required CI uploads commit-named evidence, and
+  release validation rejects byte drift across two independent generations.
 - Treat semantic provider endpoints as exact full POST URLs and never append a
   provider route. Persisted declarative SQLite and Qdrant bindings now
   reconstruct automatically after restart, and semantic status exposes a
