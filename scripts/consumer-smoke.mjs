@@ -484,6 +484,91 @@ writeFileSync(
             annotation.body?.text !==
               'Fixture annotation body, revision two.'
           ) throw new Error('packed exact legacy revision evidence changed');
+
+          const legacyTarget = new NodeSqliteDatabase(':memory:');
+          try {
+            await taproot.initializeTaproot(legacyTarget, {
+              baseIri: fragment.baseIri,
+            });
+            const legacyAssembly = createMigrationAssemblyAuthorityV1(
+              legacyTarget,
+              fragment.installationId,
+            );
+            const legacyOwner = await registerMigrationLedgerOwnerV1({
+              db: legacyTarget,
+              installationId: fragment.installationId,
+              namespace: taproot.taprootMigrationNamespace,
+              migrations: taproot.taprootMigrations,
+              assemblyAuthority: legacyAssembly,
+            });
+            const legacyLedgerBackup = createMigrationLedgerBackupV1(
+              legacyTarget,
+              legacyAssembly,
+            );
+            const legacyKey = await crypto.subtle.generateKey(
+              { name: 'HMAC', hash: 'SHA-256' },
+              false,
+              ['sign'],
+            );
+            const legacyHandle =
+              backup.registerTaprootMigrationLedgerOwnerHandleV1(
+                legacyTarget,
+                { baseIri: fragment.baseIri },
+                taproot.createTaprootHostWriteCapability(
+                  legacyTarget,
+                  { baseIri: fragment.baseIri },
+                  legacyKey,
+                ),
+                legacyOwner,
+                legacyLedgerBackup,
+              );
+            const converted =
+              await backup.convertLegacyTaproot042ToBackupSectionV1(
+                legacyTarget,
+                fragment,
+                legacyHandle,
+              );
+            await backup.importTaprootBackupSectionV1(
+              legacyTarget,
+              converted,
+              legacyHandle,
+            );
+            const ready = await taproot.inspectTaprootSchema(legacyTarget);
+            if (!ready.valid || ready.versions.schema_version !== '9')
+              throw new Error('packed legacy import is not migration-ready');
+            const currentLedger = await legacyLedgerBackup.exportNamespace(
+              legacyOwner,
+            );
+            if (
+              currentLedger.entries.length !== 9 ||
+              currentLedger.entries[8]?.id !== '0009-architecture-reset'
+            ) throw new Error('packed legacy import lost current ledger');
+            const roundTrip = await backup.exportTaprootBackupSectionV1(
+              legacyTarget,
+              fragment.installationId,
+              legacyHandle,
+            );
+            const importedCanonical = JSON.parse(
+              new TextDecoder().decode(roundTrip.canonicalPayload),
+            );
+            const importedResource = JSON.parse(
+              importedCanonical.tables.taproot_resources[0].record_json,
+            );
+            const importedAnnotation = JSON.parse(
+              importedCanonical.tables.taproot_annotations[0].record_json,
+            );
+            if (
+              importedCanonical.tables.taproot_entities.length !== 4 ||
+              importedCanonical.tables.taproot_entity_revisions.length +
+                importedCanonical.tables.taproot_content_revisions.length !==
+                10 ||
+              importedResource.title !== 'Fixture resource revision two' ||
+              importedAnnotation.body?.text !==
+                'Fixture annotation body, revision two.'
+            ) throw new Error('packed legacy import lost canonical evidence');
+          } finally {
+            await legacyTarget.close();
+          }
         } finally {
           await legacyDb.close();
         }

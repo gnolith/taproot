@@ -21,6 +21,7 @@ import {
 } from '../src/migrations.js';
 import {
   initializeTaproot,
+  inspectTaprootSchema,
   taprootPreArchitectureResetSchemaStatements,
 } from '../src/schema.js';
 
@@ -173,11 +174,57 @@ describe('Taproot 0.4.2 owner adoption', () => {
       );
       expect(section.ledger.entries).toHaveLength(9);
       expect(section.legacySourceLedger?.entries).toHaveLength(8);
+      const converted = JSON.parse(
+        new TextDecoder().decode(section.canonicalPayload),
+      ) as {
+        tables: {
+          taproot_metadata: Array<{
+            metadata_key: string;
+            metadata_value: string;
+          }>;
+          taproot_migrations: Array<{ version: number; name: string }>;
+        };
+      };
+      expect(
+        converted.tables.taproot_metadata.find(
+          (row) => row.metadata_key === 'schema_version',
+        )?.metadata_value,
+      ).toBe('9');
+      expect(converted.tables.taproot_migrations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            version: 9,
+            name: 'architecture-reset',
+          }),
+        ]),
+      );
       await expect(
         importTaprootBackupSectionV1(target, section, handle, {
           dryRun: true,
         }),
       ).resolves.toMatchObject({ dryRun: true });
+      await target
+        .prepare(
+          `UPDATE taproot_metadata SET metadata_value='8'
+           WHERE metadata_key='schema_version'`,
+        )
+        .run();
+      await expect(
+        importTaprootBackupSectionV1(target, section, handle),
+      ).rejects.toThrow(/schema seeds are not current/u);
+      await target
+        .prepare(
+          `UPDATE taproot_metadata SET metadata_value='9'
+           WHERE metadata_key='schema_version'`,
+        )
+        .run();
+      await expect(
+        importTaprootBackupSectionV1(target, section, handle),
+      ).resolves.toMatchObject({ dryRun: false });
+      await expect(inspectTaprootSchema(target)).resolves.toMatchObject({
+        valid: true,
+        versions: { schema_version: '9' },
+      });
       await expect(
         convertLegacyTaproot042ToBackupSectionV1(
           target,

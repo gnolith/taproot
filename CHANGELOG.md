@@ -6,6 +6,9 @@
   explicit migration ID/checksum manifest captured from the public 0.4.2
   package with Diamond 0.4.1. Legacy evidence is no longer derived from the
   current migration catalog.
+- Keep current schema metadata and migration seeds authoritative during legacy
+  conversion/import while preserving all legacy canonical entities, revision
+  history, content records, and payload descriptors.
 
 - Add the sealed `AuthorizationAdministrationV1` owner protocol for
   revision-bound principal, workspace, grant, and canonical visibility

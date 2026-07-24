@@ -357,13 +357,28 @@ export async function convertLegacyTaproot042ToBackupSectionV1(
     denied('live Taproot legacy adoption fragment is required');
   const binding = assertLedgerHandle(target, targetLedgerHandle);
   const ledger = await binding.backup.exportNamespace(targetLedgerHandle);
+  const legacyCanonical = parsePayload(fragment.canonicalPayload);
+  const currentSeeds = await exportTables(target, fragment.installationId, [
+    'taproot_metadata',
+    'taproot_migrations',
+  ]);
+  const convertedCanonical = {
+    ...legacyCanonical,
+    tables: {
+      ...legacyCanonical.tables,
+      taproot_metadata: currentSeeds.tables.taproot_metadata ?? [],
+      taproot_migrations: currentSeeds.tables.taproot_migrations ?? [],
+    },
+  };
+  const canonicalPayload = encoder.encode(canonicalJson(convertedCanonical));
+  const canonicalSha256 = await sha256(canonicalPayload);
   const withoutHash = {
     owner: 'taproot',
     formatVersion: 1,
     schemaVersion: '9',
     ledger,
     legacySourceLedger: fragment.ledger,
-    canonicalSha256: fragment.canonicalSha256,
+    canonicalSha256,
     derivedState: 'rebuildable',
     legacyAdoptionSha256: fragment.sha256,
   };
@@ -374,7 +389,7 @@ export async function convertLegacyTaproot042ToBackupSectionV1(
     ledger,
     legacySourceLedger: fragment.ledger,
     legacyAdoptionSha256: fragment.sha256,
-    canonicalPayload: fragment.canonicalPayload,
+    canonicalPayload,
     sha256: await sha256(encoder.encode(canonicalJson(withoutHash))),
   });
 }
@@ -573,6 +588,8 @@ export async function importTaprootBackupSectionV1(
       ? parsePayload(section.derivedPayload)
       : null;
   await binding.backup.validateNamespace(ledgerHandle, section.ledger);
+  if (section.legacySourceLedger)
+    await assertCurrentSchemaSeeds(db, canonical.tables);
   const canonicalRows = validateImportTables(
     canonical.tables,
     canonicalTables,
@@ -609,6 +626,23 @@ export async function importTaprootBackupSectionV1(
     derivedRows,
     dryRun: options.dryRun === true,
   };
+}
+
+async function assertCurrentSchemaSeeds(
+  db: D1DatabaseLike,
+  tables: Record<string, Array<Record<string, unknown>>>,
+): Promise<void> {
+  const current = await exportTables(db, '', [
+    'taproot_metadata',
+    'taproot_migrations',
+  ]);
+  for (const table of ['taproot_metadata', 'taproot_migrations'] as const) {
+    if (
+      canonicalJson(tables[table] ?? []) !==
+      canonicalJson(current.tables[table] ?? [])
+    )
+      denied('legacy Taproot conversion schema seeds are not current');
+  }
 }
 
 export async function enumerateResourceBlobDescriptorsV1(
