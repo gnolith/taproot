@@ -47,6 +47,7 @@ const requiredFiles = [
   'scripts/search-materialization-baseline.mjs',
   'scripts/consumer-smoke.mjs',
   'scripts/typescript-consumer.mjs',
+  'scripts/materialize-diamond.mjs',
   'scripts/release-check.mjs',
   'scripts/release-candidate.mjs',
 ];
@@ -127,7 +128,7 @@ for (const workflow of repositoryFiles.filter((file) =>
   const text = readFileSync(workflow, 'utf8');
   assert.doesNotMatch(
     text,
-    /repository:\s*gnolith\/diamond|DIAMOND_TARBALL|\.diamond-handoff|qdrant\/qdrant:v1\.15\.4/,
+    /DIAMOND_TARBALL|\.diamond-handoff|qdrant\/qdrant:v1\.15\.4/,
     `${workflow} contains a stale runtime source or pin`,
   );
   for (const match of text.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)/gm)) {
@@ -135,6 +136,24 @@ for (const workflow of repositoryFiles.filter((file) =>
       match[1],
       /@[0-9a-f]{40}$/,
       `${workflow} action is not pinned to a full commit: ${match[1]}`,
+    );
+  }
+  const installs = [...text.matchAll(/^\s*- run: npm ci\s*$/gm)].length;
+  const materializations = [
+    ...text.matchAll(
+      /^\s*- run: npm run materialize:diamond -- --source \.diamond-source\s*$/gm,
+    ),
+  ].length;
+  assert.equal(
+    materializations,
+    installs,
+    `${workflow} must materialize exact Diamond before every npm ci`,
+  );
+  if (installs) {
+    assert.ok(
+      text.includes('repository: gnolith/diamond') &&
+        text.includes('ref: e82f58ba8028ff9c16a34f4b8a9a2bc356495b64'),
+      `${workflow} must checkout the pinned Diamond source`,
     );
   }
 }
@@ -169,6 +188,21 @@ for (const required of [
   assert.ok(
     release.includes(required),
     `release workflow is missing: ${required}`,
+  );
+}
+
+const diamondMaterializer = readFileSync(
+  'scripts/materialize-diamond.mjs',
+  'utf8',
+);
+for (const required of [
+  'e82f58ba8028ff9c16a34f4b8a9a2bc356495b64',
+  "lock.packages?.['node_modules/@gnolith/diamond']",
+  'Diamond tarball integrity mismatch',
+]) {
+  assert.ok(
+    diamondMaterializer.includes(required),
+    `Diamond materializer is missing: ${required}`,
   );
 }
 assert.ok(

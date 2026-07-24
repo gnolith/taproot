@@ -84,6 +84,7 @@
     "format:check": "prettier --check .",
     "licenses:check": "license-checker-rseidelsohn --production --summary --onlyAllow \"MIT;ISC;BSD-2-Clause;Apache-2.0;BSD-3-Clause;BlueOak-1.0.0;FreeBSD;(WTFPL OR MIT);UNLICENSED\"",
     "lint": "eslint .",
+    "materialize:diamond": "node scripts/materialize-diamond.mjs",
     "pack:check": "npm pack --dry-run",
     "prepack": "npm run build",
     "repository:check": "node scripts/repository-check.mjs",

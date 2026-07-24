@@ -19,10 +19,16 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gnolith/diamond
+          ref: e82f58ba8028ff9c16a34f4b8a9a2bc356495b64
+          path: .diamond-source
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
+      - run: npm run materialize:diamond -- --source .diamond-source
       - run: npm ci
       - run: npm run format:check
       - run: npm run lint
@@ -57,10 +63,16 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gnolith/diamond
+          ref: e82f58ba8028ff9c16a34f4b8a9a2bc356495b64
+          path: .diamond-source
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - run: npm run materialize:diamond -- --source .diamond-source
       - run: npm ci
       - run: npm run typecheck
       - run: npm run test:unit
@@ -73,9 +85,15 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gnolith/diamond
+          ref: e82f58ba8028ff9c16a34f4b8a9a2bc356495b64
+          path: .diamond-source
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+      - run: npm run materialize:diamond -- --source .diamond-source
       - run: npm ci
       - run: npm run consumer:check
 
@@ -84,9 +102,15 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gnolith/diamond
+          ref: e82f58ba8028ff9c16a34f4b8a9a2bc356495b64
+          path: .diamond-source
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
+      - run: npm run materialize:diamond -- --source .diamond-source
       - run: npm ci
       - run: npm run test:qdrant

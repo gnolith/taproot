@@ -6,6 +6,11 @@
   package, runtime-only CycloneDX SBOM, checksum-bound source/package
   provenance, and `SHA256SUMS`. Required CI uploads commit-named evidence, and
   release validation rejects byte drift across two independent generations.
+- Materialize the unpublished exact Diamond 0.5.0 dependency from its pinned
+  source commit before hosted installs and verify the generated tarball
+  against the package-lock SHA-512. This keeps CI and release workflows
+  cross-platform and checksum-bound without weakening the registry-only public
+  package manifest.
 - Treat semantic provider endpoints as exact full POST URLs and never append a
   provider route. Persisted declarative SQLite and Qdrant bindings now
   reconstruct automatically after restart, and semantic status exposes a

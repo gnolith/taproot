@@ -21,6 +21,12 @@ Maintainer handoffs regenerate this bundle from the merged `main` commit into
 the stable candidate evidence directory; pre-merge or working-tree hashes are
 never represented as final release coordinates.
 
+Until Diamond 0.5.0 is registry-published, hosted workflows check out its exact
+pinned source commit, build the local dependency tarball before `npm ci`, and
+verify it against the SHA-512 already recorded in `package-lock.json`. The
+public Taproot manifest remains registry-only; no local file dependency is
+exposed to package consumers.
+
 A Taproot release qualifies the published package and its supported local
 runtime contracts. It does not assemble, provision, deploy, or accept a complete
 Gnolith Site; the Codex agent creating a Site owns those responsibilities.

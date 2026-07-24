@@ -36,12 +36,18 @@ describe('package release guard', () => {
       new URL('scripts/qdrant-conformance.mjs', root),
       'utf8',
     );
+    const materializer = readFileSync(
+      new URL('scripts/materialize-diamond.mjs', root),
+      'utf8',
+    );
     expect(consumer).toContain("uniqueVersions[0] !== '0.5.0'");
     expect(consumer).toContain('DIAMOND_TARBALL');
     expect(qdrant).toContain(
       'qdrant/qdrant:v1.18.2@sha256:da65a06bc75e42702f80c992b99c5144b0fbd675ae7a96d2991de0bf957b7071',
     );
     expect(qdrant).toContain("const PLATFORM = 'linux/amd64'");
+    expect(materializer).toContain('e82f58ba8028ff9c16a34f4b8a9a2bc356495b64');
+    expect(materializer).toContain('Diamond tarball integrity mismatch');
   });
 
   it('binds deterministic runtime SBOM evidence to package and source hashes', () => {
