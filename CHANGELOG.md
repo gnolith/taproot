@@ -14,7 +14,10 @@
   timestamps. Fresh restore targets establish their registered canonical base
   IRI before importing domain state. Add a package-owned migration-ledger
   restore primitive that converges immutable sequential migration replay to
-  the same exact physical catalog as fresh initialization.
+  the same exact physical catalog as fresh initialization. Legacy import
+  rebuilds Taproot's RDF ownership and Diamond quad projection from canonical
+  entities, and persistence inspection reports bounded readiness errors
+  instead of swallowing semantic or seed failures.
 
 - Add the sealed `AuthorizationAdministrationV1` owner protocol for
   revision-bound principal, workspace, grant, and canonical visibility

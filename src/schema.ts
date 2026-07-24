@@ -2107,6 +2107,70 @@ export async function backfillRdfOwnership(
   }
 }
 
+export function prepareCanonicalRdfProjectionStatements(
+  db: SqliteDatabaseLike,
+  rows: readonly Record<string, unknown>[],
+  baseIri: string,
+): readonly SqlitePreparedStatementLike[] {
+  const factory = new DataFactory();
+  const quads: ReturnType<typeof lifecycleQuads> = [];
+  const ownership: Array<{
+    entityId: string;
+    rows: Array<{
+      subjectKey: string;
+      predicateKey: string;
+      objectKey: string;
+      graphKey: string;
+    }>;
+  }> = [];
+  for (const row of rows) {
+    if (
+      typeof row.entity_id !== 'string' ||
+      typeof row.entity_json !== 'string'
+    )
+      throw new SchemaMismatchError(
+        'Taproot canonical entity projection input is invalid',
+      );
+    const current = lifecycleQuads(
+      parseEntityJson(row.entity_json),
+      typeof row.deleted_at === 'string' ? row.deleted_at : null,
+      typeof row.redirect_to === 'string'
+        ? (row.redirect_to as EntityId)
+        : null,
+      baseIri,
+      TAPROOT_RDF_VERSION,
+      factory,
+    );
+    quads.push(...current);
+    ownership.push({
+      entityId: row.entity_id,
+      rows: current.map((quad) => ({
+        subjectKey: encodeTerm(quad.subject).key,
+        predicateKey: encodeTerm(quad.predicate).key,
+        objectKey: encodeTerm(quad.object).key,
+        graphKey: encodeTerm(quad.graph).key,
+      })),
+    });
+  }
+  return [
+    ...prepareQuadPatch(db, { delete: [], insert: quads }).statements,
+    ...ownership.map(({ entityId, rows: entityRows }) =>
+      db
+        .prepare(
+          `INSERT INTO taproot_rdf_ownership(
+             entity_id, subject_key, predicate_key, object_key, graph_key
+           )
+           SELECT ?, json_extract(value, '$.subjectKey'),
+             json_extract(value, '$.predicateKey'),
+             json_extract(value, '$.objectKey'),
+             json_extract(value, '$.graphKey')
+           FROM json_each(?)`,
+        )
+        .bind(entityId, JSON.stringify(entityRows)),
+    ),
+  ];
+}
+
 function lifecycleQuads(
   entity: WikibaseEntity,
   deletedAt: string | null,

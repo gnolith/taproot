@@ -135,6 +135,7 @@ export interface TaprootPersistenceInspection {
   baseIri: string | null;
   schema: Awaited<ReturnType<typeof inspectTaprootSchema>>;
   migrations: TaprootMigrationPlanEntry[];
+  readinessErrors: string[];
   current: boolean;
 }
 
@@ -181,27 +182,50 @@ export async function inspectTaprootPersistence(
   const phase = await readMetadata(db, migrationPhaseKey);
   const migrations = await planTaprootMigrations(db, schema);
   let semanticCurrent = false;
+  const readinessErrors: string[] = [];
   const canonicalIdentity =
     baseIri === undefined ? undefined : tryCanonicalizeBaseIri(baseIri);
-  if (
-    schema.valid &&
-    baseIri !== undefined &&
-    canonicalIdentity === baseIri &&
-    phase === undefined &&
-    migrations.every(({ status }) => status === 'applied')
-  ) {
+  if (!schema.valid)
+    readinessErrors.push('Taproot schema catalog is not current');
+  if (baseIri === undefined)
+    readinessErrors.push('Taproot database identity is missing');
+  else if (canonicalIdentity === undefined)
+    readinessErrors.push(
+      'Taproot database identity is not a valid HTTP(S) IRI',
+    );
+  else if (canonicalIdentity !== baseIri)
+    readinessErrors.push(
+      `Taproot database identity is not canonical; expected ${canonicalIdentity}`,
+    );
+  if (phase !== undefined)
+    readinessErrors.push('Taproot migration recovery is incomplete');
+  const incompleteMigrations = migrations
+    .filter(({ status }) => status !== 'applied')
+    .map(({ id, status }) => `${id}:${status}`);
+  if (incompleteMigrations.length)
+    readinessErrors.push(
+      `Taproot migrations are not current: ${incompleteMigrations.join(',')}`,
+    );
+  if (readinessErrors.length === 0) {
     try {
-      await verifyTaprootSemanticState(db, canonicalIdentity);
-      await verifyTaprootPackageSeeds(db);
-      semanticCurrent = true;
+      await verifyTaprootSemanticState(db, canonicalIdentity!);
     } catch (cause) {
       if (!(cause instanceof SchemaMismatchError)) throw cause;
+      readinessErrors.push(cause.message);
     }
+    try {
+      await verifyTaprootPackageSeeds(db);
+    } catch (cause) {
+      if (!(cause instanceof SchemaMismatchError)) throw cause;
+      readinessErrors.push(cause.message);
+    }
+    semanticCurrent = readinessErrors.length === 0;
   }
   return {
     baseIri: baseIri ?? null,
     schema,
     migrations,
+    readinessErrors,
     current: semanticCurrent,
   };
 }

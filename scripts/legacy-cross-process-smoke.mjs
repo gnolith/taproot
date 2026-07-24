@@ -110,7 +110,10 @@ if (phase === 'run') {
   );
   const target = new NodeSqliteDatabase(':memory:');
   try {
-    const importBaseIri = 'https://independent-import-target.invalid/gnolith';
+    const importBaseIri =
+      phase === 'import-existing'
+        ? 'https://independent-import-target.invalid/gnolith'
+        : snapshot.manifest.baseIri;
     const runtime =
       phase === 'import-fresh' || phase === 'import-raw'
         ? await registerBlankTarget(
@@ -183,6 +186,15 @@ if (phase === 'run') {
       ready.valid && ready.versions.schema_version === '9',
       'cross-process import is not migration-ready',
     );
+    if (phase !== 'import-existing') {
+      const persistence = await taproot.inspectTaprootPersistence(target);
+      assert(
+        persistence.current === true,
+        `cross-process import is not current: ${JSON.stringify(
+          persistence.readinessErrors,
+        )}`,
+      );
+    }
     const appliedAt = await target
       .prepare(
         `SELECT COUNT(*) AS count FROM taproot_migrations

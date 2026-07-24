@@ -2,11 +2,15 @@ import type { D1DatabaseLike } from './sqlite-types.js';
 import type { TaprootHostWriteCapability } from './assembly-authority.js';
 import { assertTaprootHostWriteCapabilityInternal } from './assembly-authority.js';
 import { InvalidAuthorizationError } from './errors.js';
-import { taprootMigrationNamespace } from './migrations.js';
+import {
+  canonicalizeTaprootBaseIri,
+  taprootMigrationNamespace,
+} from './migrations.js';
 import {
   isExactTaprootSchema,
   isExactTaprootSequentialMigrationSchema,
   prepareArchitectureResetStorageStatements,
+  prepareCanonicalRdfProjectionStatements,
 } from './schema.js';
 import type {
   MigrationLedgerBackup,
@@ -485,7 +489,7 @@ export function registerTaprootMigrationLedgerOwnerHandleV1(
   ledgerHandleBindings.set(liveDiamondOwnerHandle, {
     db,
     backup: ledgerBackup,
-    baseIri: options.baseIri,
+    baseIri: canonicalizeTaprootBaseIri(options.baseIri),
   });
   return liveDiamondOwnerHandle;
 }
@@ -635,6 +639,7 @@ export async function importTaprootBackupSectionV1(
           canonical.tables,
           binding.baseIri,
         )),
+        taproot_rdf_ownership: [],
       }
     : canonical.tables;
   const canonicalRows = validateImportTables(
@@ -656,6 +661,13 @@ export async function importTaprootBackupSectionV1(
     const statements = [
       ...convergence,
       ...prepareImportStatements(db, importTables, canonicalTables),
+      ...(section.legacySourceLedger
+        ? prepareCanonicalRdfProjectionStatements(
+            db,
+            canonical.tables.taproot_entities ?? [],
+            binding.baseIri,
+          )
+        : []),
     ];
     if (derived)
       statements.push(
