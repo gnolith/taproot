@@ -22,3 +22,25 @@ not the installation authorization revision. A successful update may narrow
 or widen visibility under the sealed administration capability and creates
 exactly one new Entity revision. A stale target revision raises
 `RevisionConflictError`; an unknown Entity raises `EntityNotFoundError`.
+
+Visibility uses canonical conjunctive normal form (CNF): the outer `clauses`
+array is an AND, while the atoms inside each clause are alternatives joined by
+OR. To make an Entity visible to either its owner or a reader, put both
+principal atoms in one clause:
+
+```json
+{
+  "version": 1,
+  "clauses": [
+    [
+      { "kind": "principal", "principalId": "owner" },
+      { "kind": "principal", "principalId": "reader" }
+    ]
+  ]
+}
+```
+
+Two singleton clauses instead mean `owner AND reader`. Because one request
+principal cannot have both identities, administration rejects that policy
+when it would exclude the updating caller. It is never silently rewritten or
+stored as an OR.

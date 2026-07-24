@@ -9,6 +9,11 @@
 - Allow sealed authorization administration to set either narrower or wider
   visibility on an exact existing Entity revision while retaining target CAS,
   immutable Entity/audit history, and atomic authorization/search advancement.
+  Packed and integration coverage now proves owner-or-reader CNF policies on a
+  clean Q2 revision 1 and a statement-bearing Q1 revision 3, including replay,
+  restart filtering, and rejection of the unsatisfiable two-singleton
+  owner-AND-reader form. Public guidance explicitly distinguishes outer AND
+  clauses from inner OR atoms.
 - Identical Item and Property label updates are true semantic no-ops. Public
   mutation receipts and Workshop-facing write results expose an explicit
   `changed` disposition, while no-op writes retain authorization validation

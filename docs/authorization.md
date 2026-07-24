@@ -13,6 +13,9 @@ attribution, or a generic `admin` label.
 
 `VisibilityScopeV1` is canonical CNF: clauses are ANDed and atoms within a
 clause are ORed. An empty clause list is public; an empty clause is invalid.
+For principal alternatives such as `owner OR reader`, use one clause containing
+both principal atoms. Two singleton principal clauses mean
+`owner AND reader`, not OR, and cannot be satisfied by one caller identity.
 Normalization validates and NFC-normalizes bounded identifiers, removes
 duplicates, and sorts by Unicode code unit. Intersection concatenates clauses,
 so a statement restriction can only narrow its parent Item.

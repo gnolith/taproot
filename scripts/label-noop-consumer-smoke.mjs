@@ -261,6 +261,103 @@ try {
         },
       },
     );
+  const commitAdministration = async (command, idempotencyKey) => {
+    context = await resolve(port);
+    const input = {
+      installationId,
+      expectedAuthorizationRevision: context.authorizationRevision,
+      idempotencyKey,
+      command,
+    };
+    const participant = await taproot.prepareAuthorizationAdministrationV1(
+      db,
+      options,
+      authority,
+      input,
+      context,
+    );
+    return {
+      input,
+      receipt: await taproot.commitAuthorizationAdministrationV1(
+        participant,
+        await administrationOwner.seal(participant, {}),
+      ),
+    };
+  };
+  await commitAdministration(
+    { type: 'put-principal', principalId: 'principal-reader' },
+    'packed-register-reader',
+  );
+  await commitAdministration(
+    { type: 'put-principal', principalId: 'principal-outsider' },
+    'packed-register-outsider',
+  );
+  await commitAdministration(
+    {
+      type: 'put-grant',
+      principalId: 'principal-reader',
+      workspaceId: 'workspace-1',
+      capability: 'knowledge:read',
+      granted: true,
+    },
+    'packed-grant-reader',
+  );
+  context = await resolve(port);
+  await port.createItem(
+    {
+      id: 'Q2',
+      labels: { en: { language: 'en', value: 'Clean visibility item' } },
+    },
+    { idempotencyKey: 'packed-create-q2-clean' },
+    context,
+  );
+  const ownerOrReader = {
+    version: 1,
+    // CNF clauses are ANDed; owner and reader alternatives share one OR-clause.
+    clauses: [
+      [
+        { kind: 'principal', principalId: 'principal-1' },
+        { kind: 'principal', principalId: 'principal-reader' },
+      ],
+    ],
+  };
+  const q2Visibility = await commitAdministration(
+    {
+      type: 'set-entity-visibility',
+      entityId: 'Q2',
+      expectedRevision: 1,
+      visibility: ownerOrReader,
+    },
+    'packed-visibility-policy-set-q2-1',
+  );
+  const q2After = await entityVisibilityState(db, 'Q2');
+  if (
+    q2Visibility.receipt.replayed ||
+    q2After.entityRevision !== 2 ||
+    q2After.sourceRevision !== 2 ||
+    q2After.visibilityJson !== JSON.stringify(ownerOrReader)
+  )
+    throw new Error('packed clean Q2 revision 1 visibility did not commit');
+  context = await resolve(port);
+  const q2Replay = await taproot.prepareAuthorizationAdministrationV1(
+    db,
+    options,
+    authority,
+    q2Visibility.input,
+    context,
+  );
+  const q2ReplayReceipt = await taproot.commitAuthorizationAdministrationV1(
+    q2Replay,
+    await administrationOwner.seal(q2Replay, {}),
+  );
+  if (
+    !q2ReplayReceipt.replayed ||
+    JSON.stringify(await entityVisibilityState(db, 'Q2')) !==
+      JSON.stringify(q2After)
+  )
+    throw new Error('packed clean Q2 visibility replay was not a no-op');
+
+  context = await resolve(port);
   const visibilityInput = {
     installationId,
     expectedAuthorizationRevision: context.authorizationRevision,
@@ -269,7 +366,7 @@ try {
       type: 'set-entity-visibility',
       entityId: 'Q1',
       expectedRevision: 3,
-      visibility: { version: 1, clauses: [] },
+      visibility: ownerOrReader,
     },
   };
   const visibility = await taproot.prepareAuthorizationAdministrationV1(
@@ -294,6 +391,45 @@ try {
     ) !== 4
   )
     throw new Error('packed Q1 revision 3 visibility policy did not commit');
+  const ownerAndReader = {
+    version: 1,
+    clauses: [
+      [{ kind: 'principal', principalId: 'principal-1' }],
+      [{ kind: 'principal', principalId: 'principal-reader' }],
+    ],
+  };
+  context = await resolve(port);
+  const beforeUnsatisfiable = await entityVisibilityState(db, 'Q1');
+  const unsatisfiable = await taproot.prepareAuthorizationAdministrationV1(
+    db,
+    options,
+    authority,
+    {
+      installationId,
+      expectedAuthorizationRevision: context.authorizationRevision,
+      idempotencyKey: 'packed-visibility-policy-unsatisfiable-cnf',
+      command: {
+        type: 'set-entity-visibility',
+        entityId: 'Q1',
+        expectedRevision: 4,
+        visibility: ownerAndReader,
+      },
+    },
+    context,
+  );
+  const unsatisfiableError = await taproot
+    .commitAuthorizationAdministrationV1(
+      unsatisfiable,
+      await administrationOwner.seal(unsatisfiable, {}),
+    )
+    .catch((error) => error);
+  if (
+    unsatisfiableError?.code !== 'INVALID_ENTITY' ||
+    JSON.stringify(await entityVisibilityState(db, 'Q1')) !==
+      JSON.stringify(beforeUnsatisfiable)
+  )
+    throw new Error('packed owner-AND-reader CNF was not rejected atomically');
+
   context = await resolve(port);
   const stale = await taproot.prepareAuthorizationAdministrationV1(
     db,
@@ -314,6 +450,41 @@ try {
     .catch((error) => error);
   if (staleError?.code !== 'REVISION_CONFLICT')
     throw new Error('packed stale visibility target did not conflict');
+
+  const readerContext = await port.resolveAuthorization({
+    principalId: 'principal-reader',
+    activeWorkspaceId: 'workspace-1',
+  });
+  const outsiderContext = await port.resolveAuthorization({
+    principalId: 'principal-outsider',
+  });
+  const cursorKey = await webcrypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+  const cursorCodec = taproot.createAuthorizationCursorCodec(cursorKey);
+  for (const visibleContext of [context, readerContext]) {
+    const reader = taproot.createAuthorizedTaproot(
+      db,
+      options,
+      visibleContext,
+      { cursorCodec },
+    );
+    await reader.getEntity('Q1');
+    await reader.getEntity('Q2');
+  }
+  const outsider = taproot.createAuthorizedTaproot(
+    db,
+    options,
+    outsiderContext,
+    { cursorCodec },
+  );
+  for (const entityId of ['Q1', 'Q2']) {
+    const denied = await outsider.getEntity(entityId).catch((error) => error);
+    if (denied?.code !== 'AUTHORIZATION_DENIED')
+      throw new Error(`packed outsider read ${entityId}`);
+  }
 
   const materialization = await search.createSearchMaterializationAdminGuardV1(
     db,
@@ -396,14 +567,46 @@ try {
     limit: 10,
     context: { ...context, capabilities: [] },
   };
-  if ((await semantic.search(semanticQuery)).length !== 1)
-    throw new Error('packed protected SQLite semantic search was empty');
+  if ((await semantic.search(semanticQuery)).length !== 2)
+    throw new Error(
+      'packed protected SQLite semantic search did not return Q1 and Q2',
+    );
+  if (
+    (
+      await semantic.search({
+        ...semanticQuery,
+        context: { ...readerContext, capabilities: [] },
+      })
+    ).length !== 2 ||
+    (
+      await semantic.search({
+        ...semanticQuery,
+        context: outsiderContext,
+      })
+    ).length !== 0
+  )
+    throw new Error('packed protected SQLite semantic principal filter failed');
 
   await db.close();
   db = new NodeSqliteDatabase(databasePath);
-  if ((await createSemantic().search(semanticQuery)).length !== 1)
+  const restartedSemantic = createSemantic();
+  if (
+    (await restartedSemantic.search(semanticQuery)).length !== 2 ||
+    (
+      await restartedSemantic.search({
+        ...semanticQuery,
+        context: { ...readerContext, capabilities: [] },
+      })
+    ).length !== 2 ||
+    (
+      await restartedSemantic.search({
+        ...semanticQuery,
+        context: outsiderContext,
+      })
+    ).length !== 0
+  )
     throw new Error(
-      'packed protected SQLite semantic search did not survive restart',
+      'packed protected SQLite principal filtering did not survive restart',
     );
 } finally {
   await db.close();
@@ -463,6 +666,35 @@ async function canonicalState(database) {
     )
     .all();
   return result.results[0];
+}
+
+async function entityVisibilityState(database, entityId) {
+  const result = await database
+    .prepare(
+      `SELECT e.revision AS entityRevision,
+              p.source_revision AS sourceRevision,
+              p.visibility_json AS visibilityJson,
+              s.authorization_revision AS authorizationRevision,
+              s.search_generation AS searchGeneration,
+              (SELECT COUNT(*) FROM taproot_audit_events
+               WHERE entity_id=e.entity_id) AS auditCount
+       FROM taproot_entities e
+       JOIN taproot_entity_authorization p ON p.entity_id=e.entity_id
+       JOIN taproot_installation_authorization s ON s.singleton=1
+       WHERE e.entity_id=?`,
+    )
+    .bind(entityId)
+    .all();
+  const row = result.results[0];
+  if (!row) throw new Error(`missing packed visibility state for ${entityId}`);
+  return {
+    entityRevision: Number(row.entityRevision),
+    sourceRevision: Number(row.sourceRevision),
+    visibilityJson: String(row.visibilityJson),
+    authorizationRevision: Number(row.authorizationRevision),
+    searchGeneration: Number(row.searchGeneration),
+    auditCount: Number(row.auditCount),
+  };
 }
 
 function assertState(expected, actual, phase) {
