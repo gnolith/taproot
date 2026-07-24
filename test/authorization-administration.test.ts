@@ -5,16 +5,211 @@ import { describe, expect, it } from 'vitest';
 import {
   commitAuthorizationAdministrationV1,
   commitAuthorizationBootstrapV1,
+  createTaprootWorkshopPortV1,
   createTaprootHostWriteCapability,
+  EntityNotFoundError,
   initializeTaproot,
+  KNOWLEDGE_POLICY_CAPABILITY,
+  KNOWLEDGE_WRITE_CAPABILITY,
   prepareAuthorizationAdministrationV1,
   prepareAuthorizationBootstrapV1,
   registerAuthorizationAdministrationOwnerV1,
   registerAuthorizationBootstrapOwnerV1,
+  RevisionConflictError,
   type AuthorizationContext,
 } from '../src/index.js';
 
 describe('sealed authorization administration owner protocol', () => {
+  it('updates the visibility policy of exact Q1 revision 3 and fences stale or missing targets', async () => {
+    const db = new NodeSqliteDatabase(':memory:');
+    const options = { baseIri: 'https://visibility-admin.example' };
+    const installationId = 'installation-1';
+    try {
+      await initializeTaproot(db, options);
+      const key = await crypto.subtle.generateKey(
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const authority = createTaprootHostWriteCapability(db, options, key);
+      const bootstrapOwner = await registerAuthorizationBootstrapOwnerV1(
+        db,
+        options,
+        authority,
+        {
+          installationId,
+          ownerRegistrationId: 'bootstrap',
+          adapter: {
+            kind: 'taproot-authorization-bootstrap-owner-adapter-v1',
+            prepare: () => Promise.resolve({ statements: [], receipt: {} }),
+          },
+        },
+      );
+      const bootstrap = await prepareAuthorizationBootstrapV1(
+        db,
+        options,
+        authority,
+        {
+          installationId,
+          baseIri: options.baseIri,
+          principalId: 'administrator',
+          workspaceId: 'workspace-1',
+          grants: [
+            KNOWLEDGE_POLICY_CAPABILITY,
+            'knowledge:read',
+            KNOWLEDGE_WRITE_CAPABILITY,
+            'search:admin',
+          ],
+          idempotencyKey: 'bootstrap',
+        },
+      );
+      await commitAuthorizationBootstrapV1(
+        bootstrap,
+        await bootstrapOwner.seal(bootstrap, {}),
+      );
+      const port = await createTaprootWorkshopPortV1(db, options, authority, {
+        installationId,
+      });
+      let context = await port.resolveAuthorization({
+        principalId: 'administrator',
+        activeWorkspaceId: 'workspace-1',
+      });
+      await port.createItem(
+        { id: 'Q1' },
+        { idempotencyKey: 'create-q1' },
+        context,
+      );
+      for (const [expectedRevision, value] of [
+        [1, 'one'],
+        [2, 'two'],
+      ] as const) {
+        context = await port.resolveAuthorization({
+          principalId: 'administrator',
+          activeWorkspaceId: 'workspace-1',
+        });
+        await port.mutateEntity(
+          'Q1',
+          [
+            {
+              command: { type: 'set-label', language: 'en', value },
+              authoredText: `Set Q1 label to ${value}.`,
+            },
+          ],
+          {
+            expectedRevision,
+            idempotencyKey: `q1-${expectedRevision + 1}`,
+          },
+          context,
+        );
+      }
+      context = await port.resolveAuthorization({
+        principalId: 'administrator',
+        activeWorkspaceId: 'workspace-1',
+      });
+      const owner = await registerAuthorizationAdministrationOwnerV1(
+        db,
+        options,
+        authority,
+        {
+          installationId,
+          ownerRegistrationId: 'visibility-owner',
+          adapter: {
+            kind: 'taproot-authorization-administration-owner-adapter-v1',
+            prepare: () => Promise.resolve({ statements: [], receipt: {} }),
+          },
+        },
+      );
+      const update = {
+        installationId,
+        expectedAuthorizationRevision: context.authorizationRevision,
+        idempotencyKey: 'visibility-policy-set-q1-3',
+        command: {
+          type: 'set-entity-visibility' as const,
+          entityId: 'Q1',
+          expectedRevision: 3,
+          visibility: { version: 1 as const, clauses: [] },
+        },
+      };
+      const participant = await prepareAuthorizationAdministrationV1(
+        db,
+        options,
+        authority,
+        update,
+        context,
+      );
+      await expect(
+        commitAuthorizationAdministrationV1(
+          participant,
+          await owner.seal(participant, {}),
+        ),
+      ).resolves.toMatchObject({
+        command: 'set-entity-visibility',
+        authorizationRevision: context.authorizationRevision + 1,
+      });
+      await expect(
+        db
+          .prepare(
+            `SELECT e.revision, p.source_revision, p.visibility_json
+             FROM taproot_entities e
+             JOIN taproot_entity_authorization p ON p.entity_id=e.entity_id
+             WHERE e.entity_id='Q1'`,
+          )
+          .all<Record<string, unknown>>(),
+      ).resolves.toMatchObject({
+        results: [
+          {
+            revision: 4,
+            source_revision: 4,
+            visibility_json: '{"version":1,"clauses":[]}',
+          },
+        ],
+      });
+
+      const nextContext = await port.resolveAuthorization({
+        principalId: 'administrator',
+        activeWorkspaceId: 'workspace-1',
+      });
+      const stale = await prepareAuthorizationAdministrationV1(
+        db,
+        options,
+        authority,
+        {
+          ...update,
+          expectedAuthorizationRevision: nextContext.authorizationRevision,
+          idempotencyKey: 'visibility-policy-stale',
+        },
+        nextContext,
+      );
+      await expect(
+        commitAuthorizationAdministrationV1(stale, await owner.seal(stale, {})),
+      ).rejects.toBeInstanceOf(RevisionConflictError);
+      const missing = await prepareAuthorizationAdministrationV1(
+        db,
+        options,
+        authority,
+        {
+          ...update,
+          expectedAuthorizationRevision: nextContext.authorizationRevision,
+          idempotencyKey: 'visibility-policy-missing',
+          command: {
+            ...update.command,
+            entityId: 'Q999',
+            expectedRevision: 1,
+          },
+        },
+        nextContext,
+      );
+      await expect(
+        commitAuthorizationAdministrationV1(
+          missing,
+          await owner.seal(missing, {}),
+        ),
+      ).rejects.toBeInstanceOf(EntityNotFoundError);
+    } finally {
+      await db.close();
+    }
+  });
+
   it('preserves the same CAS and replay contract across a real Workerd D1 connection restart', async () => {
     const miniflare = new Miniflare({
       modules: true,

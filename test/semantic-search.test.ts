@@ -32,7 +32,7 @@ describe('embedding provider conformance', () => {
     async (_name, create, path) => {
       const requests: Array<{ url: string; authorization: string | null }> = [];
       const provider = create({
-        endpoint: 'http://127.0.0.1:11434',
+        endpoint: `http://127.0.0.1:11434/${path}`,
         model: 'model-a',
         dimensions: 3,
         allowPrivateEndpoint: true,
@@ -94,7 +94,7 @@ describe('embedding provider conformance', () => {
 
   it('redacts malformed, oversized, timeout, and provider failures', async () => {
     const provider = createOpenAICompatibleEmbeddingProviderV1({
-      endpoint: 'https://embeddings.example',
+      endpoint: 'https://embeddings.example/v1/embeddings',
       model: 'model-a',
       dimensions: 2,
       secret: () => 'never-leak-this-secret',
@@ -113,6 +113,32 @@ describe('embedding provider conformance', () => {
     expect(String(error)).not.toContain('never-leak-this-secret');
     expect(String(error)).toMatch(/bound|failed/u);
   });
+
+  it('uses a documented full OpenAI embeddings endpoint without appending the path twice', async () => {
+    const urls: string[] = [];
+    const provider = createOpenAICompatibleEmbeddingProviderV1({
+      endpoint: 'http://127.0.0.1:8080/v1/embeddings',
+      model: 'model-a',
+      dimensions: 2,
+      allowPrivateEndpoint: true,
+      fetch: (input) => {
+        urls.push(requestUrl(input));
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              data: [{ embedding: [1, 0] }],
+              usage: { total_tokens: 1 },
+            }),
+            { status: 200 },
+          ),
+        );
+      },
+    });
+    await expect(provider.embed(['one'])).resolves.toMatchObject({
+      vectors: [[1, 0]],
+    });
+    expect(urls).toEqual(['http://127.0.0.1:8080/v1/embeddings']);
+  });
 });
 
 describe('persisted SQLite vector and semantic administration', () => {
@@ -120,14 +146,16 @@ describe('persisted SQLite vector and semantic administration', () => {
     const { db } = await database();
     try {
       const credentials: string[] = [];
-      const fetcher: typeof fetch = (_input, init) => {
+      const urls: string[] = [];
+      const fetcher: typeof fetch = (input, init) => {
+        urls.push(requestUrl(input));
         expect(init?.redirect).toBe('error');
         const authorization = new Headers(init?.headers).get('authorization');
         if (authorization) credentials.push(authorization);
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              embeddings: [[1, 0]],
+              data: [{ embedding: [1, 0, 0] }],
               usage: { total_tokens: 1 },
             }),
             { status: 200, headers: { 'content-type': 'application/json' } },
@@ -139,19 +167,19 @@ describe('persisted SQLite vector and semantic administration', () => {
           installationId: 'installation-a',
           fetch: fetcher,
           resolveCredential: (selector) =>
-            selector === 'ollama-local' ? 'runtime-secret' : undefined,
+            selector === 'openai-local' ? 'runtime-secret' : undefined,
         });
       const configuration = {
         version: 1 as const,
         id: 'declarative',
         name: 'declarative',
         provider: {
-          kind: 'ollama-compatible' as const,
-          endpoint: 'http://127.0.0.1:11434',
+          kind: 'openai-compatible' as const,
+          endpoint: 'http://127.0.0.1:8080/v1/embeddings',
           model: 'nomic-embed-text',
-          dimensions: 2,
+          dimensions: 3,
           metric: 'cosine' as const,
-          credentialSelector: 'ollama-local',
+          credentialSelector: 'openai-local',
           allowPrivateEndpoint: true,
           redirectPolicy: 'error' as const,
         },
@@ -168,6 +196,13 @@ describe('persisted SQLite vector and semantic administration', () => {
         context('installation-a', true),
       );
       expect(credentials).toEqual(['Bearer runtime-secret']);
+      await expect(
+        create().reconnect('declarative', context('installation-a', true)),
+      ).resolves.toBe(true);
+      expect(urls).toEqual([
+        'http://127.0.0.1:8080/v1/embeddings',
+        'http://127.0.0.1:8080/v1/embeddings',
+      ]);
       const persisted = await db
         .prepare(
           `SELECT configuration_revision, active_generation,
@@ -179,7 +214,7 @@ describe('persisted SQLite vector and semantic administration', () => {
       expect(persisted.results[0]).toMatchObject({
         configuration_revision: 1,
         active_generation: 1,
-        provider_credential_selector: 'ollama-local',
+        provider_credential_selector: 'openai-local',
         provider_private_approved: 1,
       });
       expect(JSON.stringify(persisted.results[0])).not.toContain(
@@ -343,7 +378,7 @@ describe('persisted SQLite vector and semantic administration', () => {
       const provider: EmbeddingProviderPortV1 = {
         identity: {
           kind: 'openai-compatible',
-          endpoint: 'https://provider.example',
+          endpoint: 'https://provider.example/v1/embeddings',
           model: 'model-a',
           dimensions: 2,
           metric: 'cosine',
@@ -401,6 +436,7 @@ describe('persisted SQLite vector and semantic administration', () => {
         selectedConfigurationId: 'config-a',
         selectedReady: true,
         circuitOpen: false,
+        failureCode: null,
       });
       expect(readyStatus.fingerprint).toMatch(/^[0-9a-f]{64}$/u);
 
@@ -430,6 +466,29 @@ describe('persisted SQLite vector and semantic administration', () => {
           context: context('installation-a', false),
         }),
       ).toEqual([]);
+      expect(failingEmbed).toHaveBeenCalledTimes(3);
+      await expect(
+        admin.status(context('installation-a', true)),
+      ).resolves.toMatchObject({
+        state: 'failed',
+        ready: false,
+        circuitOpen: true,
+        failureCode: 'validation-failure',
+      });
+      const restartedAdmin = createSemanticSearchAdminV1(db, {
+        installationId: 'installation-a',
+        fetch: () => {
+          throw new Error('failed configuration must not restart-loop');
+        },
+      });
+      await expect(
+        restartedAdmin.search({
+          text: 'query after restart',
+          kinds: ['item'],
+          limit: 10,
+          context: context('installation-a', false),
+        }),
+      ).resolves.toEqual([]);
       expect(failingEmbed).toHaveBeenCalledTimes(3);
       expect(warnings).toHaveLength(1);
       expect(warnings.join(' ')).not.toContain('do-not-leak');
@@ -479,4 +538,12 @@ async function database() {
   const db = new NodeSqliteDatabase(path);
   await initializeTaproot(db, { baseIri: 'https://semantic.example' });
   return { db, path };
+}
+
+function requestUrl(input: string | URL | Request): string {
+  return input instanceof Request
+    ? input.url
+    : input instanceof URL
+      ? input.href
+      : input;
 }

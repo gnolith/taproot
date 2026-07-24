@@ -357,7 +357,7 @@ writeFileSync(
         name: 'packed-semantic',
         provider: {
           kind: 'ollama-compatible',
-          endpoint: 'http://127.0.0.1:11434',
+          endpoint: 'http://127.0.0.1:11434/api/embed',
           model: 'packed-model',
           dimensions: 2,
           metric: 'cosine',

@@ -66,6 +66,8 @@ writeFileSync(
   declare const fragment: LegacyTaproot042AdoptionFragmentV1;
   declare const blob: ResourceBlobDescriptor;
   const predecessor = await registeredProducer.currentPredecessor('source-1');
+  declare const semanticStatus: import('@gnolith/taproot/search').SemanticAdminStatusV1;
+  const semanticFailureCode: string | null = semanticStatus.failureCode;
   if (predecessor) {
     const eventId: string = predecessor.eventId;
     const sequence: number = predecessor.sequence;
@@ -118,7 +120,7 @@ writeFileSync(
   await workshop.createAnnotation(annotationInput, { idempotencyKey: 'create-annotation-1' }, live);
   await workshop.updateAnnotation('annotation-1', 1, annotationInput, { idempotencyKey: 'update-annotation-1' }, live);
   await workshop.deleteAnnotation('annotation-1', 2, { idempotencyKey: 'delete-annotation-1' }, live);
-  void [db, context, producer, kind, health, fragment, blob, port, changed, publicChanged];
+  void [db, context, producer, kind, health, fragment, blob, port, changed, publicChanged, semanticFailureCode];
   `,
 );
 const diamond =

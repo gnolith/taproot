@@ -15,3 +15,10 @@ candidate/hydration checks retain their current-plus-historical
 non-disclosure fence. Every accepted command atomically records an immutable
 receipt and advances authorization and search state. Exact idempotent retries
 return the durable receipt; conflicting keys and stale revisions fail closed.
+
+`set-entity-visibility` targets the existing canonical Entity named by
+`entityId`; `expectedRevision` is that Entity's current canonical revision,
+not the installation authorization revision. A successful update may narrow
+or widen visibility under the sealed administration capability and creates
+exactly one new Entity revision. A stale target revision raises
+`RevisionConflictError`; an unknown Entity raises `EntityNotFoundError`.

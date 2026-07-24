@@ -2,6 +2,13 @@
 
 ## 0.5.0
 
+- Treat semantic provider endpoints as exact full POST URLs and never append a
+  provider route. Persisted declarative SQLite and Qdrant bindings now
+  reconstruct automatically after restart, and semantic status exposes a
+  bounded non-secret `failureCode`.
+- Allow sealed authorization administration to set either narrower or wider
+  visibility on an exact existing Entity revision while retaining target CAS,
+  immutable Entity/audit history, and atomic authorization/search advancement.
 - Identical Item and Property label updates are true semantic no-ops. Public
   mutation receipts and Workshop-facing write results expose an explicit
   `changed` disposition, while no-op writes retain authorization validation

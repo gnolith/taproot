@@ -2,6 +2,7 @@ import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
 import { webcrypto } from 'node:crypto';
 import { join } from 'node:path';
 import * as taproot from '@gnolith/taproot';
+import * as search from '@gnolith/taproot/search';
 
 const options = { baseIri: 'https://packed-label-noop.example' };
 const installationId = 'packed-label-noop-installation';
@@ -37,6 +38,7 @@ try {
         taproot.KNOWLEDGE_POLICY_CAPABILITY,
         'knowledge:read',
         taproot.KNOWLEDGE_WRITE_CAPABILITY,
+        'search:admin',
       ],
       idempotencyKey: 'packed-label-bootstrap',
     },
@@ -228,6 +230,181 @@ try {
   if (JSON.stringify(adapterRestarted) !== JSON.stringify(adapterReceipt))
     throw new Error('packed Workshop restart receipt was unstable');
   assertState(before, await canonicalState(db), 'after restart');
+
+  await port.mutateEntity(
+    'Q1',
+    [
+      {
+        command: {
+          type: 'set-label',
+          language: 'en',
+          value: 'Visibility target revision three',
+        },
+        authoredText: 'Advance Q1 to the exact visibility target revision.',
+      },
+    ],
+    { expectedRevision: 2, idempotencyKey: 'packed-q1-revision-3' },
+    context,
+  );
+  context = await resolve(port);
+  const administrationOwner =
+    await taproot.registerAuthorizationAdministrationOwnerV1(
+      db,
+      options,
+      authority,
+      {
+        installationId,
+        ownerRegistrationId: 'packed-visibility-owner',
+        adapter: {
+          kind: 'taproot-authorization-administration-owner-adapter-v1',
+          prepare: () => Promise.resolve({ statements: [], receipt: {} }),
+        },
+      },
+    );
+  const visibilityInput = {
+    installationId,
+    expectedAuthorizationRevision: context.authorizationRevision,
+    idempotencyKey: 'packed-visibility-policy-set-q1-3',
+    command: {
+      type: 'set-entity-visibility',
+      entityId: 'Q1',
+      expectedRevision: 3,
+      visibility: { version: 1, clauses: [] },
+    },
+  };
+  const visibility = await taproot.prepareAuthorizationAdministrationV1(
+    db,
+    options,
+    authority,
+    visibilityInput,
+    context,
+  );
+  const visibilityReceipt = await taproot.commitAuthorizationAdministrationV1(
+    visibility,
+    await administrationOwner.seal(visibility, {}),
+  );
+  if (
+    visibilityReceipt.command !== 'set-entity-visibility' ||
+    Number(
+      (
+        await db
+          .prepare(`SELECT revision FROM taproot_entities WHERE entity_id='Q1'`)
+          .all()
+      ).results[0]?.revision,
+    ) !== 4
+  )
+    throw new Error('packed Q1 revision 3 visibility policy did not commit');
+  context = await resolve(port);
+  const stale = await taproot.prepareAuthorizationAdministrationV1(
+    db,
+    options,
+    authority,
+    {
+      ...visibilityInput,
+      expectedAuthorizationRevision: context.authorizationRevision,
+      idempotencyKey: 'packed-visibility-policy-stale',
+    },
+    context,
+  );
+  const staleError = await taproot
+    .commitAuthorizationAdministrationV1(
+      stale,
+      await administrationOwner.seal(stale, {}),
+    )
+    .catch((error) => error);
+  if (staleError?.code !== 'REVISION_CONFLICT')
+    throw new Error('packed stale visibility target did not conflict');
+
+  const materialization = await search.createSearchMaterializationAdminGuardV1(
+    db,
+    options,
+    authority,
+  );
+  await materialization.initialize(context);
+  await materialization.run(context, {
+    maxJobs: 100,
+    maxRebuildRoots: 100,
+  });
+  const embeddingEndpoint = 'http://127.0.0.1:9/v1/embeddings';
+  const semanticFetch = (input, init) => {
+    const url =
+      input instanceof globalThis.Request
+        ? input.url
+        : input instanceof globalThis.URL
+          ? input.href
+          : input;
+    if (url !== embeddingEndpoint)
+      throw new Error(`unexpected packed semantic URL: ${url}`);
+    const body = JSON.parse(String(init?.body));
+    return Promise.resolve(
+      new globalThis.Response(
+        JSON.stringify({
+          data: body.input.map(() => ({ embedding: [1, 0] })),
+          usage: { total_tokens: body.input.length },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+  };
+  const createSemantic = () =>
+    search.createSemanticSearchAdminV1(db, {
+      installationId,
+      fetch: semanticFetch,
+    });
+  const semantic = createSemantic();
+  await semantic.configure(
+    {
+      version: 1,
+      id: 'packed-protected-sqlite',
+      name: 'packed-protected-sqlite',
+      provider: {
+        kind: 'openai-compatible',
+        endpoint: embeddingEndpoint,
+        model: 'deterministic',
+        dimensions: 2,
+        metric: 'cosine',
+        credentialSelector: null,
+        allowPrivateEndpoint: true,
+        redirectPolicy: 'error',
+      },
+      vector: { kind: 'sqlite' },
+    },
+    {
+      expectedRevision: 0,
+      idempotencyKey: 'packed-protected-sqlite-v1',
+    },
+    context,
+  );
+  const { planId } = await semantic.estimate(
+    'packed-protected-sqlite',
+    { mode: 'asap' },
+    context,
+  );
+  await semantic.approve(planId, context);
+  await semantic.run(planId, context);
+  await semantic.select('packed-protected-sqlite', context);
+  const semanticStatus = await semantic.status(context);
+  if (
+    !semanticStatus.ready ||
+    semanticStatus.state !== 'ready' ||
+    semanticStatus.failureCode !== null
+  )
+    throw new Error('packed protected SQLite semantic state was not ready');
+  const semanticQuery = {
+    text: 'visibility target',
+    kinds: ['item'],
+    limit: 10,
+    context: { ...context, capabilities: [] },
+  };
+  if ((await semantic.search(semanticQuery)).length !== 1)
+    throw new Error('packed protected SQLite semantic search was empty');
+
+  await db.close();
+  db = new NodeSqliteDatabase(databasePath);
+  if ((await createSemantic().search(semanticQuery)).length !== 1)
+    throw new Error(
+      'packed protected SQLite semantic search did not survive restart',
+    );
 } finally {
   await db.close();
 }

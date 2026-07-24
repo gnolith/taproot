@@ -8,7 +8,10 @@ import type {
   SqliteDatabaseLike,
   SqlitePreparedStatementLike,
 } from './sqlite-types.js';
-import { coordinatedStatements } from './atomic-coordination.js';
+import {
+  coordinatedStatements,
+  permitsVisibilityAdministration,
+} from './atomic-coordination.js';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
 import {
@@ -1865,6 +1868,7 @@ export class TaprootRepository {
             edit.authorization,
             edit.authorizationContext,
             previous,
+            permitsVisibilityAdministration(edit),
           )
         : undefined;
       if (!authorization || authorization.action === 'unchanged')
@@ -1901,6 +1905,7 @@ export class TaprootRepository {
           edit.authorization,
           edit.authorizationContext,
           previous,
+          permitsVisibilityAdministration(edit),
         )
       : undefined;
     const oldQuads = this.#lifecycleQuads(stored.entity, oldLifecycle);
@@ -2103,6 +2108,7 @@ export class TaprootRepository {
     rawPolicy: CanonicalAuthorizationPolicyInput,
     rawContext: AuthorizationContext | undefined,
     previousRevision: number | undefined,
+    permitsVisibilityWidening = false,
   ): Promise<PreparedAuthorizationWrite> {
     const policy = normalizeCanonicalAuthorizationPolicy(rawPolicy);
     if (!rawContext)
@@ -2217,11 +2223,12 @@ export class TaprootRepository {
         throw new RevisionConflictError(
           'Canonical entity policy is missing, quarantined, or stale',
         );
-      assertScopeDoesNotWiden(
-        policy.visibility,
-        JSON.parse(previousPolicy.visibility_json) as VisibilityScopeV1,
-        'entity visibility',
-      );
+      if (!permitsVisibilityWidening)
+        assertScopeDoesNotWiden(
+          policy.visibility,
+          JSON.parse(previousPolicy.visibility_json) as VisibilityScopeV1,
+          'entity visibility',
+        );
       if (
         !isVisibleTo(
           JSON.parse(
@@ -2271,11 +2278,12 @@ export class TaprootRepository {
       for (const previous of previousStatements.results) {
         const next = nextById.get(previous.statement_id);
         if (!next) continue;
-        assertScopeDoesNotWiden(
-          JSON.parse(next.effectiveVisibilityJson) as VisibilityScopeV1,
-          JSON.parse(previous.effective_visibility_json) as VisibilityScopeV1,
-          `statement ${previous.statement_id} visibility`,
-        );
+        if (!permitsVisibilityWidening)
+          assertScopeDoesNotWiden(
+            JSON.parse(next.effectiveVisibilityJson) as VisibilityScopeV1,
+            JSON.parse(previous.effective_visibility_json) as VisibilityScopeV1,
+            `statement ${previous.statement_id} visibility`,
+          );
       }
       const changed =
         previousPolicy.workspace_id !== policy.workspaceId ||

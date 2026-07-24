@@ -248,6 +248,8 @@ export interface SemanticAdminStatusV1 {
   /** @deprecated Use ready. */
   selectedReady: boolean;
   circuitOpen: boolean;
+  /** Bounded non-secret diagnostic code for the selected configuration. */
+  failureCode: string | null;
   plans: Array<{
     planId: string;
     state: string;
@@ -276,12 +278,21 @@ export interface SemanticSearchAdminOptionsV1 {
 
 interface SemanticRow {
   configuration_id: string;
+  name: string;
   provider_kind: EmbeddingProviderIdentityV1['kind'];
   provider_url: string;
   model: string;
   dimensions: number;
   metric: VectorMetricV1;
+  provider_credential_selector: string | null;
+  provider_private_approved: number;
+  provider_redirect_policy: 'error';
   vector_kind: VectorIndexPortV1['kind'];
+  vector_url: string | null;
+  vector_collection: string | null;
+  vector_credential_selector: string | null;
+  vector_private_approved: number;
+  vector_redirect_policy: 'error';
   fingerprint: string;
   selected: number;
   state: string;
@@ -374,10 +385,7 @@ function createHttpEmbeddingProvider(
       )
         throw new Error('embedding batch is invalid');
       const secret = options.secret ? await options.secret() : undefined;
-      const url = new URL(
-        kind === 'openai-compatible' ? 'embeddings' : 'api/embed',
-        `${identity.endpoint}/`,
-      );
+      const url = new URL(identity.endpoint);
       const body =
         kind === 'openai-compatible'
           ? { model, input: texts, dimensions }
@@ -1255,7 +1263,7 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
   ): Promise<void> {
     const actor = this.#admin(context);
     const id = token(configurationId, 'configurationId', 128);
-    const binding = this.#bindings.get(id);
+    const binding = this.#runtime(await this.#config(id));
     if (!binding) throw new Error('configuration runtime is unavailable');
     await this.#db
       .prepare(
@@ -1305,7 +1313,7 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
       processCircuits.has(this.#circuitKey(config.configuration_id))
     )
       return [];
-    const binding = this.#bindings.get(config.configuration_id);
+    const binding = this.#runtime(config);
     if (!binding) return [];
     try {
       const embedded = await retryBounded(
@@ -1340,8 +1348,8 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
     const configs = await this.#db
       .prepare(
         `SELECT configuration_id, selected, state, circuit_open,
-                active_generation, ready_generation, configuration_revision,
-                fingerprint
+        active_generation, ready_generation, configuration_revision,
+                fingerprint, failure_code
          FROM taproot_semantic_configurations
          WHERE installation_id=? ORDER BY configuration_id`,
       )
@@ -1355,6 +1363,7 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
         ready_generation: number | null;
         configuration_revision: number;
         fingerprint: string;
+        failure_code: string | null;
       }>();
     const plans = await this.#db
       .prepare(
@@ -1394,6 +1403,7 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
         (selected &&
           processCircuits.has(this.#circuitKey(selected.configuration_id))),
       ),
+      failureCode: selected?.failure_code ?? null,
       plans: plans.results.map((plan) => ({
         planId: plan.plan_id,
         state: plan.state,
@@ -1419,7 +1429,7 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
     if (!['approved', 'running', 'paused'].includes(plan.state))
       throw new Error('approved durable plan is required');
     const config = await this.#config(plan.configuration_id);
-    const binding = this.#bindings.get(config.configuration_id);
+    const binding = this.#runtime(config);
     if (!binding) throw new Error('configuration runtime is unavailable');
     const policy = normalizePolicy(
       JSON.parse(plan.policy_json) as EmbeddingSchedulePolicyV1,
@@ -1647,7 +1657,7 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
     actor: AuthorizationContext,
   ): Promise<boolean> {
     const config = await this.#config(configurationId);
-    const binding = this.#bindings.get(configurationId);
+    const binding = this.#runtime(config);
     if (!binding) return false;
     await this.#db
       .prepare(
@@ -1924,6 +1934,42 @@ class SemanticRuntime implements SemanticSearchAdminV1 {
       .all<SemanticRow>();
     if (!result.results[0]) throw new Error('semantic configuration not found');
     return result.results[0];
+  }
+  #runtime(config: SemanticRow): RuntimeBinding | undefined {
+    const existing = this.#bindings.get(config.configuration_id);
+    if (existing) return existing;
+    try {
+      const binding = this.#binding({
+        version: 1,
+        id: config.configuration_id,
+        name: config.name,
+        provider: {
+          kind: config.provider_kind,
+          endpoint: config.provider_url,
+          model: config.model,
+          dimensions: Number(config.dimensions),
+          metric: config.metric,
+          credentialSelector: config.provider_credential_selector,
+          allowPrivateEndpoint: Boolean(config.provider_private_approved),
+          redirectPolicy: config.provider_redirect_policy,
+        },
+        vector:
+          config.vector_kind === 'sqlite'
+            ? { kind: 'sqlite' }
+            : {
+                kind: 'qdrant',
+                endpoint: config.vector_url!,
+                collection: config.vector_collection!,
+                credentialSelector: config.vector_credential_selector,
+                allowPrivateEndpoint: Boolean(config.vector_private_approved),
+                redirectPolicy: config.vector_redirect_policy,
+              },
+      });
+      this.#bindings.set(config.configuration_id, binding);
+      return binding;
+    } catch {
+      return undefined;
+    }
   }
   async #plan(id: string): Promise<{
     plan_id: string;

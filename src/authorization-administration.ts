@@ -13,7 +13,10 @@ import {
 } from './authorization.js';
 import { AuthorizationDeniedError, RevisionConflictError } from './errors.js';
 import { canonicalSearchHashV1 } from './search-contract.js';
-import { coordinatedStatementsV1 } from './atomic-coordination.js';
+import {
+  authorizationVisibilityAdministrationV1,
+  coordinatedStatementsV1,
+} from './atomic-coordination.js';
 import { TaprootRepository } from './repository.js';
 import { TaprootContentRepositoryV1 } from './content-domain.js';
 import type {
@@ -367,6 +370,7 @@ async function applyEntityVisibility(
   );
   const edit: StatementRevisionEdit & {
     [coordinatedStatementsV1]: readonly SqlitePreparedStatementLike[];
+    [authorizationVisibilityAdministrationV1]: true;
   } = {
     expectedRevision: command.expectedRevision,
     statementTexts: statementTexts(stored.entity),
@@ -392,6 +396,7 @@ async function applyEntityVisibility(
         binding.input.expectedAuthorizationRevision,
     },
     [coordinatedStatementsV1]: coordinated,
+    [authorizationVisibilityAdministrationV1]: true,
   };
   await repository.replaceEntity(entityId, stored.entity, edit);
 }

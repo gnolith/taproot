@@ -7,9 +7,13 @@ import type { SqlitePreparedStatementLike } from './sqlite-types.js';
 export const coordinatedStatementsV1 = Symbol(
   'taproot.coordinated-statements-v1',
 );
+export const authorizationVisibilityAdministrationV1 = Symbol(
+  'taproot.authorization-visibility-administration-v1',
+);
 
 export type CoordinatedMutationV1 = {
   [coordinatedStatementsV1]?: readonly SqlitePreparedStatementLike[];
+  [authorizationVisibilityAdministrationV1]?: true;
 };
 
 export function coordinatedStatements(
@@ -20,4 +24,14 @@ export function coordinatedStatements(
   return Array.isArray(statements)
     ? (statements as SqlitePreparedStatementLike[])
     : [];
+}
+
+export function permitsVisibilityAdministration(value: unknown): boolean {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    (value as CoordinatedMutationV1)[
+      authorizationVisibilityAdministrationV1
+    ] === true,
+  );
 }
