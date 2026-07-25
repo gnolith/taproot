@@ -588,6 +588,136 @@ for (const runtime of [nativeRestartRuntime(), workerdRestartRuntime()]) {
         ),
       ).resolves.toEqual({ results: [] });
 
+      sources[0]!.sourceRevision = '5';
+      const taskPredecessor = await registered[0]!.currentPredecessor(
+        sources[0]!.sourceId,
+      );
+      await commitRestartMutation(registered[0]!, sources[0]!, taskPredecessor);
+      for (const index of [1, 2]) {
+        const source = sources[index]!;
+        source.sourceRevision = '5';
+        const predecessor = await registered[index]!.currentPredecessor(
+          source.sourceId,
+        );
+        await commitRestartMutation(
+          registered[index]!,
+          source,
+          predecessor,
+          'delete',
+        );
+      }
+      await expect(
+        materialization.health(mixedAdmin(4)),
+      ).resolves.toMatchObject({
+        status: 'building',
+        pendingJobs: 3,
+        staleHeads: 3,
+        sourceHighWatermark: 18,
+        activeAppliedWatermark: 15,
+      });
+      await expect(
+        materialization.run(mixedAdmin(4), {
+          maxJobs: 100,
+          maxRebuildRoots: 100,
+          maxChunkBytes: 64,
+          leaseMilliseconds: 30_000,
+        }),
+      ).resolves.toMatchObject({
+        claimed: 3,
+        completed: 3,
+        superseded: 0,
+        deferred: 0,
+        dead: 0,
+      });
+      await expect(
+        materialization.health(mixedAdmin(4)),
+      ).resolves.toMatchObject({
+        status: 'healthy',
+        pendingJobs: 0,
+        leasedJobs: 0,
+        deadJobs: 0,
+        staleHeads: 0,
+        sourceHighWatermark: 18,
+        activeAppliedWatermark: 18,
+      });
+      const removedHeads = await env.db
+        .prepare(
+          `SELECT root_kind, root_id
+           FROM taproot_search_materialization_heads
+           WHERE root_id IN ('memory-1', 'prompt-1')`,
+        )
+        .all<{ root_kind: string; root_id: string }>();
+      expect(removedHeads.results).toEqual([]);
+      const tombstones = await env.db
+        .prepare(
+          `SELECT root_id, reason
+           FROM taproot_search_materialization_tombstones
+           WHERE root_id IN ('memory-1', 'prompt-1')
+           ORDER BY root_id`,
+        )
+        .all<{ root_id: string; reason: string }>();
+      expect(tombstones.results).toEqual([
+        { root_id: 'memory-1', reason: 'delete' },
+        { root_id: 'prompt-1', reason: 'delete' },
+      ]);
+      await expect(
+        search.search(
+          {
+            text: 'lexical convergence',
+            kinds: [registered[1]!.kind, registered[2]!.kind],
+          },
+          mixedReader(4),
+        ),
+      ).resolves.toEqual({ results: [] });
+
+      await expect(
+        materialization.startShadowRebuild(mixedAdmin(4)),
+      ).resolves.toBe(2);
+      await expect(
+        materialization.activateReadyShadow(mixedAdmin(4)),
+      ).rejects.toThrow(/search rebuild is not ready/u);
+      await expect(
+        materialization.run(mixedAdmin(4), {
+          maxJobs: 100,
+          maxRebuildRoots: 100,
+          maxChunkBytes: 64,
+          leaseMilliseconds: 30_000,
+        }),
+      ).resolves.toMatchObject({
+        claimed: 6,
+        completed: 6,
+        superseded: 0,
+        deferred: 0,
+        dead: 0,
+        rebuildRootsEnumerated: 6,
+      });
+      await expect(
+        materialization.health(mixedAdmin(4)),
+      ).resolves.toMatchObject({
+        status: 'building',
+        shadowCorpusGeneration: 2,
+        pendingJobs: 0,
+        staleHeads: 0,
+        sourceHighWatermark: 18,
+        shadowAppliedWatermark: 18,
+      });
+      await expect(
+        materialization.activateReadyShadow(mixedAdmin(4)),
+      ).resolves.toBe(2);
+      await expect(
+        materialization.health(mixedAdmin(4)),
+      ).resolves.toMatchObject({
+        status: 'healthy',
+        activeCorpusGeneration: 2,
+        shadowCorpusGeneration: null,
+        pendingJobs: 0,
+        leasedJobs: 0,
+        deadJobs: 0,
+        staleHeads: 0,
+        sourceHighWatermark: 18,
+        activeAppliedWatermark: 18,
+      });
+
       await env.close();
       env = await runtime.open();
       const rebound: Array<Awaited<ReturnType<typeof registerNamedProducer>>> =
@@ -607,8 +737,10 @@ for (const runtime of [nativeRestartRuntime(), workerdRestartRuntime()]) {
       await expect(reopened.health(mixedAdmin(4))).resolves.toMatchObject({
         status: 'healthy',
         pendingJobs: 0,
-        sourceHighWatermark: 15,
-        activeAppliedWatermark: 15,
+        staleHeads: 0,
+        activeCorpusGeneration: 2,
+        sourceHighWatermark: 18,
+        activeAppliedWatermark: 18,
       });
       const reopenedSearch = createAuthorizedSearchServiceV1(env.db, {
         installationId,
@@ -618,8 +750,14 @@ for (const runtime of [nativeRestartRuntime(), workerdRestartRuntime()]) {
           { text: 'prompt lexical convergence', kinds: [rebound[2]!.kind] },
           mixedReader(4),
         ),
+      ).resolves.toEqual({ results: [] });
+      await expect(
+        reopenedSearch.search(
+          { text: 'task lexical convergence', kinds: [rebound[0]!.kind] },
+          mixedReader(4),
+        ),
       ).resolves.toMatchObject({
-        results: [{ sourceId: 'prompt-1', sourceRevision: '4' }],
+        results: [{ sourceId: 'task-1', sourceRevision: '5' }],
       });
     } finally {
       await env.close();
@@ -666,7 +804,20 @@ async function registerRestartProducer(
     adapter: {
       kind: 'taproot-external-owner-transaction-adapter-v1',
       prepare(token) {
-        const input = token as { sourceId: string; revision: string };
+        const input = token as {
+          sourceId: string;
+          revision: string;
+          operation?: 'upsert' | 'delete';
+        };
+        if (input.operation === 'delete')
+          return Promise.resolve([
+            db
+              .prepare(
+                `DELETE FROM fixture_restart_owner_records
+                 WHERE source_id = ?`,
+              )
+              .bind(input.sourceId),
+          ]);
         return Promise.resolve([
           db
             .prepare(
@@ -715,7 +866,20 @@ async function registerNamedProducer(
     adapter: {
       kind: 'taproot-external-owner-transaction-adapter-v1',
       prepare(token) {
-        const input = token as { sourceId: string; revision: string };
+        const input = token as {
+          sourceId: string;
+          revision: string;
+          operation?: 'upsert' | 'delete';
+        };
+        if (input.operation === 'delete')
+          return Promise.resolve([
+            db
+              .prepare(
+                `DELETE FROM fixture_restart_owner_records
+                 WHERE source_id = ?`,
+              )
+              .bind(input.sourceId),
+          ]);
         return Promise.resolve([
           db
             .prepare(
@@ -755,15 +919,18 @@ function commitRestartMutation(
       Awaited<ReturnType<typeof registerRestartProducer>>['currentPredecessor']
     >
   >,
+  operation: 'upsert' | 'delete' = 'upsert',
 ) {
   return registered.issuer
     .seal({
       sourceId: source.sourceId,
       sourceRevision: source.sourceRevision,
+      operation,
       predecessor,
       ownerMutationToken: {
         sourceId: source.sourceId,
         revision: source.sourceRevision,
+        operation,
       },
     })
     .then((participant) => registered.commit(participant));

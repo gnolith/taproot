@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { TextEncoder } from 'node:util';
 import { NodeSqliteDatabase } from '@gnolith/diamond/node-sqlite';
 import {
   commitAuthorizationBootstrapV1,
@@ -128,7 +129,7 @@ try {
       dimensions: 3,
       metric: 'cosine',
       lifecycle:
-        'validate/upsert/authorized-query/isolation/delete/protected-semantic-restart',
+        'validate/upsert/authorized-query/isolation/delete/lexical-tombstone-rebuild/protected-semantic-restart',
       passed: true,
     }),
   );
@@ -231,6 +232,70 @@ async function protectedSemanticLifecycle(qdrantEndpoint, collection) {
       principalId: 'admin',
       activeWorkspaceId: 'workspace-1',
     });
+    const firstResourceText = 'Protected semantic resource revision one';
+    await port.createResource(
+      {
+        id: 'resource-1',
+        itemId: 'Q1',
+        title: 'Protected resource',
+        payload: { kind: 'inline-text', text: firstResourceText },
+        mediaType: 'text/plain',
+        integrity: await integrity(firstResourceText),
+      },
+      { idempotencyKey: 'qdrant-semantic-resource-create' },
+      adminContext,
+    );
+    adminContext = await port.resolveAuthorization({
+      principalId: 'admin',
+      activeWorkspaceId: 'workspace-1',
+    });
+    const secondResourceText = 'Protected semantic resource revision two';
+    await port.updateResource(
+      'resource-1',
+      1,
+      {
+        id: 'resource-1',
+        itemId: 'Q1',
+        title: 'Protected resource updated',
+        payload: { kind: 'inline-text', text: secondResourceText },
+        mediaType: 'text/plain',
+        integrity: await integrity(secondResourceText),
+      },
+      { idempotencyKey: 'qdrant-semantic-resource-update' },
+      adminContext,
+    );
+    adminContext = await port.resolveAuthorization({
+      principalId: 'admin',
+      activeWorkspaceId: 'workspace-1',
+    });
+    await port.createAnnotation(
+      {
+        id: 'annotation-1',
+        body: { kind: 'text', text: 'Protected annotation revision one' },
+        target: { kind: 'resource', sourceId: 'resource-1' },
+      },
+      { idempotencyKey: 'qdrant-semantic-annotation-create' },
+      adminContext,
+    );
+    adminContext = await port.resolveAuthorization({
+      principalId: 'admin',
+      activeWorkspaceId: 'workspace-1',
+    });
+    await port.updateAnnotation(
+      'annotation-1',
+      1,
+      {
+        id: 'annotation-1',
+        body: { kind: 'text', text: 'Protected annotation revision two' },
+        target: { kind: 'resource', sourceId: 'resource-1' },
+      },
+      { idempotencyKey: 'qdrant-semantic-annotation-update' },
+      adminContext,
+    );
+    adminContext = await port.resolveAuthorization({
+      principalId: 'admin',
+      activeWorkspaceId: 'workspace-1',
+    });
     const materialization = await createSearchMaterializationAdminGuardV1(
       database,
       options,
@@ -241,6 +306,70 @@ async function protectedSemanticLifecycle(qdrantEndpoint, collection) {
       maxJobs: 100,
       maxRebuildRoots: 100,
     });
+    let lexicalHealth = await materialization.health(adminContext);
+    assert(
+      lexicalHealth.status === 'healthy' &&
+        lexicalHealth.staleHeads === 0 &&
+        lexicalHealth.pendingJobs === 0,
+      'initial lexical materialization did not converge',
+    );
+    await port.deleteAnnotation(
+      'annotation-1',
+      2,
+      { idempotencyKey: 'qdrant-semantic-annotation-delete' },
+      adminContext,
+    );
+    adminContext = await port.resolveAuthorization({
+      principalId: 'admin',
+      activeWorkspaceId: 'workspace-1',
+    });
+    await port.deleteResource(
+      'resource-1',
+      2,
+      { idempotencyKey: 'qdrant-semantic-resource-delete' },
+      adminContext,
+    );
+    adminContext = await port.resolveAuthorization({
+      principalId: 'admin',
+      activeWorkspaceId: 'workspace-1',
+    });
+    lexicalHealth = await materialization.health(adminContext);
+    assert(
+      lexicalHealth.staleHeads === 2 && lexicalHealth.pendingJobs === 2,
+      'delete lifecycle did not expose exactly two pending stale roots',
+    );
+    await materialization.run(adminContext, {
+      maxJobs: 100,
+      maxRebuildRoots: 100,
+    });
+    lexicalHealth = await materialization.health(adminContext);
+    assert(
+      lexicalHealth.status === 'healthy' &&
+        lexicalHealth.staleHeads === 0 &&
+        lexicalHealth.pendingJobs === 0 &&
+        lexicalHealth.sourceHighWatermark ===
+          lexicalHealth.activeAppliedWatermark,
+      'delete lifecycle left orphan lexical heads',
+    );
+    const shadowGeneration =
+      await materialization.startShadowRebuild(adminContext);
+    assert(shadowGeneration === 2, 'unexpected shadow generation');
+    await materialization.run(adminContext, {
+      maxJobs: 100,
+      maxRebuildRoots: 100,
+    });
+    const activatedGeneration =
+      await materialization.activateReadyShadow(adminContext);
+    assert(activatedGeneration === 2, 'shadow activation failed');
+    lexicalHealth = await materialization.health(adminContext);
+    assert(
+      lexicalHealth.status === 'healthy' &&
+        lexicalHealth.activeCorpusGeneration === 2 &&
+        lexicalHealth.staleHeads === 0 &&
+        lexicalHealth.sourceHighWatermark ===
+          lexicalHealth.activeAppliedWatermark,
+      'activated lexical generation was not ready',
+    );
     const createSemantic = () =>
       createSemanticSearchAdminV1(database, {
         installationId,
@@ -308,6 +437,20 @@ async function protectedSemanticLifecycle(qdrantEndpoint, collection) {
     await database.close();
     rmSync(directory, { recursive: true, force: true });
   }
+}
+
+async function integrity(value) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = new Uint8Array(
+    await webcrypto.subtle.digest('SHA-256', bytes),
+  );
+  return {
+    algorithm: 'sha256',
+    digest: [...digest]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join(''),
+    byteLength: bytes.byteLength,
+  };
 }
 
 function record(

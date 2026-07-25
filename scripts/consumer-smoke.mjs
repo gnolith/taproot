@@ -254,6 +254,12 @@ writeFileSync(
           adapter: {
             kind: 'taproot-external-owner-transaction-adapter-v1',
             prepare(token) {
+              if (token.operation === 'delete')
+                return Promise.resolve([
+                  searchDb.prepare(
+                    'DELETE FROM packed_owner_records WHERE source_id = ?',
+                  ).bind(token.sourceId),
+                ]);
               return Promise.resolve([
                 searchDb.prepare(
                   \`INSERT INTO packed_owner_records(source_id, revision)
@@ -379,6 +385,53 @@ writeFileSync(
         Number(packedSemantic.results[0]?.configuration_revision) !== 1 ||
         packedSemantic.results[0]?.provider_credential_selector !== 'packed-ollama'
       ) throw new Error('packed semantic configuration was not durable');
+      packedSource.sourceRevision = '3';
+      const deleteParticipant = await packedProducer.issuer.seal({
+        sourceId: packedSource.sourceId,
+        sourceRevision: '3',
+        operation: 'delete',
+        predecessor,
+        ownerMutationToken: {
+          sourceId: packedSource.sourceId,
+          revision: '3',
+          operation: 'delete',
+        },
+      });
+      await packedProducer.commit(deleteParticipant);
+      await materialization.run(adminContext, {
+        maxJobs: 10,
+        maxRebuildRoots: 10,
+      });
+      const deletedHealth = await materialization.health(adminContext);
+      if (
+        deletedHealth.status !== 'healthy' ||
+        deletedHealth.staleHeads !== 0 ||
+        deletedHealth.pendingJobs !== 0 ||
+        deletedHealth.sourceHighWatermark !== 3 ||
+        deletedHealth.activeAppliedWatermark !== 3
+      ) throw new Error('packed delete materialization left a stale head');
+      const deletedPage = await packedSearch.search(
+        { text: 'packed task lexical', kinds: [packedProducer.kind] },
+        { ...adminContext, capabilities: [] },
+      );
+      if (deletedPage.results.length !== 0)
+        throw new Error('packed delete retained a lexical result');
+      if ((await materialization.startShadowRebuild(adminContext)) !== 2)
+        throw new Error('packed shadow rebuild generation was invalid');
+      await materialization.run(adminContext, {
+        maxJobs: 10,
+        maxRebuildRoots: 10,
+      });
+      if ((await materialization.activateReadyShadow(adminContext)) !== 2)
+        throw new Error('packed shadow rebuild activation failed');
+      const rebuiltHealth = await materialization.health(adminContext);
+      if (
+        rebuiltHealth.status !== 'healthy' ||
+        rebuiltHealth.activeCorpusGeneration !== 2 ||
+        rebuiltHealth.staleHeads !== 0 ||
+        rebuiltHealth.sourceHighWatermark !==
+          rebuiltHealth.activeAppliedWatermark
+      ) throw new Error('packed rebuilt corpus was not lexically ready');
 
       const administrationOwner =
         await taproot.registerAuthorizationAdministrationOwnerV1(

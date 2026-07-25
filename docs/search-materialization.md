@@ -37,9 +37,10 @@ failures, and require guarded admin retry. Transition history is immutable and
 stores only token hashes and bounded error codes.
 
 Stages are invisible while built in bounded SQL batches. A verified manifest
-pins document/chunk counts and hashes. Finalization is one atomic root-head
-pointer swap, so replace-all and zero-document deletion never expose a partial
-stage. New source events atomically mark older active and shadow heads
+pins document/chunk counts and hashes. Upsert finalization atomically swaps the
+root-head pointer. Delete finalization atomically records a tombstone for the
+prior stage and removes the head; it never leaves a permanently ineligible
+placeholder. New source events atomically mark older active and shadow heads
 ineligible before projection work begins. Finalize rechecks the exact current
 0005 event, root revision/hash, and authorization revision; unrelated global
 counter advances do not starve the root.
@@ -49,13 +50,14 @@ counter advances do not starve the root.
 A rebuild captures a source-event watermark and creates a shadow corpus.
 Baseline enumeration pages over durable registry keys while all new source
 events fan out to active and shadow corpora. Readiness requires enumeration
-completion, no nonterminal jobs, and an exact registry-to-head anti-join with no
-missing or stale materialized root. Standalone Statement registry rows are
-excluded from that anti-join because their completed jobs are explicitly
-covered by the containing Item root. Activation rechecks the stored readiness
-watermark, job set, anti-join, and expected corpus pointers in the same batch,
-atomically swaps the active corpus, increments cursor generation, and records
-immutable admin audit.
+completion, no nonterminal jobs, and exact operation-aware convergence:
+current upserts have one matching eligible head, current deletes have no head,
+and no orphan or ineligible head remains. Standalone Statement registry rows
+are excluded because their completed jobs are explicitly covered by the
+containing Item root. Activation rechecks the stored readiness watermark, job
+set, convergence, and expected corpus pointers in the same batch, atomically
+swaps the active corpus, increments cursor generation, and records immutable
+admin audit.
 
 Item stages include Item and Statement documents completely; standalone
 Statement source events are coalesced as Item-root-owned rather than

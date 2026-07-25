@@ -95,6 +95,7 @@ export interface RegisteredProducerMutationIssuer {
   seal(input: {
     sourceId: string;
     sourceRevision: string;
+    operation?: 'upsert' | 'delete';
     predecessor: UnifiedSearchSourcePredecessorV1 | null;
     ownerMutationToken: unknown;
   }): Promise<OwnerMutationParticipant>;
@@ -138,6 +139,7 @@ interface RuntimeBinding {
 
 interface ParticipantBinding {
   runtime: RuntimeBinding;
+  operation: 'upsert' | 'delete';
   predecessor: UnifiedSearchSourcePredecessorV1 | null;
   ownerMutationToken: unknown;
   eventId: string;
@@ -193,6 +195,7 @@ export async function registerExternalProducerV1(
     seal: (input: {
       sourceId: string;
       sourceRevision: string;
+      operation?: 'upsert' | 'delete';
       predecessor: UnifiedSearchSourcePredecessorV1 | null;
       ownerMutationToken: unknown;
     }) => sealParticipant(runtime, input),
@@ -440,12 +443,16 @@ async function sealParticipant(
   input: {
     sourceId: string;
     sourceRevision: string;
+    operation?: 'upsert' | 'delete';
     predecessor: UnifiedSearchSourcePredecessorV1 | null;
     ownerMutationToken: unknown;
   },
 ): Promise<OwnerMutationParticipant> {
   const sourceId = token(input.sourceId, 'sourceId', 256);
   const sourceRevision = token(input.sourceRevision, 'sourceRevision', 128);
+  const operation = input.operation ?? 'upsert';
+  if (operation !== 'upsert' && operation !== 'delete')
+    denied('owner mutation operation is invalid');
   const predecessor = normalizePredecessor(input.predecessor);
   const fence = await currentFence(runtime.db, runtime.installationId);
   const generation = fence.generation + 1;
@@ -454,6 +461,7 @@ async function sealParticipant(
     sourceId,
     sourceRevision,
     generation,
+    ...(operation === 'delete' ? { operation } : {}),
   })}`;
   const participant: OwnerMutationParticipant = Object.freeze({
     kind: 'taproot-owner-mutation-participant-v1' as const,
@@ -464,6 +472,7 @@ async function sealParticipant(
   });
   participantBindings.set(participant, {
     runtime,
+    operation,
     predecessor,
     ownerMutationToken: input.ownerMutationToken,
     eventId,
@@ -530,7 +539,7 @@ async function commitParticipant(
         {
           eventId: binding.eventId,
           sourceId: participant.sourceId,
-          operation: 'upsert',
+          operation: binding.operation,
           changeClass: runtime.descriptor.changeClasses[0]!,
           sourceRevision: participant.sourceRevision,
           sourceHash,
