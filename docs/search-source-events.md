@@ -24,7 +24,11 @@ External owners receive a sealed mutation issuer bound to the exact database,
 installation, namespace, owner, registration, and generation. Committing its
 one-shot participant composes the owner's private adapter plan with Taproot's
 generation CAS, immutable event, and current-registry CAS in one batch. No SQL
-or statement array crosses the public boundary.
+or statement array crosses the public boundary. `seal` accepts an optional
+explicit `operation: 'upsert' | 'delete'`; omission preserves upsert
+compatibility. A delete still requires the exact persisted predecessor and
+owner adapter mutation, but materialization never calls `loadExact` or
+`project` for its removed canonical state.
 
 An exact `(installation, kind, source, revision)` replay with the same event
 and payload hash is a no-op; sibling SQL is not repeated. A divergent replay

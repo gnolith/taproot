@@ -13,6 +13,9 @@ The metadata-only persistence boundary is documented in
 source changes. The separately guarded dormant lifecycle in
 [search-materialization.md](search-materialization.md) materializes Taproot
 Item, Statement, Resource, Annotation, and registered external roots.
+Registered external producer mutation issuers accept explicit upsert/delete
+operation metadata; delete owner mutations and their immutable source event
+commit atomically.
 
 `TaprootContentRepositoryV1` owns canonical Resource and Annotation CRUD,
 revision reads, authorization, payload hydration, snapshots, and W3C Web

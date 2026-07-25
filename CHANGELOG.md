@@ -2,6 +2,13 @@
 
 ## 0.5.0
 
+- Remove committed search heads after delete materialization while preserving
+  an immutable prior-stage tombstone. Health, shadow readiness, and activation
+  now enforce symmetric operation-aware registry/head convergence, so a fully
+  applied delete cannot leave permanent stale-head state. External producer
+  mutation issuers accept explicit delete operations, and native SQLite plus
+  real Workerd restart coverage exercises mixed update/delete, rebuild, and
+  activation lifecycles.
 - Generate a deterministic release-candidate bundle containing the exact npm
   package, runtime-only CycloneDX SBOM, checksum-bound source/package
   provenance, and `SHA256SUMS`. Required CI uploads commit-named evidence, and

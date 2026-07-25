@@ -71,6 +71,13 @@ writeFileSync(
   if (predecessor) {
     const eventId: string = predecessor.eventId;
     const sequence: number = predecessor.sequence;
+    await registeredProducer.issuer.seal({
+      sourceId: 'source-1',
+      sourceRevision: 'deleted-2',
+      operation: 'delete',
+      predecessor,
+      ownerMutationToken: { operation: 'delete' },
+    });
     void [eventId, sequence];
   }
   const port = await createTaprootWorkshopPortV1(

@@ -373,16 +373,33 @@ class SearchMaterializationRuntime {
     const stale = await this.#db
       .prepare(
         `SELECT COUNT(*) AS count
-         FROM taproot_search_materialization_heads h
-         JOIN taproot_search_installation_state s
-           ON s.installation_id = ? AND h.corpus_id = s.active_corpus_id
-         LEFT JOIN taproot_unified_search_source_registry r
-           ON r.installation_id = s.installation_id
-          AND r.source_kind = h.root_kind AND r.source_id = h.root_id
-         WHERE h.eligible = 0 OR r.current_event_sequence IS NULL
-            OR r.current_event_sequence != h.source_event_sequence`,
+         FROM (
+           SELECT h.root_kind, h.root_id
+           FROM taproot_search_materialization_heads h
+           JOIN taproot_search_installation_state s
+             ON s.installation_id = ? AND h.corpus_id = s.active_corpus_id
+           LEFT JOIN taproot_unified_search_source_registry r
+             ON r.installation_id = s.installation_id
+            AND r.source_kind = h.root_kind AND r.source_id = h.root_id
+           WHERE h.root_kind != 'statement'
+             AND (h.eligible != 1 OR r.current_event_sequence IS NULL
+               OR r.operation != 'upsert'
+               OR r.current_event_sequence != h.source_event_sequence)
+           UNION
+           SELECT r.source_kind, r.source_id
+           FROM taproot_unified_search_source_registry r
+           JOIN taproot_search_installation_state s
+             ON s.installation_id = r.installation_id
+           LEFT JOIN taproot_search_materialization_heads h
+             ON h.corpus_id = s.active_corpus_id
+            AND h.root_kind = r.source_kind AND h.root_id = r.source_id
+           WHERE r.installation_id = ? AND r.source_kind != 'statement'
+             AND r.operation = 'upsert'
+             AND (h.current_stage_id IS NULL OR h.eligible != 1
+               OR h.source_event_sequence != r.current_event_sequence)
+         )`,
       )
-      .bind(this.#installationId)
+      .bind(this.#installationId, this.#installationId)
       .all<{ count: number }>();
     const generations = await this.#db
       .prepare(
@@ -646,7 +663,9 @@ class SearchMaterializationRuntime {
         source_watermark_sequence: number;
       }>();
     if (corpus.results[0]?.state !== 'ready')
-      throw new InvalidAuthorizationError('search rebuild is not ready');
+      throw new InvalidAuthorizationError(
+        'search rebuild is not ready; continue bounded materialization and retry activation',
+      );
     const watermark = Number(corpus.results[0].source_watermark_sequence);
     const now = this.#now();
     const nextCursor = Number(state.cursor_generation) + 1;
@@ -673,15 +692,29 @@ class SearchMaterializationRuntime {
                SELECT 1 FROM taproot_search_projection_jobs
                WHERE corpus_id = ? AND state != 'complete'
              ) AND NOT EXISTS (
-               SELECT 1
-               FROM taproot_unified_search_source_registry r
-               LEFT JOIN taproot_search_materialization_heads h
-                 ON h.corpus_id = ? AND h.root_kind = r.source_kind
-                AND h.root_id = r.source_id
-               WHERE r.installation_id = ?
-                 AND r.source_kind != 'statement'
-                 AND (h.source_event_sequence IS NULL
-                   OR h.source_event_sequence != r.current_event_sequence)
+               SELECT 1 FROM (
+                 SELECT r.source_kind, r.source_id
+                 FROM taproot_unified_search_source_registry r
+                 LEFT JOIN taproot_search_materialization_heads h
+                   ON h.corpus_id = ? AND h.root_kind = r.source_kind
+                  AND h.root_id = r.source_id
+                 WHERE r.installation_id = ? AND r.source_kind != 'statement'
+                   AND ((r.operation = 'upsert'
+                     AND (h.current_stage_id IS NULL OR h.eligible != 1
+                       OR h.source_event_sequence != r.current_event_sequence))
+                     OR (r.operation = 'delete'
+                       AND h.current_stage_id IS NOT NULL))
+                 UNION
+                 SELECT h.root_kind, h.root_id
+                 FROM taproot_search_materialization_heads h
+                 LEFT JOIN taproot_unified_search_source_registry r
+                   ON r.installation_id = ? AND r.source_kind = h.root_kind
+                  AND r.source_id = h.root_id
+                 WHERE h.corpus_id = ? AND h.root_kind != 'statement'
+                   AND (r.current_event_sequence IS NULL
+                     OR r.operation != 'upsert' OR h.eligible != 1
+                     OR h.source_event_sequence != r.current_event_sequence)
+               )
              ) AND NOT EXISTS (
                SELECT 1 FROM taproot_unified_search_source_events
                WHERE installation_id = ? AND sequence > ?
@@ -698,6 +731,8 @@ class SearchMaterializationRuntime {
           state.shadow_corpus_id,
           state.shadow_corpus_id,
           this.#installationId,
+          this.#installationId,
+          state.shadow_corpus_id,
           this.#installationId,
           watermark,
         ),
@@ -1475,13 +1510,6 @@ class SearchMaterializationRuntime {
     const now = this.#now();
     const eligible =
       claim.job.operation === 'upsert' && plan.documents.length > 0 ? 1 : 0;
-    const prior = await this.#db
-      .prepare(
-        `SELECT current_stage_id FROM taproot_search_materialization_heads
-         WHERE corpus_id = ? AND root_kind = ? AND root_id = ?`,
-      )
-      .bind(claim.job.corpus_id, claim.job.source_kind, claim.job.source_id)
-      .all<{ current_stage_id: string }>();
     const transitionId = `${claim.job.job_id}:complete:${claim.generation}`;
     const statements: SqlitePreparedStatementLike[] = [
       this.#db
@@ -1508,37 +1536,42 @@ class SearchMaterializationRuntime {
           claim.job.search_generation,
         ),
     ];
-    if (prior.results[0]) {
-      statements.push(
-        this.#db
-          .prepare(
-            `INSERT INTO taproot_search_materialization_tombstones(
-               tombstone_id, corpus_id, root_kind, root_id, removed_stage_id,
-               source_event_id, source_event_sequence, reason, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(
-            await stableId('tombstone', {
-              corpusId: claim.job.corpus_id,
-              rootKind: claim.job.source_kind,
-              rootId: claim.job.source_id,
-              eventSequence: claim.job.source_event_sequence,
-            }),
-            claim.job.corpus_id,
-            claim.job.source_kind,
-            claim.job.source_id,
-            prior.results[0].current_stage_id,
-            claim.job.source_event_id,
-            claim.job.source_event_sequence,
-            eligible ? 'replace-all' : 'delete',
-            now,
-          ),
-      );
-    }
     statements.push(
       this.#db
         .prepare(
-          `INSERT INTO taproot_search_materialization_heads(
+          `INSERT INTO taproot_search_materialization_tombstones(
+             tombstone_id, corpus_id, root_kind, root_id, removed_stage_id,
+             source_event_id, source_event_sequence, reason, created_at
+           )
+           SELECT ?, corpus_id, root_kind, root_id, current_stage_id,
+             ?, ?, ?, ?
+           FROM taproot_search_materialization_heads
+           WHERE corpus_id = ? AND root_kind = ? AND root_id = ?
+             AND source_event_sequence < ?
+           ON CONFLICT(tombstone_id) DO NOTHING`,
+        )
+        .bind(
+          await stableId('tombstone', {
+            corpusId: claim.job.corpus_id,
+            rootKind: claim.job.source_kind,
+            rootId: claim.job.source_id,
+            eventSequence: claim.job.source_event_sequence,
+          }),
+          claim.job.source_event_id,
+          claim.job.source_event_sequence,
+          eligible ? 'replace-all' : 'delete',
+          now,
+          claim.job.corpus_id,
+          claim.job.source_kind,
+          claim.job.source_id,
+          claim.job.source_event_sequence,
+        ),
+    );
+    if (eligible === 1) {
+      statements.push(
+        this.#db
+          .prepare(
+            `INSERT INTO taproot_search_materialization_heads(
              corpus_id, root_kind, root_id, current_stage_id,
              source_event_id, source_event_sequence, root_revision,
              root_hash, source_policy_revision, authorization_revision,
@@ -1555,25 +1588,25 @@ class SearchMaterializationRuntime {
              producer_fingerprint = excluded.producer_fingerprint,
              eligible = excluded.eligible, updated_at = excluded.updated_at
            WHERE excluded.source_event_sequence > taproot_search_materialization_heads.source_event_sequence`,
-        )
-        .bind(
-          claim.job.corpus_id,
-          claim.job.source_kind,
-          claim.job.source_id,
-          stageId,
-          claim.job.source_event_id,
-          claim.job.source_event_sequence,
-          claim.job.root_revision,
-          claim.job.root_hash,
-          claim.job.source_policy_revision,
-          claim.job.authorization_revision,
-          claim.job.producer_fingerprint,
-          eligible,
-          now,
-        ),
-      this.#db
-        .prepare(
-          `INSERT INTO taproot_assertions(assertion_key)
+          )
+          .bind(
+            claim.job.corpus_id,
+            claim.job.source_kind,
+            claim.job.source_id,
+            stageId,
+            claim.job.source_event_id,
+            claim.job.source_event_sequence,
+            claim.job.root_revision,
+            claim.job.root_hash,
+            claim.job.source_policy_revision,
+            claim.job.authorization_revision,
+            claim.job.producer_fingerprint,
+            eligible,
+            now,
+          ),
+        this.#db
+          .prepare(
+            `INSERT INTO taproot_assertions(assertion_key)
            SELECT NULL WHERE NOT EXISTS (
              SELECT 1 FROM taproot_search_materialization_heads
              WHERE corpus_id = ? AND root_kind = ? AND root_id = ?
@@ -1583,21 +1616,52 @@ class SearchMaterializationRuntime {
                AND authorization_revision = ? AND producer_fingerprint IS ?
                AND eligible = ?
            )`,
-        )
-        .bind(
-          claim.job.corpus_id,
-          claim.job.source_kind,
-          claim.job.source_id,
-          stageId,
-          claim.job.source_event_id,
-          claim.job.source_event_sequence,
-          claim.job.root_revision,
-          claim.job.root_hash,
-          claim.job.source_policy_revision,
-          claim.job.authorization_revision,
-          claim.job.producer_fingerprint,
-          eligible,
-        ),
+          )
+          .bind(
+            claim.job.corpus_id,
+            claim.job.source_kind,
+            claim.job.source_id,
+            stageId,
+            claim.job.source_event_id,
+            claim.job.source_event_sequence,
+            claim.job.root_revision,
+            claim.job.root_hash,
+            claim.job.source_policy_revision,
+            claim.job.authorization_revision,
+            claim.job.producer_fingerprint,
+            eligible,
+          ),
+      );
+    } else {
+      statements.push(
+        this.#db
+          .prepare(
+            `DELETE FROM taproot_search_materialization_heads
+             WHERE corpus_id = ? AND root_kind = ? AND root_id = ?
+               AND source_event_sequence < ?`,
+          )
+          .bind(
+            claim.job.corpus_id,
+            claim.job.source_kind,
+            claim.job.source_id,
+            claim.job.source_event_sequence,
+          ),
+        this.#db
+          .prepare(
+            `INSERT INTO taproot_assertions(assertion_key)
+             SELECT NULL WHERE EXISTS (
+               SELECT 1 FROM taproot_search_materialization_heads
+               WHERE corpus_id = ? AND root_kind = ? AND root_id = ?
+             )`,
+          )
+          .bind(
+            claim.job.corpus_id,
+            claim.job.source_kind,
+            claim.job.source_id,
+          ),
+      );
+    }
+    statements.push(
       this.#db
         .prepare(
           `UPDATE taproot_search_stages SET state = 'committed', committed_at = ?
@@ -1903,17 +1967,38 @@ class SearchMaterializationRuntime {
              WHERE corpus_id = ?) AS enumeration_complete,
            (SELECT COUNT(*) FROM taproot_search_projection_jobs
              WHERE corpus_id = ? AND state != 'complete') AS jobs,
-           (SELECT COUNT(*)
+           (SELECT COUNT(*) FROM (
+              SELECT r.source_kind, r.source_id
               FROM taproot_unified_search_source_registry r
               LEFT JOIN taproot_search_materialization_heads h
                 ON h.corpus_id = ? AND h.root_kind = r.source_kind
                AND h.root_id = r.source_id
-             WHERE r.installation_id = ?
-               AND r.source_kind != 'statement'
-               AND (h.source_event_sequence IS NULL
-                 OR h.source_event_sequence != r.current_event_sequence)) AS anti_join`,
+              WHERE r.installation_id = ? AND r.source_kind != 'statement'
+                AND ((r.operation = 'upsert'
+                  AND (h.current_stage_id IS NULL OR h.eligible != 1
+                    OR h.source_event_sequence != r.current_event_sequence))
+                  OR (r.operation = 'delete'
+                    AND h.current_stage_id IS NOT NULL))
+              UNION
+              SELECT h.root_kind, h.root_id
+              FROM taproot_search_materialization_heads h
+              LEFT JOIN taproot_unified_search_source_registry r
+                ON r.installation_id = ? AND r.source_kind = h.root_kind
+               AND r.source_id = h.root_id
+              WHERE h.corpus_id = ? AND h.root_kind != 'statement'
+                AND (r.current_event_sequence IS NULL
+                  OR r.operation != 'upsert' OR h.eligible != 1
+                  OR h.source_event_sequence != r.current_event_sequence)
+            )) AS anti_join`,
       )
-      .bind(corpusId, corpusId, corpusId, this.#installationId)
+      .bind(
+        corpusId,
+        corpusId,
+        corpusId,
+        this.#installationId,
+        this.#installationId,
+        corpusId,
+      )
       .all<{ enumeration_complete: number; jobs: number; anti_join: number }>();
     const row = blockers.results[0];
     const ready =
