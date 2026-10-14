@@ -24,7 +24,7 @@ jobs:
           repository: gnolith/diamond
           ref: e82f58ba8028ff9c16a34f4b8a9a2bc356495b64
           path: .diamond-source
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -69,7 +69,7 @@ jobs:
           repository: gnolith/diamond
           ref: e82f58ba8028ff9c16a34f4b8a9a2bc356495b64
           path: .diamond-source
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -91,7 +91,7 @@ jobs:
           repository: gnolith/diamond
           ref: e82f58ba8028ff9c16a34f4b8a9a2bc356495b64
           path: .diamond-source
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - run: npm run materialize:diamond -- --source .diamond-source
@@ -108,7 +108,7 @@ jobs:
           repository: gnolith/diamond
           ref: e82f58ba8028ff9c16a34f4b8a9a2bc356495b64
           path: .diamond-source
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
