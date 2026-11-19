@@ -1,5 +1,7 @@
 # Taproot
 
+> **Retired.** Active use of this repository has ended.
+
 **The portable SQLite/D1 canonical knowledge, content, and hybrid-search layer for Gnolith.**
 
 Taproot gives a D1-backed consumer one authoritative Wikibase-shaped Item/Property
